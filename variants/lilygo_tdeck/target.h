@@ -8,7 +8,11 @@
 #include <helpers/AutoDiscoverRTCClock.h>
 #include <helpers/SensorManager.h>
 #ifdef DISPLAY_CLASS
-  #include <helpers/ui/ST7789LCDDisplay.h>
+  #ifdef RIFT_DISPLAY
+    #include <helpers/ui/ST7789NativeDisplay.h>
+  #else
+    #include <helpers/ui/ST7789LCDDisplay.h>
+  #endif
   #include <helpers/ui/MomentaryButton.h>
 #endif
 #include "helpers/sensors/EnvironmentSensorManager.h"
