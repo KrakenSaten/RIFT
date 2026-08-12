@@ -24,6 +24,90 @@
 
 static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "MESH", "RADAR", "COMMS", "SYSTEM" };
 
+#ifndef RIFT_PUBLIC_CHANNEL_IDX
+  #define RIFT_PUBLIC_CHANNEL_IDX 0
+#endif
+
+#define RIFT_MSG_LOG_SIZE  48
+#define RIFT_CHAR_W         6   // Adafruit GFX classic font cell at setTextSize(1)
+#define RIFT_LINE_H        12   // row pitch used throughout this codebase
+
+// Shared in-memory message log. MeshCore keeps no message history of its own
+// (DataStore holds identity/prefs/contacts/channels only, and MyMesh's offline
+// queue is private raw protocol frames), so the UI owns this - same approach as
+// ui-new, just shared between the popup and the COMMS terminal.
+struct RiftMsgLog {
+  struct Entry {
+    uint32_t timestamp;
+    char origin[62];
+    char msg[78];
+    bool outgoing;
+  };
+
+  Entry entries[RIFT_MSG_LOG_SIZE];
+  int count = 0;
+  int head = RIFT_MSG_LOG_SIZE - 1;   // index of newest entry
+
+  Entry* add(uint32_t timestamp, const char* origin, const char* msg, bool outgoing) {
+    head = (head + 1) % RIFT_MSG_LOG_SIZE;
+    if (count < RIFT_MSG_LOG_SIZE) count++;
+
+    Entry* p = &entries[head];
+    p->timestamp = timestamp;
+    StrHelper::strncpy(p->origin, origin, sizeof(p->origin));
+    StrHelper::strncpy(p->msg, msg, sizeof(p->msg));
+    p->outgoing = outgoing;
+    return p;
+  }
+
+  // 0 = newest, 1 = next older, ...
+  const Entry* peek(int back) const {
+    if (back < 0 || back >= count) return NULL;
+    return &entries[(head - back + RIFT_MSG_LOG_SIZE * 2) % RIFT_MSG_LOG_SIZE];
+  }
+};
+
+static RiftMsgLog msg_log;
+
+// Break text into lines at a pixel width, calling emit() per line (NULL just
+// counts). DisplayDriver::printWordWrap() is only a default that forwards to
+// print(), and ST7789NativeDisplay doesn't override it, so GFX would wrap to
+// x=0 rather than to our left margin - hence doing it ourselves.
+static int wrapText(const char* text, int max_px, int y, DisplayDriver* display, int x) {
+  int max_chars = max_px / RIFT_CHAR_W;
+  if (max_chars < 1) max_chars = 1;
+
+  int lines = 0;
+  int len = strlen(text);
+  int pos = 0;
+
+  while (pos < len) {
+    int take = len - pos;
+    if (take > max_chars) {
+      take = max_chars;
+      // step back to the last space so words stay intact
+      int brk = take;
+      while (brk > 0 && text[pos + brk] != ' ') brk--;
+      if (brk > 0) take = brk;
+    }
+
+    if (display != NULL) {
+      char line[64];
+      int n = take < (int) sizeof(line) - 1 ? take : (int) sizeof(line) - 1;
+      memcpy(line, &text[pos], n);
+      line[n] = 0;
+      display->setCursor(x, y + lines * RIFT_LINE_H);
+      display->print(line);
+    }
+    lines++;
+
+    pos += take;
+    while (pos < len && text[pos] == ' ') pos++;   // swallow the break space
+  }
+
+  return lines == 0 ? 1 : lines;
+}
+
 // Bottom navigation hint row shared by every RIFT nav screen.
 static void renderNavBar(DisplayDriver& display, int curr_idx) {
   int y = display.height() - 12;
@@ -252,33 +336,15 @@ public:
 
 class RiftMsgPreviewScreen : public UIScreen {
   UITask* _task;
-  mesh::RTCClock* _rtc;
-
-  struct MsgEntry {
-    uint32_t timestamp;
-    char origin[62];
-    char msg[78];
-  };
-  #define MAX_UNREAD_MSGS   32
   int num_unread;
-  int head = MAX_UNREAD_MSGS - 1;
-  MsgEntry unread[MAX_UNREAD_MSGS];
+  int _back;    // how far back in the shared log we're previewing
 
 public:
-  RiftMsgPreviewScreen(UITask* task, mesh::RTCClock* rtc) : _task(task), _rtc(rtc) { num_unread = 0; }
+  RiftMsgPreviewScreen(UITask* task) : _task(task) { num_unread = 0; _back = 0; }
 
-  void addPreview(uint8_t path_len, const char* from_name, const char* msg) {
-    head = (head + 1) % MAX_UNREAD_MSGS;
-    if (num_unread < MAX_UNREAD_MSGS) num_unread++;
-
-    auto p = &unread[head];
-    p->timestamp = _rtc->getCurrentTime();
-    if (path_len == 0xFF) {
-      sprintf(p->origin, "(D) %s:", from_name);
-    } else {
-      sprintf(p->origin, "(%d) %s:", (uint32_t) path_len, from_name);
-    }
-    StrHelper::strncpy(p->msg, msg, sizeof(p->msg));
+  void onNewMsg() {
+    if (num_unread < RIFT_MSG_LOG_SIZE) num_unread++;
+    _back = 0;
   }
 
   int render(DisplayDriver& display) override {
@@ -290,7 +356,8 @@ public:
     display.setTextSize(1);
     display.drawTextLeftAlign(4, 22, tmp);
 
-    auto p = &unread[head];
+    auto p = msg_log.peek(_back);
+    if (p == NULL) return 1000;
 
     display.setCursor(4, 40);
     display.setColor(UIColor::secondary_txt);
@@ -298,20 +365,20 @@ public:
     display.translateUTF8ToBlocks(filtered_origin, p->origin, sizeof(filtered_origin));
     display.print(filtered_origin);
 
-    display.setCursor(4, 54);
     display.setColor(UIColor::primary_txt);
     char filtered_msg[sizeof(p->msg)];
     display.translateUTF8ToBlocks(filtered_msg, p->msg, sizeof(filtered_msg));
-    display.printWordWrap(filtered_msg, display.width() - 8);
+    wrapText(filtered_msg, display.width() - 8, 54, &display, 4);
 
     return 1000;
   }
 
   bool handleInput(char c) override {
     if (c == KEY_NEXT || c == KEY_RIGHT) {
-      head = (head + MAX_UNREAD_MSGS - 1) % MAX_UNREAD_MSGS;
+      if (_back + 1 < msg_log.count) _back++;
       num_unread--;
-      if (num_unread == 0) {
+      if (num_unread <= 0) {
+        num_unread = 0;
         _task->gotoHomeScreen();
       }
       return true;
@@ -319,6 +386,138 @@ public:
     if (c == KEY_ENTER) {
       num_unread = 0;
       _task->gotoHomeScreen();
+      return true;
+    }
+    return false;
+  }
+};
+
+// COMMS: MeshCore text terminal - scrollable history plus a compose line that
+// sends to the Public channel. Channel messages are always flooded and carry no
+// ACK, so no delivery state is shown (there is none to report).
+class RiftCommsScreen : public UIScreen {
+  UITask* _task;
+  char _input[MAX_TEXT_LEN + 1];
+  int _len;
+  int _scroll;      // 0 = pinned to newest
+
+  static const int BODY_TOP = 20;
+  static const int BODY_BOTTOM = 194;
+  static const int INPUT_Y = 204;
+
+  bool getPublicChannel(ChannelDetails& ch) {
+    return the_mesh.getChannel(RIFT_PUBLIC_CHANNEL_IDX, ch) && ch.name[0] != 0;
+  }
+
+  void send() {
+    if (_len == 0) return;
+
+    ChannelDetails ch;
+    if (!getPublicChannel(ch)) {
+      _task->showAlert("No channel!", 1200);
+      return;
+    }
+
+    bool ok = the_mesh.sendGroupMessage(the_mesh.getRTCClock()->getCurrentTime(),
+                                        ch.channel, the_mesh.getNodeName(),
+                                        _input, _len);
+    if (ok) {
+      char origin[62];
+      sprintf(origin, "%s:", the_mesh.getNodeName());
+      msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, _input, true);
+      _input[0] = 0;
+      _len = 0;
+      _scroll = 0;
+    } else {
+      _task->showAlert("Send failed", 1200);
+    }
+  }
+
+public:
+  RiftCommsScreen(UITask* task) : _task(task), _len(0), _scroll(0) { _input[0] = 0; }
+
+  bool isComposing() const { return _len > 0; }
+
+  int render(DisplayDriver& display) override {
+    ChannelDetails ch;
+    renderTitleBar(display, _task, getPublicChannel(ch) ? ch.name : "NO CHANNEL");
+
+    display.setTextSize(1);
+
+    // History, newest at the bottom: lay entries out upward from the input line.
+    int avail_px = display.width() - 8;
+    int y = BODY_BOTTOM;
+    for (int back = _scroll; back < msg_log.count; back++) {
+      auto p = msg_log.peek(back);
+      if (p == NULL) break;
+
+      char filtered[sizeof(p->msg)];
+      display.translateUTF8ToBlocks(filtered, p->msg, sizeof(filtered));
+
+      char head_line[80];
+      char filtered_origin[sizeof(p->origin)];
+      display.translateUTF8ToBlocks(filtered_origin, p->origin, sizeof(filtered_origin));
+      int hh = (p->timestamp / 3600) % 24;
+      int mm = (p->timestamp / 60) % 60;
+      sprintf(head_line, "%02d:%02d %s", hh, mm, filtered_origin);
+
+      int body_lines = wrapText(filtered, avail_px, 0, NULL, 0);
+      int block_h = (body_lines + 1) * RIFT_LINE_H;
+
+      y -= block_h;
+      if (y < BODY_TOP) break;   // ran out of room going up
+
+      display.setColor(p->outgoing ? UIColor::secondary_txt : UIColor::title_txt);
+      display.setCursor(4, y);
+      display.print(head_line);
+
+      display.setColor(p->outgoing ? UIColor::secondary_txt : UIColor::primary_txt);
+      wrapText(filtered, avail_px, y + RIFT_LINE_H, &display, 4);
+    }
+
+    // Compose line - show the tail once the text outgrows one line.
+    display.setColor(UIColor::secondary_txt);
+    display.drawRect(0, INPUT_Y - 4, display.width(), 1);
+
+    int max_chars = (display.width() - 16) / RIFT_CHAR_W;
+    const char* shown = _input;
+    if (_len > max_chars) shown = _input + (_len - max_chars);
+
+    display.setColor(UIColor::primary_txt);
+    display.setCursor(4, INPUT_Y);
+    display.print("> ");
+    display.print(shown);
+    display.print("_");
+
+    renderNavBar(display, 2);
+    return 1000;   // keystrokes force a repaint via _next_refresh; avoid flicker
+  }
+
+  bool handleInput(char c) override {
+    if (c == KEY_NEXT) { _task->cycleNavScreen(1); return true; }
+    if (c == KEY_PREV) { _task->cycleNavScreen(-1); return true; }
+    if (c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
+    if (c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
+
+    if (c == KEY_UP) {     // scroll back through history
+      if (_scroll + 1 < msg_log.count) _scroll++;
+      return true;
+    }
+    if (c == KEY_DOWN) {
+      if (_scroll > 0) _scroll--;
+      return true;
+    }
+
+    if (c == KEY_ENTER) { send(); return true; }
+    if (c == KEY_CANCEL) { _input[0] = 0; _len = 0; return true; }
+    if (c == 8) {          // backspace - no KEY_* constant for it
+      if (_len > 0) _input[--_len] = 0;
+      return true;
+    }
+
+    if (c >= 32 && c < 127 && _len < MAX_TEXT_LEN) {
+      _input[_len++] = c;
+      _input[_len] = 0;
       return true;
     }
     return false;
@@ -363,10 +562,10 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _alert_expiry = 0;
 
   splash = new RiftSplashScreen(this);
-  msg_preview = new RiftMsgPreviewScreen(this, &rtc_clock);
+  msg_preview = new RiftMsgPreviewScreen(this);
   nav_screens[0] = new RiftMeshScreen(this, node_prefs);
   nav_screens[1] = new RiftPlaceholderScreen(this, 1, "RF RADAR", "Wi-Fi / BLE / RF scan");
-  nav_screens[2] = new RiftPlaceholderScreen(this, 2, "COMMS", "MeshCore text terminal");
+  nav_screens[2] = new RiftCommsScreen(this);
   nav_screens[3] = new RiftSystemScreen(this);
   nav_idx = 0;
   setCurrScreen(splash);
@@ -419,8 +618,21 @@ void UITask::msgRead(int msgcount) {
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
   _msgcount = msgcount;
 
-  ((RiftMsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text);
-  setCurrScreen(msg_preview);
+  char origin[62];
+  if (path_len == 0xFF) {
+    sprintf(origin, "(D) %s:", from_name);
+  } else {
+    sprintf(origin, "(%d) %s:", (uint32_t) path_len, from_name);
+  }
+  msg_log.add(rtc_clock.getCurrentTime(), origin, text, false);
+  ((RiftMsgPreviewScreen *) msg_preview)->onNewMsg();
+
+  // Don't yank the user out of the COMMS terminal - the message is already
+  // visible in its history there, and stealing focus would drop a half-typed
+  // line. Everywhere else keeps the popup behaviour.
+  if (curr != nav_screens[2]) {
+    setCurrScreen(msg_preview);
+  }
 
   if (_display != NULL) {
     if (!_display->isOn() && !hasConnection()) {
