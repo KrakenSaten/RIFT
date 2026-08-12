@@ -166,6 +166,56 @@ public:
   }
 };
 
+// SYSTEM: live keyboard/trackball diagnostics - proves the Step 2 input
+// drivers work end-to-end. Real settings/diagnostics content lands later.
+class RiftSystemScreen : public UIScreen {
+  UITask* _task;
+  char _last_key;
+
+public:
+  RiftSystemScreen(UITask* task) : _task(task), _last_key(0) { }
+
+  void onKey(char c) { if (c >= 32 && c < 127) _last_key = c; }
+
+  int render(DisplayDriver& display) override {
+    renderTitleBar(display, _task, NAV_LABELS[3]);
+
+    display.setColor(UIColor::primary_txt);
+    display.setTextSize(2);
+    display.drawTextCentered(display.width() / 2, display.height() / 2 - 30, "SYSTEM");
+
+    display.setColor(UIColor::secondary_txt);
+    display.setTextSize(1);
+    char tmp[64];
+    sprintf(tmp, "last key: %c", _last_key ? _last_key : '-');
+    display.drawTextCentered(display.width() / 2, display.height() / 2 - 8, tmp);
+
+#ifdef RIFT_INPUT_KEYBOARD
+    sprintf(tmp, "keyboard: %s", rift_keyboard.isPresent() ? "detected" : "not found");
+    display.drawTextCentered(display.width() / 2, display.height() / 2 + 8, tmp);
+
+    strcpy(tmp, "I2C:");
+    for (uint8_t i = 0; i < rift_keyboard.seenCount(); i++) {
+      char hex[6];
+      sprintf(hex, " %02X", rift_keyboard.seenAddr(i));
+      strcat(tmp, hex);
+    }
+    if (rift_keyboard.seenCount() == 0) strcat(tmp, " (empty)");
+    display.drawTextCentered(display.width() / 2, display.height() / 2 + 20, tmp);
+#endif
+
+    renderNavBar(display, 3);
+    return 300;
+  }
+
+  bool handleInput(char c) override {
+    if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
+    if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
+    if (c >= 32 && c < 127) { onKey(c); return true; }
+    return false;
+  }
+};
+
 // Placeholder nav screen - visual only, real functionality lands in a later milestone.
 class RiftPlaceholderScreen : public UIScreen {
   UITask* _task;
@@ -286,6 +336,12 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #if defined(PIN_USER_BTN_ANA)
   analog_btn.begin();
 #endif
+#ifdef RIFT_INPUT_TRACKBALL
+  rift_trackball.begin();
+#endif
+#ifdef RIFT_INPUT_KEYBOARD
+  rift_keyboard.begin();
+#endif
 
   _node_prefs = node_prefs;
 
@@ -311,7 +367,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   nav_screens[0] = new RiftMeshScreen(this, node_prefs);
   nav_screens[1] = new RiftPlaceholderScreen(this, 1, "RF RADAR", "Wi-Fi / BLE / RF scan");
   nav_screens[2] = new RiftPlaceholderScreen(this, 2, "COMMS", "MeshCore text terminal");
-  nav_screens[3] = new RiftPlaceholderScreen(this, 3, "SYSTEM", "settings & diagnostics");
+  nav_screens[3] = new RiftSystemScreen(this);
   nav_idx = 0;
   setCurrScreen(splash);
 }
@@ -491,6 +547,18 @@ void UITask::loop() {
       c = handleTripleClick(KEY_SELECT);
     }
     _analogue_pin_read_millis = millis();
+  }
+#endif
+#ifdef RIFT_INPUT_TRACKBALL
+  if (c == 0) {
+    char tb = rift_trackball.poll();
+    if (tb != 0) c = checkDisplayOn(tb);
+  }
+#endif
+#ifdef RIFT_INPUT_KEYBOARD
+  if (c == 0) {
+    char key = rift_keyboard.poll();
+    if (key != 0) c = checkDisplayOn(key);
   }
 #endif
 #if defined(BACKLIGHT_BTN)

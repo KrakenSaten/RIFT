@@ -21,6 +21,12 @@ EnvironmentSensorManager sensors(gps);
   DISPLAY_CLASS display;
   MomentaryButton user_btn(PIN_USER_BTN, 1000, true);
 #endif
+#ifdef RIFT_INPUT_KEYBOARD
+  TDeckKeyboard rift_keyboard;
+#endif
+#ifdef RIFT_INPUT_TRACKBALL
+  TDeckTrackball rift_trackball(PIN_TRACKBALL_UP, PIN_TRACKBALL_DOWN, PIN_TRACKBALL_LEFT, PIN_TRACKBALL_RIGHT);
+#endif
 
 bool radio_init() {
   fallback_clock.begin();

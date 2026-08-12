@@ -15,6 +15,12 @@
   #endif
   #include <helpers/ui/MomentaryButton.h>
 #endif
+#ifdef RIFT_INPUT_KEYBOARD
+  #include <helpers/ui/TDeckKeyboard.h>
+#endif
+#ifdef RIFT_INPUT_TRACKBALL
+  #include <helpers/ui/TDeckTrackball.h>
+#endif
 #include "helpers/sensors/EnvironmentSensorManager.h"
 #include "helpers/sensors/MicroNMEALocationProvider.h"
 
@@ -26,6 +32,12 @@ extern EnvironmentSensorManager sensors;
 #ifdef DISPLAY_CLASS
   extern DISPLAY_CLASS display;
   extern MomentaryButton user_btn;
+#endif
+#ifdef RIFT_INPUT_KEYBOARD
+  extern TDeckKeyboard rift_keyboard;
+#endif
+#ifdef RIFT_INPUT_TRACKBALL
+  extern TDeckTrackball rift_trackball;
 #endif
 
 bool radio_init();
