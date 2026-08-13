@@ -62,6 +62,8 @@ char TDeckKeyboard::poll() {
     _failures = 0;
   }
 
+  if (key != 0) _last_seen = (uint8_t) key;   // record before any filtering
+
   // stock firmware reports 0x00 when idle; anything >127 is bogus
   if ((uint8_t) key > 127) key = 0;
 

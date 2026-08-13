@@ -7,6 +7,11 @@
 #include <Adafruit_ST7789.h>
 #include <helpers/RefCountedDigitalPin.h>
 
+// Placeholders for the two characters the font cannot represent. Control-range
+// values, so they can never collide with translated text.
+#define RIFT_GLYPH_OSLASH     0x01   // o with stroke
+#define RIFT_GLYPH_OSLASH_UC  0x02   // O with stroke
+
 // Native 320x240 driver for the T-Deck's ST7789 LCD (RIFT UI).
 // Unlike ST7789LCDDisplay, this reports the true panel resolution instead of
 // a scaled-up 128x64 OLED canvas, so RIFT screens draw at native coordinates.
@@ -15,6 +20,12 @@ class ST7789NativeDisplay : public DisplayDriver {
   Adafruit_ST7789 display;
   bool _isOn;
   uint16_t _color;
+  int _textsize;
+
+  // o/O with a stroke, drawn rather than looked up: CP437 (and so the Adafruit
+  // classic font) has no slashed O at all, and the nearest glyph in the font is
+  // a phi, which has ascenders and descenders that read badly as a letter.
+  void drawSlashedO(bool upper);
   RefCountedDigitalPin* _peripher_power;
 
 public:
@@ -24,6 +35,7 @@ public:
       _peripher_power(peripher_power)
   {
     _isOn = false;
+    _textsize = 1;
   }
 
   bool begin();

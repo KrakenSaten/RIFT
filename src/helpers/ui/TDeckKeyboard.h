@@ -45,11 +45,12 @@ class TDeckKeyboard {
   uint8_t _seen[8];      // I2C addresses that responded at begin(), for diagnostics
   uint8_t _seen_count;
   char _last_raw;        // previous raw read, for edge detection
+  uint8_t _last_seen;    // last non-zero byte from the co-processor, incl. discarded ones
 
   uint8_t scanBus();
 
 public:
-  TDeckKeyboard() : _present(false), _failures(0), _next_poll(0), _seen_count(0), _last_raw(0) { }
+  TDeckKeyboard() : _present(false), _failures(0), _next_poll(0), _seen_count(0), _last_raw(0), _last_seen(0) { }
 
   void begin();
 
@@ -59,6 +60,10 @@ public:
   // real bus layout can be read off the device itself
   uint8_t seenCount() const { return _seen_count; }
   uint8_t seenAddr(uint8_t i) const { return _seen[i]; }
+
+  // last byte the keyboard produced, whether or not we acted on it - lets key
+  // codes be discovered from the device instead of assumed
+  uint8_t lastSeen() const { return _last_seen; }
 
   // returns the ASCII key value, or 0 if no key is available
   char poll();

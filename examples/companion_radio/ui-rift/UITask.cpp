@@ -169,6 +169,46 @@ static int wrapText(const char* text, int max_px, int y, DisplayDriver* display,
 static const int8_t RF_DIR_X[16] = { 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92, -100, -92, -71, -38 };
 static const int8_t RF_DIR_Y[16] = { -100, -92, -71, -38, 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92 };
 
+// UTF-8 to what the display can actually draw.
+//
+// DisplayDriver::translateUTF8ToBlocks() replaces every non-ASCII byte with a
+// solid block, so Nordic text arriving from other MeshCore clients rendered as
+// gibberish. The Adafruit classic font is CP437, which does carry most of the
+// letters we need - and the two it lacks are synthesized by the display driver.
+static void riftTranslateUTF8(char* dest, const char* src, size_t dest_size) {
+  size_t j = 0;
+  for (size_t i = 0; src[i] != 0 && j < dest_size - 1; i++) {
+    unsigned char c = (unsigned char) src[i];
+
+    if (c >= 32 && c <= 126) { dest[j++] = c; continue; }   // ASCII
+
+    // every character we care about is a two-byte sequence starting 0xC3
+    if (c == 0xC3 && src[i + 1] != 0) {
+      unsigned char n = (unsigned char) src[i + 1];
+      char out = 0;
+      switch (n) {
+        case 0xA6: out = (char) 0x91; break;   // ae
+        case 0x86: out = (char) 0x92; break;   // AE
+        case 0xA5: out = (char) 0x86; break;   // a-ring
+        case 0x85: out = (char) 0x8F; break;   // A-ring
+        case 0xA4: out = (char) 0x84; break;   // a-umlaut
+        case 0x84: out = (char) 0x8E; break;   // A-umlaut
+        case 0xB6: out = (char) 0x94; break;   // o-umlaut
+        case 0x96: out = (char) 0x99; break;   // O-umlaut
+        case 0xB8: out = (char) RIFT_GLYPH_OSLASH; break;      // o-slash: drawn
+        case 0x98: out = (char) RIFT_GLYPH_OSLASH_UC; break;   // O-slash: drawn
+      }
+      if (out != 0) { dest[j++] = out; i++; continue; }
+    }
+
+    if (c >= 0x80) {   // anything else non-ASCII: block, as before
+      dest[j++] = 'Û';
+      while (src[i + 1] && (src[i + 1] & 0xC0) == 0x80) i++;
+    }
+  }
+  dest[j] = 0;
+}
+
 // Single-line text editor for the settings fields. Deliberately not shared with
 // the COMMS compose line: that one works, is tested, and has its own 160-char
 // capacity and tail-scrolling - refactoring it here would risk a regression for
@@ -588,7 +628,8 @@ public:
     display.drawRect(0, y - 6, display.width(), 1);
 
 #ifdef RIFT_INPUT_KEYBOARD
-    sprintf(tmp, "keyboard: %s", rift_keyboard.isPresent() ? "detected" : "not found");
+    sprintf(tmp, "keyboard: %s   last code: %02X",
+            rift_keyboard.isPresent() ? "ok" : "not found", rift_keyboard.lastSeen());
     display.drawTextLeftAlign(4, y, tmp);
     y += RIFT_LINE_H;
 
@@ -837,7 +878,7 @@ public:
     if (_count > 0) {
       AdvertPath* p = &_paths[_sel];
       char filtered[sizeof(p->name)];
-      display.translateUTF8ToBlocks(filtered, p->name, sizeof(filtered));
+      riftTranslateUTF8(filtered, p->name, sizeof(filtered));
 
       display.setColor(UIColor::title_txt);
       display.drawTextEllipsized(4, y, 180, filtered);
@@ -1366,7 +1407,7 @@ public:
     int type_x = display.width() - 108;
     for (int i = _scroll; i < n && y < LIST_BOTTOM; i++, y += RIFT_LINE_H) {
       char filtered[sizeof(snap[i].name)];
-      display.translateUTF8ToBlocks(filtered, snap[i].name, sizeof(filtered));
+      riftTranslateUTF8(filtered, snap[i].name, sizeof(filtered));
 
       display.setColor(snap[i].is_wifi ? UIColor::corp_blue : UIColor::primary_txt);
       display.drawTextEllipsized(4, y, type_x - 8, filtered);
@@ -1443,12 +1484,12 @@ public:
     display.setCursor(4, 40);
     display.setColor(UIColor::secondary_txt);
     char filtered_origin[sizeof(p->origin)];
-    display.translateUTF8ToBlocks(filtered_origin, p->origin, sizeof(filtered_origin));
+    riftTranslateUTF8(filtered_origin, p->origin, sizeof(filtered_origin));
     display.print(filtered_origin);
 
     display.setColor(UIColor::primary_txt);
     char filtered_msg[sizeof(p->msg)];
-    display.translateUTF8ToBlocks(filtered_msg, p->msg, sizeof(filtered_msg));
+    riftTranslateUTF8(filtered_msg, p->msg, sizeof(filtered_msg));
     wrapText(filtered_msg, display.width() - 8, 54, &display, 4);
 
     return 1000;
@@ -1646,7 +1687,7 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
       bool sel = (_pick_idx == i);
       display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
       char filtered[32];
-      display.translateUTF8ToBlocks(filtered, _picks[i].name, sizeof(filtered));
+      riftTranslateUTF8(filtered, _picks[i].name, sizeof(filtered));
       display.setCursor(4, y);
       display.print(sel ? "> " : "  ");
       display.print(filtered);
@@ -1761,11 +1802,11 @@ public:
       if (p == NULL) break;
 
       char filtered[sizeof(p->msg)];
-      display.translateUTF8ToBlocks(filtered, p->msg, sizeof(filtered));
+      riftTranslateUTF8(filtered, p->msg, sizeof(filtered));
 
       char head_line[96];
       char filtered_origin[sizeof(p->origin)];
-      display.translateUTF8ToBlocks(filtered_origin, p->origin, sizeof(filtered_origin));
+      riftTranslateUTF8(filtered_origin, p->origin, sizeof(filtered_origin));
       int hh = (p->timestamp / 3600) % 24;
       int mm = (p->timestamp / 60) % 60;
 

@@ -82,7 +82,22 @@ void ST7789NativeDisplay::startFrame(ColorVal bkg) {
 }
 
 void ST7789NativeDisplay::setTextSize(int sz) {
+  _textsize = sz < 1 ? 1 : sz;
   display.setTextSize(sz);
+}
+
+// RIFT_GLYPH_OSLASH / _UC are placeholders inserted by the UTF-8 translation
+// for characters the font cannot represent; see riftTranslateUTF8().
+void ST7789NativeDisplay::drawSlashedO(bool upper) {
+  int16_t x = display.getCursorX();
+  int16_t y = display.getCursorY();
+  int sz = _textsize;
+
+  display.write(upper ? 'O' : 'o');   // advances the cursor for us
+
+  // stroke across the bowl: uppercase fills the cell, lowercase sits lower
+  int top = upper ? 0 : 2 * sz;
+  display.drawLine(x, y + 7 * sz - 1, x + 5 * sz - 1, y + top, _color);
 }
 
 void ST7789NativeDisplay::setColor(ColorVal c) {
@@ -94,7 +109,16 @@ void ST7789NativeDisplay::setCursor(int x, int y) {
 }
 
 void ST7789NativeDisplay::print(const char* str) {
-  display.print(str);
+  // Written byte at a time so the two synthesized glyphs can be intercepted.
+  // Everything else goes through the normal CP437 path.
+  for (const char* p = str; *p; p++) {
+    unsigned char c = (unsigned char) *p;
+    if (c == RIFT_GLYPH_OSLASH || c == RIFT_GLYPH_OSLASH_UC) {
+      drawSlashedO(c == RIFT_GLYPH_OSLASH_UC);
+    } else {
+      display.write(c);
+    }
+  }
 }
 
 void ST7789NativeDisplay::fillRect(int x, int y, int w, int h) {
