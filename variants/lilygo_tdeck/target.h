@@ -21,6 +21,9 @@
 #ifdef RIFT_INPUT_TRACKBALL
   #include <helpers/ui/TDeckTrackball.h>
 #endif
+#ifdef RIFT_INPUT_TOUCH
+  #include <helpers/ui/TDeckTouch.h>
+#endif
 #include "helpers/sensors/EnvironmentSensorManager.h"
 #include "helpers/sensors/MicroNMEALocationProvider.h"
 
@@ -38,6 +41,9 @@ extern EnvironmentSensorManager sensors;
 #endif
 #ifdef RIFT_INPUT_TRACKBALL
   extern TDeckTrackball rift_trackball;
+#endif
+#ifdef RIFT_INPUT_TOUCH
+  extern TDeckTouch rift_touch;
 #endif
 
 bool radio_init();

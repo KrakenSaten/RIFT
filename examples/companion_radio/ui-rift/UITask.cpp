@@ -630,9 +630,32 @@ public:
     }
     sprintf(tmp, "last reset: %s", rr);
     display.drawTextLeftAlign(4, y, tmp);
+    y += RIFT_LINE_H;
+
+#ifdef RIFT_INPUT_TOUCH
+    // shown while confirming the raw->display axis mapping is right
+    if (rift_touch.isPresent()) {
+      sprintf(tmp, "touch: %d,%d", _task->lastTouchX(), _task->lastTouchY());
+    } else {
+      strcpy(tmp, "touch: not found");
+    }
+    display.drawTextLeftAlign(4, y, tmp);
+#endif
 
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
+  }
+
+  // menu rows start at y=46 with RIFT_LINE_H pitch (see render)
+  bool handleTouch(int x, int y) override {
+    if (_mode != MENU) return false;
+    int row = (y - 46) / RIFT_LINE_H;
+    if (row >= 0 && row < IT_COUNT) {
+      _sel = row;
+      activate();
+      return true;
+    }
+    return false;
   }
 
   bool handleInput(char c) override {
@@ -715,6 +738,8 @@ const char* RiftSystemScreen::ITEM_LABELS[RiftSystemScreen::IT_COUNT] = {
 class RiftConstellationScreen : public UIScreen {
   UITask* _task;
   AdvertPath _paths[RIFT_CONST_MAX];
+  int _plot_x[RIFT_CONST_MAX];   // where each node was drawn, for tap hit-testing
+  int _plot_y[RIFT_CONST_MAX];
   int _count;
   int _sel;
   unsigned long _next_refresh;
@@ -779,6 +804,8 @@ public:
 
       int x = cx + (rad * RF_DIR_X[d]) / 100;
       int y = cy + (rad * RF_DIR_Y[d]) / 100;
+      _plot_x[i] = x;
+      _plot_y[i] = y;
 
       // recency: solid if heard in the last few minutes, dim if stale
       uint32_t age = (now > p->recv_timestamp) ? (now - p->recv_timestamp) : 0;
@@ -835,6 +862,19 @@ public:
 
     renderNavBar(display, RIFT_NAV_NODES);
     return 2000;
+  }
+
+  // tapping a node in the plot area selects the nearest one
+  bool handleTouch(int x, int y) override {
+    if (_count == 0 || y > 170) return false;
+    int best = -1, best_d = 0;
+    for (int i = 0; i < _count; i++) {
+      int dx = x - _plot_x[i], dy = y - _plot_y[i];
+      int d = dx * dx + dy * dy;
+      if (best < 0 || d < best_d) { best = i; best_d = d; }
+    }
+    if (best >= 0 && best_d < 40 * 40) { _sel = best; return true; }
+    return false;
   }
 
   bool handleInput(char c) override {
@@ -1830,6 +1870,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #ifdef RIFT_INPUT_KEYBOARD
   rift_keyboard.begin();
 #endif
+#ifdef RIFT_INPUT_TOUCH
+  rift_touch.begin();
+#endif
 
   _node_prefs = node_prefs;
 
@@ -2087,6 +2130,31 @@ void UITask::loop() {
   if (c == 0) {
     char key = rift_keyboard.poll();
     if (key != 0) c = checkDisplayOn(key);
+  }
+#endif
+#ifdef RIFT_INPUT_TOUCH
+  {
+    int tx, ty;
+    if (rift_touch.poll(tx, ty)) {
+      _touch_x = tx;   // kept for the SYSTEM readout while calibrating
+      _touch_y = ty;
+
+      if (_display != NULL && !_display->isOn()) {
+        checkDisplayOn(0);          // first tap just wakes the screen
+      } else if (ty >= _display->height() - 16) {
+        // nav bar: jump straight to the tapped screen
+        int col = (tx * RIFT_NAV_COUNT) / _display->width();
+        if (col >= 0 && col < RIFT_NAV_COUNT) {
+          nav_idx = col;
+          setCurrScreen(nav_screens[nav_idx]);
+        }
+        _auto_off = millis() + AUTO_OFF_MILLIS;
+      } else if (curr) {
+        curr->handleTouch(tx, ty);
+        _auto_off = millis() + AUTO_OFF_MILLIS;
+        _next_refresh = 100;
+      }
+    }
   }
 #endif
 #if defined(BACKLIGHT_BTN)

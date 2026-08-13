@@ -57,6 +57,14 @@ class UITask : public AbstractUITask {
   unsigned long _analogue_pin_read_millis = millis();
 #endif
 
+#ifdef RIFT_INPUT_TOUCH
+  int _touch_x = -1, _touch_y = -1;   // last tap, shown on SYSTEM while calibrating
+public:
+  int lastTouchX() const { return _touch_x; }
+  int lastTouchY() const { return _touch_y; }
+private:
+#endif
+
   UIScreen* splash;
   UIScreen* msg_preview;
   UIScreen* nav_screens[RIFT_NAV_COUNT];   // indexed by RIFT_NAV_*

@@ -27,6 +27,9 @@ EnvironmentSensorManager sensors(gps);
 #ifdef RIFT_INPUT_TRACKBALL
   TDeckTrackball rift_trackball(PIN_TRACKBALL_UP, PIN_TRACKBALL_DOWN, PIN_TRACKBALL_LEFT, PIN_TRACKBALL_RIGHT);
 #endif
+#ifdef RIFT_INPUT_TOUCH
+  TDeckTouch rift_touch;
+#endif
 
 bool radio_init() {
   fallback_clock.begin();

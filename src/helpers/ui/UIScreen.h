@@ -20,6 +20,9 @@ protected:
 public:
   virtual int render(DisplayDriver& display) =0;   // return value is number of millis until next render
   virtual bool handleInput(char c) { return false; }
+  // A completed tap at display coordinates. Intentionally not pure: screens and
+  // UIs without touch hardware need no implementation.
+  virtual bool handleTouch(int x, int y) { return false; }
   virtual void poll() { }
 };
 
