@@ -1584,9 +1584,81 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
   PickEntry _picks[RIFT_PICKER_MAX];
   int _pick_count;
 
-  static const int BODY_TOP = 20;
+  static const int BODY_TOP = 20;      // picker list starts here
+  static const int TABS_Y = 22;        // channel strip on the terminal view
+  static const int HIST_TOP = 38;      // history starts below the strip
   static const int BODY_BOTTOM = 194;
   static const int INPUT_Y = 204;
+  static const int TAB_VISIBLE = 4;    // channel tabs shown at once
+
+  // Configured channels, cached for the strip. Rebuilt on a timer rather than
+  // every frame: render runs on the same SPI bus as the LoRa radio.
+  struct ChanTab { char name[20]; uint8_t idx; };
+  ChanTab _tabs[12];
+  int _tab_count;
+  int _tab_scroll;
+  int _tab_w;                 // recorded at render, so taps hit the same columns
+  unsigned long _tabs_refresh;
+
+  void refreshTabs() {
+    _tab_count = 0;
+    for (int i = 0; i < MAX_GROUP_CHANNELS && _tab_count < (int) (sizeof(_tabs) / sizeof(_tabs[0])); i++) {
+      ChannelDetails ch;
+      if (!the_mesh.getChannel(i, ch) || ch.name[0] == 0) continue;
+      ChanTab* t = &_tabs[_tab_count++];
+      StrHelper::strncpy(t->name, ch.name, sizeof(t->name));
+      t->idx = (uint8_t) i;
+    }
+    // keep the active channel in view
+    int active = -1;
+    for (int i = 0; i < _tab_count; i++) {
+      if (_target_is_channel && _tabs[i].idx == _target_channel_idx) { active = i; break; }
+    }
+    if (active >= 0) {
+      if (active < _tab_scroll) _tab_scroll = active;
+      if (active >= _tab_scroll + TAB_VISIBLE) _tab_scroll = active - TAB_VISIBLE + 1;
+    }
+    if (_tab_scroll > _tab_count - TAB_VISIBLE) _tab_scroll = _tab_count - TAB_VISIBLE;
+    if (_tab_scroll < 0) _tab_scroll = 0;
+  }
+
+  int tabWidth(DisplayDriver& display) const { return display.width() / TAB_VISIBLE; }
+
+  void renderTabs(DisplayDriver& display) {
+    if (millis() >= _tabs_refresh) {
+      refreshTabs();
+      _tabs_refresh = millis() + 2000;
+    }
+
+    int tw = _tab_w = tabWidth(display);
+    display.setTextSize(1);
+
+    for (int i = _tab_scroll; i < _tab_count && i < _tab_scroll + TAB_VISIBLE; i++) {
+      int col = i - _tab_scroll;
+      int x = col * tw;
+      bool active = _target_is_channel && _tabs[i].idx == _target_channel_idx;
+
+      if (active) {   // filled so the current channel is unmistakable
+        display.setColor(UIColor::title_bkg);
+        display.fillRect(x, TABS_Y - 2, tw - 2, 13);
+      }
+      display.setColor(active ? UIColor::title_txt : UIColor::secondary_txt);
+
+      char filtered[sizeof(_tabs[i].name)];
+      riftTranslateUTF8(filtered, _tabs[i].name, sizeof(filtered));
+      display.drawTextEllipsized(x + 3, TABS_Y, tw - 8, filtered);
+    }
+
+    // a contact target is not in the strip, so say so rather than showing no
+    // selection at all
+    if (!_target_is_channel) {
+      display.setColor(UIColor::warning_txt);
+      display.drawTextRightAlign(display.width() - 2, TABS_Y, "DM");
+    }
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawRect(0, TABS_Y + 13, display.width(), 1);
+  }
 
   bool getTargetChannel(ChannelDetails& ch) {
     return the_mesh.getChannel(_target_channel_idx, ch) && ch.name[0] != 0;
@@ -1799,6 +1871,7 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
 public:
   RiftCommsScreen(UITask* task)
      : _task(task), _len(0), _scroll(0),
+       _tab_count(0), _tab_scroll(0), _tab_w(0), _tabs_refresh(0),
        _target_is_channel(true), _target_channel_idx(RIFT_PUBLIC_CHANNEL_IDX),
        _picking(false), _pick_idx(0), _pick_scroll(0), _pick_count(0) {
     _input[0] = 0;
@@ -1823,6 +1896,8 @@ public:
     } else {
       renderTitleBar(display, _task, _target_name);
     }
+
+    renderTabs(display);
 
     display.setTextSize(1);
 
@@ -1854,7 +1929,7 @@ public:
       int block_h = (body_lines + 1) * RIFT_LINE_H;
 
       y -= block_h;
-      if (y < BODY_TOP) break;   // ran out of room going up
+      if (y < HIST_TOP) break;   // ran out of room going up
 
       display.setColor(p->outgoing ? UIColor::secondary_txt : UIColor::title_txt);
       display.setCursor(4, y);
@@ -1884,6 +1959,22 @@ public:
 
     renderNavBar(display, RIFT_NAV_COMMS);
     return 1000;   // keystrokes force a repaint via _next_refresh; avoid flicker
+  }
+
+  // tapping the channel strip switches target; contacts still go via the picker,
+  // since there can be many of them and they don't fit a strip
+  bool handleTouch(int x, int y) override {
+    if (_picking) return false;
+    if (y < TABS_Y - 2 || y > TABS_Y + 13) return false;
+
+    if (_tab_w <= 0) return false;   // strip hasn't been drawn yet
+    int i = _tab_scroll + (x / _tab_w);
+    if (i < 0 || i >= _tab_count) return false;
+
+    _target_is_channel = true;
+    _target_channel_idx = _tabs[i].idx;
+    StrHelper::strncpy(_target_name, _tabs[i].name, sizeof(_target_name));
+    return true;
   }
 
   bool handleInput(char c) override {

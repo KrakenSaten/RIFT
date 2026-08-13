@@ -93,7 +93,7 @@ left/right**, **double-click** (previous screen), or **tapping a nav-bar tab**.
 | **MESH** | Dashboard: connection state, battery, node count, link RSSI/SNR, radio config, radar ping animation | — |
 | **NODES** | Mesh topology — nodes placed by real hop distance, branched by the repeater they arrived through | trackball up/down selects a node, or tap one |
 | **RADAR** | Passive Wi-Fi + BLE scatter and strongest-signal list | **Enter** toggles waterfall view; up/down scrolls the list |
-| **COMMS** | MeshCore text terminal — message history plus a compose line | **Enter** sends, or opens the target picker when the line is empty; **backspace** deletes; up/down scrolls history |
+| **COMMS** | MeshCore text terminal — a channel strip, message history, and a compose line | **tap a channel** in the strip to switch to it; **Enter** sends, or opens the target picker when the line is empty; **backspace** deletes; up/down scrolls history |
 | **SYSTEM** | Action menu plus diagnostics: node name, keyboard status and last key code, I²C bus, free heap, external-power state, last reset reason, touch coordinates | up/down or tap selects; **Enter** activates. Actions: send advert, edit node name, add channel |
 
 **Long-press the trackball within 8 seconds of boot** to enter MeshCore's CLI
@@ -107,10 +107,13 @@ packet. So **send an advert from SYSTEM first**, and confirm the T-Deck appears
 in the other node's contact list. Public-channel messages work without this,
 because channels use a shared key.
 
-In COMMS, press Enter on an empty line to pick a target. The list holds every
-configured group channel (marked `channel`) followed by contacts, most recently
-heard first (marked `direct`). Repeaters and sensors are filtered out — nobody
-is reading them.
+Configured channels appear as a strip across the top of COMMS — tap one to switch
+to it, with the active channel filled. Contacts are not in the strip (there can
+be many); press Enter on an empty line for the full picker, which lists every
+channel (marked `channel`) followed by contacts, most recently heard first
+(marked `direct`). Repeaters and sensors are filtered out — nobody is reading
+them. When a contact is the target, the strip shows `DM` rather than a
+misleading channel selection.
 
 Direct messages show delivery state (`...` → `ACK 1.2s`, or `no ack` on
 timeout). Channel messages show none: they are always flooded and carry no
