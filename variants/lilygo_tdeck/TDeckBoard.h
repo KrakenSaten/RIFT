@@ -38,6 +38,21 @@ public:
     #endif
   }
 
+  // The base class returns false, and the ESP32-S3 has no simple VBUS-detect
+  // register like the nRF52 does (see NRF52Board::isExternalPowered). The USB
+  // CDC connection state is the closest signal available: it goes true once a
+  // USB host enumerates the device.
+  //
+  // Caveat: a dumb charger with no data lines will not be detected, so the
+  // display can still time out while charging from one of those.
+  bool isExternalPowered() override {
+  #if ARDUINO_USB_CDC_ON_BOOT
+    return (bool) Serial;
+  #else
+    return false;
+  #endif
+  }
+
   const char* getManufacturerName() const{
     return "LilyGo T-Deck";
   }

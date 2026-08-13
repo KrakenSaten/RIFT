@@ -53,6 +53,11 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "MESH", "NODES", "RADAR", "COM
   #define RIFT_PUBLIC_CHANNEL_IDX 0
 #endif
 
+// The T-Deck keyboard has no ESC or dedicated back key, so backspace doubles as
+// "one level back" wherever there is no text to delete. UIScreen.h has no
+// constant for it - the raw byte is what the co-processor sends.
+#define RIFT_KEY_BACK       8
+
 #define RIFT_MSG_LOG_SIZE  48
 #define RIFT_CHAR_W         6   // Adafruit GFX classic font cell at setTextSize(1)
 #define RIFT_LINE_H        12   // row pitch used throughout this codebase
@@ -163,6 +168,49 @@ static int wrapText(const char* text, int max_px, int y, DisplayDriver* display,
 // RADAR scatter and the CONSTELLATION topology view
 static const int8_t RF_DIR_X[16] = { 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92, -100, -92, -71, -38 };
 static const int8_t RF_DIR_Y[16] = { -100, -92, -71, -38, 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92 };
+
+// Single-line text editor for the settings fields. Deliberately not shared with
+// the COMMS compose line: that one works, is tested, and has its own 160-char
+// capacity and tail-scrolling - refactoring it here would risk a regression for
+// no user-visible gain.
+struct RiftTextInput {
+  char buf[68];       // fits a 44-char base64 PSK and a 32-char name
+  int len;
+  int cap;
+
+  void begin(const char* initial, int capacity) {
+    cap = (capacity < (int) sizeof(buf) - 1) ? capacity : (int) sizeof(buf) - 1;
+    StrHelper::strncpy(buf, initial ? initial : "", sizeof(buf));
+    len = strlen(buf);
+    if (len > cap) { len = cap; buf[len] = 0; }
+  }
+
+  // returns true if the key was consumed as text editing
+  bool handleKey(char c) {
+    if (c == RIFT_KEY_BACK) {
+      if (len > 0) { buf[--len] = 0; return true; }
+      return false;   // nothing to delete - let the caller treat it as "back"
+    }
+    if (c >= 32 && c < 127 && len < cap) {
+      buf[len++] = c;
+      buf[len] = 0;
+      return true;
+    }
+    return false;
+  }
+
+  void render(DisplayDriver& display, int x, int y, int max_px) {
+    int max_chars = (max_px - 2 * RIFT_CHAR_W) / RIFT_CHAR_W;
+    const char* shown = buf;
+    if (len > max_chars && max_chars > 0) shown = buf + (len - max_chars);
+
+    display.setColor(UIColor::primary_txt);
+    display.setCursor(x, y);
+    display.print("> ");
+    display.print(shown);
+    display.print("_");
+  }
+};
 
 // Bottom navigation hint row shared by every RIFT nav screen.
 static void renderNavBar(DisplayDriver& display, int curr_idx) {
@@ -310,29 +358,104 @@ public:
 // drivers work end-to-end. Real settings/diagnostics content lands later.
 class RiftSystemScreen : public UIScreen {
   UITask* _task;
-  char _last_key;
 
-public:
-  RiftSystemScreen(UITask* task) : _task(task), _last_key(0) { }
+  // A small action menu rather than hidden letter shortcuts - discoverable, and
+  // it leaves the printable keys free for the text fields.
+  enum Mode { MENU, EDIT_NAME };
+  enum Item { IT_ADVERT, IT_NAME, IT_COUNT };
+  static const char* ITEM_LABELS[IT_COUNT];
 
-  void onKey(char c) { if (c >= 32 && c < 127) _last_key = c; }
+  Mode _mode;
+  int _sel;
+  RiftTextInput _edit;
 
-  int render(DisplayDriver& display) override {
-    renderTitleBar(display, _task, NAV_LABELS[RIFT_NAV_SYSTEM]);
+  void activate() {
+    switch (_sel) {
+      case IT_ADVERT:
+        // Other nodes cannot decrypt a direct message from a node they have
+        // never heard an advert from - they look the sender up in their
+        // contacts and silently drop it - so this is a prerequisite for
+        // two-way DMs, not a nicety.
+        _task->notify(UIEventType::ack);
+        _task->showAlert(the_mesh.advert() ? "Advert sent!" : "Advert failed", 1200);
+        break;
 
-    display.setColor(UIColor::primary_txt);
-    display.setTextSize(2);
-    display.drawTextCentered(display.width() / 2, display.height() / 2 - 30, "SYSTEM");
+      case IT_NAME:
+        _edit.begin(the_mesh.getNodeName(), sizeof(((NodePrefs*)0)->node_name) - 1);
+        _mode = EDIT_NAME;
+        break;
+    }
+  }
+
+  void commitName() {
+    if (_edit.len == 0) {
+      _task->showAlert("Name can't be empty", 1200);
+      return;
+    }
+    NodePrefs* prefs = the_mesh.getNodePrefs();
+    StrHelper::strncpy(prefs->node_name, _edit.buf, sizeof(prefs->node_name));
+    the_mesh.savePrefs();
+    _mode = MENU;
+    // the new name is what outgoing channel messages are signed with, and what
+    // other nodes will show once they hear the next advert
+    _task->showAlert("Name saved - send advert", 1500);
+  }
+
+  int renderEditName(DisplayDriver& display) {
+    renderTitleBar(display, _task, "NODE NAME");
+    display.setTextSize(1);
 
     display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 30, "This is the name other nodes see,");
+    display.drawTextLeftAlign(4, 42, "and the sender name on channel messages.");
+
+    _edit.render(display, 4, 74, display.width() - 8);
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 104, "ENTER save   BACKSPACE delete / back");
+
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
+public:
+  RiftSystemScreen(UITask* task) : _task(task), _mode(MENU), _sel(0) { }
+
+  int render(DisplayDriver& display) override {
+    if (_mode == EDIT_NAME) return renderEditName(display);
+
+    renderTitleBar(display, _task, NAV_LABELS[RIFT_NAV_SYSTEM]);
     display.setTextSize(1);
-    char tmp[64];
-    sprintf(tmp, "last key: %c", _last_key ? _last_key : '-');
-    display.drawTextCentered(display.width() / 2, display.height() / 2 - 8, tmp);
+
+    char tmp[72];
+
+    // who we are, since it is now editable from here
+    display.setColor(UIColor::title_txt);
+    sprintf(tmp, "node: %s", the_mesh.getNodeName());
+    display.drawTextLeftAlign(4, 24, tmp);
+
+    // action menu
+    int y = 46;
+    for (int i = 0; i < IT_COUNT; i++, y += RIFT_LINE_H) {
+      bool sel = (i == _sel);
+      display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
+      display.setCursor(4, y);
+      display.print(sel ? "> " : "  ");
+      display.print(ITEM_LABELS[i]);
+    }
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, y + 4, "up/down select   ENTER activate");
+
+    // diagnostics footer
+    y = 128;
+    display.setColor(UIColor::secondary_txt);
+    display.drawRect(0, y - 6, display.width(), 1);
 
 #ifdef RIFT_INPUT_KEYBOARD
     sprintf(tmp, "keyboard: %s", rift_keyboard.isPresent() ? "detected" : "not found");
-    display.drawTextCentered(display.width() / 2, display.height() / 2 + 8, tmp);
+    display.drawTextLeftAlign(4, y, tmp);
+    y += RIFT_LINE_H;
 
     strcpy(tmp, "I2C:");
     for (uint8_t i = 0; i < rift_keyboard.seenCount(); i++) {
@@ -341,14 +464,19 @@ public:
       strcat(tmp, hex);
     }
     if (rift_keyboard.seenCount() == 0) strcat(tmp, " (empty)");
-    display.drawTextCentered(display.width() / 2, display.height() / 2 + 20, tmp);
+    display.drawTextLeftAlign(4, y, tmp);
+    y += RIFT_LINE_H;
 #endif
 
     // free heap matters here: bringing up the Wi-Fi/BLE stacks for RADAR is by
     // far the largest allocation this firmware makes
-    display.setColor(UIColor::secondary_txt);
     sprintf(tmp, "free heap: %u KB", (unsigned) (ESP.getFreeHeap() / 1024));
-    display.drawTextCentered(display.width() / 2, display.height() / 2 + 32, tmp);
+    display.drawTextLeftAlign(4, y, tmp);
+    y += RIFT_LINE_H;
+
+    sprintf(tmp, "power: %s", the_mesh.getNodePrefs() && board.isExternalPowered() ? "external" : "battery");
+    display.drawTextLeftAlign(4, y, tmp);
+    y += RIFT_LINE_H;
 
     // why we last restarted - distinguishes a software crash (PANIC) from a
     // power problem (BROWNOUT), which look identical from the outside
@@ -366,30 +494,32 @@ public:
       default:               rr = "unknown"; break;
     }
     sprintf(tmp, "last reset: %s", rr);
-    display.drawTextCentered(display.width() / 2, display.height() / 2 + 44, tmp);
-
-    display.setColor(UIColor::title_txt);
-    display.drawTextCentered(display.width() / 2, display.height() - 34, "ENTER: send advert");
+    display.drawTextLeftAlign(4, y, tmp);
 
     renderNavBar(display, RIFT_NAV_SYSTEM);
-    return 300;
+    return 1000;
   }
 
   bool handleInput(char c) override {
+    if (_mode == EDIT_NAME) {
+      if (c == KEY_ENTER) { commitName(); return true; }
+      if (_edit.handleKey(c)) return true;       // consumed as text
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = MENU; return true; }
+      return true;   // don't let stray keys navigate away mid-edit
+    }
+
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
-    // Announce ourselves to the mesh. Other nodes cannot decrypt a direct
-    // message from a node they've never heard an advert from - they look the
-    // sender up in their contacts and silently drop it otherwise - so this is
-    // a prerequisite for two-way DMs, not just a nicety.
-    if (c == KEY_ENTER) {
-      _task->notify(UIEventType::ack);
-      _task->showAlert(the_mesh.advert() ? "Advert sent!" : "Advert failed", 1200);
-      return true;
-    }
-    if (c >= 32 && c < 127) { onKey(c); return true; }
+    if (c == KEY_UP) { _sel = (_sel + IT_COUNT - 1) % IT_COUNT; return true; }
+    if (c == KEY_DOWN) { _sel = (_sel + 1) % IT_COUNT; return true; }
+    if (c == KEY_ENTER) { activate(); return true; }
     return false;
   }
+};
+
+const char* RiftSystemScreen::ITEM_LABELS[RiftSystemScreen::IT_COUNT] = {
+  "Send advert",
+  "Edit node name",
 };
 
 // CONSTELLATION: the mesh as observed topology rather than a node count.
@@ -1053,6 +1183,11 @@ public:
       _view = (_view == VIEW_SCATTER) ? VIEW_WATERFALL : VIEW_SCATTER;
       return true;
     }
+    // waterfall is a level down from the scatter view
+    if (c == RIFT_KEY_BACK && _view == VIEW_WATERFALL) {
+      _view = VIEW_SCATTER;
+      return true;
+    }
     if (_view == VIEW_SCATTER) {
       if (c == KEY_UP) { if (_scroll > 0) _scroll--; return true; }
       if (c == KEY_DOWN) { if (_scroll + 1 < _last_n) _scroll++; return true; }
@@ -1113,6 +1248,12 @@ public:
       return true;
     }
     if (c == KEY_ENTER) {
+      num_unread = 0;
+      _task->gotoHomeScreen();
+      return true;
+    }
+    // the preview is an overlay on whatever you were doing - back dismisses it
+    if (c == RIFT_KEY_BACK) {
       num_unread = 0;
       _task->gotoHomeScreen();
       return true;
@@ -1331,7 +1472,8 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
     int total = _pick_count;
     if (total == 0) {
       // nothing to choose - don't trap the user in an empty picker
-      if (c == KEY_CANCEL || c == KEY_ENTER || c == KEY_NEXT || c == KEY_PREV) _picking = false;
+      if (c == KEY_CANCEL || c == KEY_ENTER || c == KEY_NEXT || c == KEY_PREV
+          || c == RIFT_KEY_BACK) _picking = false;
       return true;
     }
     if (c == KEY_UP) {
@@ -1356,8 +1498,11 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
       _picking = false;
       return true;
     }
-    // no dedicated ESC key on this keyboard - trackball click backs out too
-    if (c == KEY_CANCEL || c == KEY_NEXT || c == KEY_PREV) { _picking = false; return true; }
+    // no dedicated ESC key on this keyboard - backspace and trackball click both back out
+    if (c == KEY_CANCEL || c == KEY_NEXT || c == KEY_PREV || c == RIFT_KEY_BACK) {
+      _picking = false;
+      return true;
+    }
     return true;   // swallow everything else while picking
   }
 
@@ -1475,7 +1620,9 @@ public:
       return true;
     }
     if (c == KEY_CANCEL) { clearInput(); return true; }
-    if (c == 8) {          // backspace - no KEY_* constant for it
+    // backspace deletes while composing; with nothing to delete this is
+    // already the top level, so there is nowhere further back to go
+    if (c == RIFT_KEY_BACK) {
       if (_len > 0) _input[--_len] = 0;
       return true;
     }
