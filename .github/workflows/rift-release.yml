@@ -1,0 +1,82 @@
+name: RIFT Release
+
+# Builds the RIFT firmware on a v* tag, publishes it as a GitHub release, and
+# deploys the browser flasher page to GitHub Pages with the same binary.
+#
+# Upstream's firmware-builder.yml discovers targets by suffix
+# (_companion_radio_usb, _repeater, ...), and LilyGo_TDeck_rift matches none of
+# them. RIFT is a single environment, so the build matrix is skipped entirely and
+# build.sh is called directly - it already runs `pio run -t mergebin` and copies
+# both binaries into out/.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Resolve version
+        id: version
+        run: |
+          # tag builds use the tag; workflow_dispatch builds are unreleased test
+          # builds and are labelled as such so nobody mistakes one for a release
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            echo "version=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build firmware
+        env:
+          FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
+        run: /usr/bin/env bash build.sh build-firmware LilyGo_TDeck_rift
+
+      - name: Stage flasher site
+        run: |
+          mkdir -p site
+          cp flasher/index.html site/
+          # stable filename so the manifest path never has to change
+          cp .pio/build/LilyGo_TDeck_rift/firmware-merged.bin site/rift-merged.bin
+          sed "s/__VERSION__/${{ steps.version.outputs.version }}/g" \
+            flasher/manifest.json > site/manifest.json
+          ls -l site
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: LilyGo_TDeck_rift
+          path: |
+            out
+            site
+
+      - name: Create release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3
+        with:
+          name: "RIFT ${{ steps.version.outputs.version }}"
+          draft: true
+          files: out/*
+
+      # deliberately not gated on tags: a manual run publishes a dev-<sha> build
+      # so the flasher can be tested on real hardware before a release is minted.
+      # The page reads its version from the manifest, so it always says which.
+      - name: Deploy flasher to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages

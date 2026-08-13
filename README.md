@@ -70,6 +70,44 @@ Original LilyGO T-Deck — **not** T-Deck Pro:
 
 ---
 
+## Flashing a device
+
+Two routes, and one thing to know before either.
+
+**The browser flasher** at
+[krakensaten.github.io/RIFT](https://krakensaten.github.io/RIFT/) needs nothing
+installed: plug the T-Deck in, press the button, done. It uses
+[ESP Web Tools](https://esphome.github.io/esp-web-tools/) over WebSerial, so it
+works in Chrome and Edge on desktop only — Firefox and Safari have no WebSerial.
+The page is built and published by `rift-release.yml` on every `v*` tag, from the
+same binary attached to the release, so it cannot drift out of step.
+
+**Or by hand**, with the `*-merged.bin` from the
+[releases page](https://github.com/KrakenSaten/RIFT/releases):
+
+```bash
+python -m esptool --chip esp32s3 --port COM5 write-flash 0x0 rift-merged.bin
+```
+
+Those are esptool 5 command names; esptool 4, which PlatformIO bundles, uses
+`write_flash`. Going through `python -m esptool` works on both.
+
+**What survives an upgrade.** The merged image spans offset 0 to roughly
+`0x19d000` — bootloader, partition table, boot selector, application. The SPIFFS
+partition holding the MeshCore private key sits at `0xc90000`, well past that, so
+flashing in place keeps your identity, contacts and channels. NVS at `0x9000`
+does fall inside the image and is erased, but that holds Arduino-side preferences
+rather than anything MeshCore needs.
+
+A **full chip erase is a different matter**: it takes SPIFFS with it, and since
+RIFT disables MeshCore's private-key export there is no way to back the key up
+first or recover it after. Only erase if you intend to become a new node.
+
+And regardless of route, **the first boot sits on `Loading...` for one to two
+minutes** while SPIFFS is formatted. It is not a hang.
+
+---
+
 ## Building
 
 Two environment gotchas cost real time during development. Both are worth

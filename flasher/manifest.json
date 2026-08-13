@@ -1,0 +1,13 @@
+{
+  "name": "RIFT - Radio Intelligence & Field Terminal",
+  "version": "__VERSION__",
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "improv": false,
+      "parts": [
+        { "path": "rift-merged.bin", "offset": 0 }
+      ]
+    }
+  ]
+}
