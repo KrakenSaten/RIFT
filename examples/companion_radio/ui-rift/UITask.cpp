@@ -45,7 +45,7 @@
   #define PRESS_LABEL "long press"
 #endif
 
-static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "MESH", "RADAR", "COMMS", "SYSTEM" };
+static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "MESH", "NODES", "RADAR", "COMMS", "SYSTEM" };
 
 #ifndef RIFT_PUBLIC_CHANNEL_IDX
   #define RIFT_PUBLIC_CHANNEL_IDX 0
@@ -156,6 +156,11 @@ static int wrapText(const char* text, int max_px, int y, DisplayDriver* display,
 
   return lines == 0 ? 1 : lines;
 }
+
+// evenly spread directions for the radial plots (cos/sin * 100), shared by the
+// RADAR scatter and the CONSTELLATION topology view
+static const int8_t RF_DIR_X[16] = { 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92, -100, -92, -71, -38 };
+static const int8_t RF_DIR_Y[16] = { -100, -92, -71, -38, 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92 };
 
 // Bottom navigation hint row shared by every RIFT nav screen.
 static void renderNavBar(DisplayDriver& display, int curr_idx) {
@@ -288,7 +293,7 @@ public:
     sprintf(tmp, "%.3fMHz  SF%d  %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
     display.drawTextCentered(cx, 144, tmp);
 
-    renderNavBar(display, 0);
+    renderNavBar(display, RIFT_NAV_MESH);
     return 700;   // non-blocking periodic refresh, drives the radar animation (slow enough to avoid visible flicker from the full-screen redraw)
   }
 
@@ -311,7 +316,7 @@ public:
   void onKey(char c) { if (c >= 32 && c < 127) _last_key = c; }
 
   int render(DisplayDriver& display) override {
-    renderTitleBar(display, _task, NAV_LABELS[3]);
+    renderTitleBar(display, _task, NAV_LABELS[RIFT_NAV_SYSTEM]);
 
     display.setColor(UIColor::primary_txt);
     display.setTextSize(2);
@@ -364,7 +369,7 @@ public:
     display.setColor(UIColor::title_txt);
     display.drawTextCentered(display.width() / 2, display.height() - 34, "ENTER: send advert");
 
-    renderNavBar(display, 3);
+    renderNavBar(display, RIFT_NAV_SYSTEM);
     return 300;
   }
 
@@ -381,6 +386,159 @@ public:
       return true;
     }
     if (c >= 32 && c < 127) { onKey(c); return true; }
+    return false;
+  }
+};
+
+// CONSTELLATION: the mesh as observed topology rather than a node count.
+//
+// Built from MyMesh's advert-path cache, which records the actual route each
+// advert travelled: path_len is the hop count and path[] holds the hop hashes.
+// So node distance from centre is real hop distance, and nodes that arrived via
+// the same first hop share a direction - the branching in the original concept
+// sketch is genuine routing structure, not decoration.
+//
+// Note there is no per-node RSSI here: adverts are cached without signal
+// strength, so brightness encodes recency (how long since we last heard the
+// node) rather than link quality.
+#define RIFT_CONST_MAX 16
+
+class RiftConstellationScreen : public UIScreen {
+  UITask* _task;
+  AdvertPath _paths[RIFT_CONST_MAX];
+  int _count;
+  int _sel;
+  unsigned long _next_refresh;
+
+  static const int CX_Y = 104;   // centre of the plot
+
+  void refresh() {
+    int n = the_mesh.getRecentlyHeard(_paths, RIFT_CONST_MAX);
+    // getRecentlyHeard always returns max_num entries including empty slots,
+    // and it sorts newest-first, so the live ones are a prefix
+    int live = 0;
+    for (int i = 0; i < n; i++) {
+      if (_paths[i].recv_timestamp != 0 && _paths[i].name[0] != 0) live++;
+      else break;
+    }
+    _count = live;
+    if (_sel >= _count) _sel = _count > 0 ? _count - 1 : 0;
+  }
+
+public:
+  RiftConstellationScreen(UITask* task) : _task(task), _count(0), _sel(0), _next_refresh(0) { }
+
+  int render(DisplayDriver& display) override {
+    if (millis() >= _next_refresh) {
+      refresh();
+      _next_refresh = millis() + 3000;
+    }
+
+    char tmp[64];
+    sprintf(tmp, "%d HEARD", _count);
+    renderTitleBar(display, _task, tmp);
+
+    int cx = display.width() / 2;
+    int cy = CX_Y;
+
+    // hop rings
+    display.setColor(UIColor::secondary_txt);
+    for (int r = 1; r <= 3; r++) {
+      int rad = r * 26;
+      display.drawRect(cx - rad, cy - rad, rad * 2, rad * 2);
+    }
+
+    // us
+    display.setColor(UIColor::title_txt);
+    display.fillRect(cx - 2, cy - 2, 5, 5);
+    display.drawTextCentered(cx, cy + 8, "YOU");
+
+    uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+
+    for (int i = 0; i < _count; i++) {
+      AdvertPath* p = &_paths[i];
+
+      int hops = p->path_len;         // 0 == heard directly
+      int ring = hops + 1;
+      if (ring > 3) ring = 3;
+      int rad = ring * 26;
+
+      // direction from the first hop, so nodes reached through the same
+      // repeater cluster together; direct nodes spread by their own key
+      uint8_t branch = (hops > 0) ? p->path[0] : p->pubkey_prefix[0];
+      int d = branch & 15;
+
+      int x = cx + (rad * RF_DIR_X[d]) / 100;
+      int y = cy + (rad * RF_DIR_Y[d]) / 100;
+
+      // recency: solid if heard in the last few minutes, dim if stale
+      uint32_t age = (now > p->recv_timestamp) ? (now - p->recv_timestamp) : 0;
+      bool fresh = age < 300;   // 5 minutes
+
+      bool sel = (i == _sel);
+      display.setColor(sel ? UIColor::warning_txt
+                           : (fresh ? UIColor::primary_txt : UIColor::secondary_txt));
+
+      // link line back toward centre, then the node itself
+      display.fillRect(cx + (x - cx) / 2, cy + (y - cy) / 2, 1, 1);
+      if (sel) {
+        display.fillRect(x - 3, y - 3, 7, 7);
+      } else {
+        display.fillRect(x - 2, y - 2, 4, 4);
+      }
+    }
+
+    if (_count == 0) {
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextCentered(cx, cy + 40, "no adverts heard yet");
+    }
+
+    // detail for the selected node
+    int y = 186;
+    display.setColor(UIColor::secondary_txt);
+    display.drawRect(0, y - 6, display.width(), 1);
+
+    if (_count > 0) {
+      AdvertPath* p = &_paths[_sel];
+      char filtered[sizeof(p->name)];
+      display.translateUTF8ToBlocks(filtered, p->name, sizeof(filtered));
+
+      display.setColor(UIColor::title_txt);
+      display.drawTextEllipsized(4, y, 180, filtered);
+
+      display.setColor(UIColor::secondary_txt);
+      if (p->path_len == 0) {
+        strcpy(tmp, "direct");
+      } else {
+        sprintf(tmp, "%d hop%s", p->path_len, p->path_len == 1 ? "" : "s");
+      }
+      display.drawTextRightAlign(display.width() - 4, y, tmp);
+
+      uint32_t age = (now > p->recv_timestamp) ? (now - p->recv_timestamp) : 0;
+      if (age < 60) sprintf(tmp, "heard %lus ago", (unsigned long) age);
+      else if (age < 3600) sprintf(tmp, "heard %lum ago", (unsigned long) (age / 60));
+      else sprintf(tmp, "heard %luh ago", (unsigned long) (age / 3600));
+      display.drawTextLeftAlign(4, y + RIFT_LINE_H, tmp);
+
+      sprintf(tmp, "%d/%d", _sel + 1, _count);
+      display.drawTextRightAlign(display.width() - 4, y + RIFT_LINE_H, tmp);
+    }
+
+    renderNavBar(display, RIFT_NAV_NODES);
+    return 2000;
+  }
+
+  bool handleInput(char c) override {
+    if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
+    if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
+    if (c == KEY_UP) {
+      if (_count > 0) _sel = (_sel + _count - 1) % _count;
+      return true;
+    }
+    if (c == KEY_DOWN) {
+      if (_count > 0) _sel = (_sel + 1) % _count;
+      return true;
+    }
     return false;
   }
 };
@@ -510,10 +668,6 @@ static RiftBleCallbacks ble_callbacks;
 // set on core 0 by the scan-completion callback, consumed by poll() on core 1
 static volatile bool ble_scan_done = false;
 static void onBleScanComplete(BLEScanResults results) { ble_scan_done = true; }
-
-// evenly spread directions for the scatter plot (cos/sin * 100)
-static const int8_t RF_DIR_X[16] = { 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92, -100, -92, -71, -38 };
-static const int8_t RF_DIR_Y[16] = { -100, -92, -71, -38, 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92 };
 
 // RADAR: passive Wi-Fi + BLE situational awareness.
 //
@@ -760,7 +914,7 @@ public:
       display.drawTextCentered(cx, LIST_TOP + RIFT_LINE_H * 2, "listening...");
     }
 
-    renderNavBar(display, 1);
+    renderNavBar(display, RIFT_NAV_RADAR);
     return 700;   // coarse: the TFT shares its SPI bus with the LoRa radio
   }
 
@@ -1005,7 +1159,7 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
     display.setColor(UIColor::secondary_txt);
     display.drawTextLeftAlign(4, INPUT_Y, "trackball up/down  ENTER pick  click back");
 
-    renderNavBar(display, 2);
+    renderNavBar(display, RIFT_NAV_COMMS);
     return 1000;
   }
 
@@ -1129,7 +1283,7 @@ public:
     display.print(shown);
     display.print("_");
 
-    renderNavBar(display, 2);
+    renderNavBar(display, RIFT_NAV_COMMS);
     return 1000;   // keystrokes force a repaint via _next_refresh; avoid flicker
   }
 
@@ -1210,14 +1364,15 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
   splash = new RiftSplashScreen(this);
   msg_preview = new RiftMsgPreviewScreen(this);
-  nav_screens[0] = new RiftMeshScreen(this, node_prefs);
+  nav_screens[RIFT_NAV_MESH] = new RiftMeshScreen(this, node_prefs);
+  nav_screens[RIFT_NAV_NODES] = new RiftConstellationScreen(this);
 #ifdef RIFT_RADAR
-  nav_screens[1] = new RiftRadarScreen(this);
+  nav_screens[RIFT_NAV_RADAR] = new RiftRadarScreen(this);
 #else
-  nav_screens[1] = new RiftPlaceholderScreen(this, 1, "RF RADAR", "Wi-Fi / BLE / RF scan");
+  nav_screens[RIFT_NAV_RADAR] = new RiftPlaceholderScreen(this, RIFT_NAV_RADAR, "RF RADAR", "Wi-Fi / BLE / RF scan");
 #endif
-  nav_screens[2] = new RiftCommsScreen(this);
-  nav_screens[3] = new RiftSystemScreen(this);
+  nav_screens[RIFT_NAV_COMMS] = new RiftCommsScreen(this);
+  nav_screens[RIFT_NAV_SYSTEM] = new RiftSystemScreen(this);
   nav_idx = 0;
   setCurrScreen(splash);
 }
@@ -1281,7 +1436,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   // Don't yank the user out of the COMMS terminal - the message is already
   // visible in its history there, and stealing focus would drop a half-typed
   // line. Everywhere else keeps the popup behaviour.
-  if (curr != nav_screens[2]) {
+  if (curr != nav_screens[RIFT_NAV_COMMS]) {
     setCurrScreen(msg_preview);
   }
 
@@ -1297,7 +1452,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 }
 
 void UITask::msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) {
-  ((RiftCommsScreen *) nav_screens[2])->onDelivered(ack_hash, trip_time_millis);
+  ((RiftCommsScreen *) nav_screens[RIFT_NAV_COMMS])->onDelivered(ack_hash, trip_time_millis);
   _next_refresh = 100;   // reflect the new delivery state promptly
 }
 
@@ -1332,12 +1487,12 @@ void UITask::setCurrScreen(UIScreen* c) {
   // switching to the preview screen) must not tear the RF stacks down, both
   // because the user is still "on" RADAR and because doing it mid-scan used to
   // panic the device.
-  if (nav_screens[1] != NULL) {
+  if (nav_screens[RIFT_NAV_RADAR] != NULL) {
     bool is_nav = false;
     for (int i = 0; i < RIFT_NAV_COUNT; i++) {
       if (c == nav_screens[i]) { is_nav = true; break; }
     }
-    if (is_nav) ((RiftRadarScreen *) nav_screens[1])->setActive(c == nav_screens[1]);
+    if (is_nav) ((RiftRadarScreen *) nav_screens[RIFT_NAV_RADAR])->setActive(c == nav_screens[RIFT_NAV_RADAR]);
   }
 #endif
   curr = c;
@@ -1473,7 +1628,7 @@ void UITask::loop() {
 #ifdef RIFT_RADAR
   // serviced unconditionally, not via curr->poll(), so RF teardown still runs
   // after navigating away from RADAR
-  if (nav_screens[1] != NULL) ((RiftRadarScreen *) nav_screens[1])->service();
+  if (nav_screens[RIFT_NAV_RADAR] != NULL) ((RiftRadarScreen *) nav_screens[RIFT_NAV_RADAR])->service();
 #endif
 
   if (curr) curr->poll();

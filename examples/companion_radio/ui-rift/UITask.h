@@ -22,7 +22,14 @@
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 
-#define RIFT_NAV_COUNT 4   // MESH, RADAR, COMMS, SYSTEM
+// nav slot indices - named, because several call sites reach into
+// nav_screens[] directly and silent index drift is easy otherwise
+#define RIFT_NAV_MESH    0
+#define RIFT_NAV_NODES   1
+#define RIFT_NAV_RADAR   2
+#define RIFT_NAV_COMMS   3
+#define RIFT_NAV_SYSTEM  4
+#define RIFT_NAV_COUNT   5
 
 class UITask : public AbstractUITask {
   DisplayDriver* _display;
@@ -52,7 +59,7 @@ class UITask : public AbstractUITask {
 
   UIScreen* splash;
   UIScreen* msg_preview;
-  UIScreen* nav_screens[RIFT_NAV_COUNT];   // MESH, RADAR, COMMS, SYSTEM
+  UIScreen* nav_screens[RIFT_NAV_COUNT];   // indexed by RIFT_NAV_*
   int nav_idx;
   UIScreen* curr;
 
@@ -76,7 +83,7 @@ public:
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
-  void gotoHomeScreen() { nav_idx = 0; setCurrScreen(nav_screens[0]); }
+  void gotoHomeScreen() { nav_idx = RIFT_NAV_MESH; setCurrScreen(nav_screens[RIFT_NAV_MESH]); }
   void cycleNavScreen(int dir);
   void showAlert(const char* text, int duration_millis);
   int  getMsgCount() const { return _msgcount; }
