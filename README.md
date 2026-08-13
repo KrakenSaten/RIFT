@@ -26,6 +26,13 @@ or [iOS](https://apps.apple.com/us/app/meshcore/id6742354151) apps, or
 on-device UI with one built around the keyboard the T-Deck already has, so no
 second device is needed.
 
+<p align="center">
+<img src="logo/bootscreen.png" alt="RIFT boot screen: the RIFT wordmark, RADIO INTELLIGENCE / FIELD TERMINAL, and a progress bar reading Formatting SPIFFS — 1-2 min, not a hang" width="520">
+</p>
+<p align="center">
+<sub>First boot. The progress bar is real — SPIFFS formatting takes one to two minutes.</sub>
+</p>
+
 ---
 
 ## How this was built
@@ -103,8 +110,11 @@ A **full chip erase is a different matter**: it takes SPIFFS with it, and since
 RIFT disables MeshCore's private-key export there is no way to back the key up
 first or recover it after. Only erase if you intend to become a new node.
 
-And regardless of route, **the first boot sits on `Loading...` for one to two
-minutes** while SPIFFS is formatted. It is not a hang.
+And regardless of route, **the first boot spends one to two minutes formatting
+SPIFFS**. The boot screen shows a progress bar and says so explicitly, because an
+unexplained pause on a device with no obvious activity is indistinguishable from
+a brick — and resetting partway through leaves the filesystem needing another
+format anyway.
 
 ---
 
@@ -144,8 +154,9 @@ If upload reports *"Could not open COM5, the port doesn't exist"* while the port
 is clearly listed, a leftover `pio device monitor` process is holding it. Kill
 it before retrying.
 
-**First boot after switching firmware can take one to two minutes** while SPIFFS
-reformats. The screen sits on `Loading...`. This is not a hang — wait it out.
+**First boot after switching firmware reformats SPIFFS**, which takes one to two
+minutes. The boot screen tracks it with a progress bar — wait for the bar rather
+than resetting.
 
 ### Other environments
 
@@ -395,7 +406,7 @@ only adds a T-Deck UI and does not track their releases.
 ## Status
 
 **Current version: 0.1.0** — set by the `RIFT_VERSION` build flag and shown on
-the splash screen and SYSTEM, alongside the MeshCore version it is built on.
+the boot screen and SYSTEM, alongside the MeshCore version it is built on.
 Deliberately 0.x: it works and is verified on hardware, but it has had no
 external users and the limitations above are real. `FIRMWARE_VERSION` is left as
 upstream MeshCore's, since that string is reported over the companion protocol
