@@ -1,4 +1,20 @@
-Standalone MeshCore firmware UI for the original LilyGO T-Deck: keyboard-driven mesh messaging, passive Wi-Fi/BLE radar, and mesh topology view
+# RIFT — Radio Intelligence & Field Terminal
+
+Standalone MeshCore firmware UI for the original LilyGO T-Deck: keyboard-driven
+mesh messaging with no phone required, passive Wi-Fi/BLE radar, and a view of
+the mesh topology.
+
+**→ [RIFT.md](RIFT.md) — what it does, how to build it, and its known limitations.**
+
+RIFT adds a `LilyGo_TDeck_rift` build environment and leaves the existing
+targets, the mesh protocol and the radio layer alone. Everything below is
+upstream MeshCore's own documentation, kept unchanged.
+
+---
+
+## About MeshCore
+
+MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.
 
 ## 🔍 What is MeshCore?
 
