@@ -585,7 +585,8 @@ public:
 #define RIFT_RF_MAX 48
 
 struct RfContact {
-  char name[24];
+  uint8_t key[6];     // BSSID for Wi-Fi, MAC for BLE - the actual identity
+  char name[24];      // display only; may be empty, duplicated or absent
   int8_t rssi;
   uint8_t channel;    // wifi only
   bool is_wifi;
@@ -620,12 +621,17 @@ static void wfClear() {
   memset(wf_hist, 0, sizeof(wf_hist));
 }
 
-// insert or refresh by name+type
-static void rfUpsert(const char* name, int8_t rssi, uint8_t channel, bool is_wifi, bool encrypted) {
+// Insert or refresh, keyed on hardware address rather than display name. Names
+// are unreliable as identity: hidden Wi-Fi networks report an empty SSID, and
+// BLE devices frequently share a name (several "AirPods" in one room), so
+// keying on the name both duplicated hidden networks on every sweep and
+// collapsed distinct BLE devices into one row.
+static void rfUpsert(const uint8_t* key, const char* name, int8_t rssi, uint8_t channel,
+                     bool is_wifi, bool encrypted) {
   portENTER_CRITICAL(&rf_mux);
   int slot = -1;
   for (int i = 0; i < rf_count; i++) {
-    if (rf_table[i].is_wifi == is_wifi && strncmp(rf_table[i].name, name, sizeof(rf_table[i].name) - 1) == 0) {
+    if (rf_table[i].is_wifi == is_wifi && memcmp(rf_table[i].key, key, 6) == 0) {
       slot = i;
       break;
     }
@@ -643,6 +649,7 @@ static void rfUpsert(const char* name, int8_t rssi, uint8_t channel, bool is_wif
     }
   }
   RfContact* e = &rf_table[slot];
+  memcpy(e->key, key, 6);
   StrHelper::strncpy(e->name, (name && name[0]) ? name : "(hidden)", sizeof(e->name));
   e->rssi = rssi;
   e->channel = channel;
@@ -677,13 +684,18 @@ class RiftBleCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice dev) override {
     // copy immediately - getName()/toString() return temporaries whose c_str()
     // would dangle past the end of this statement
+    BLEAddress addr = dev.getAddress();
+
     char name[24];
     if (dev.haveName()) {
       StrHelper::strncpy(name, dev.getName().c_str(), sizeof(name));
     } else {
-      StrHelper::strncpy(name, dev.getAddress().toString().c_str(), sizeof(name));
+      StrHelper::strncpy(name, addr.toString().c_str(), sizeof(name));
     }
-    rfUpsert(name, (int8_t) dev.getRSSI(), 0, false, false);
+
+    uint8_t key[6];
+    memcpy(key, addr.getNative(), 6);   // MAC is the identity, not the name
+    rfUpsert(key, name, (int8_t) dev.getRSSI(), 0, false, false);
   }
 };
 static RiftBleCallbacks ble_callbacks;
@@ -712,6 +724,10 @@ class RiftRadarScreen : public UIScreen {
   View _view;
   bool _want_active;   // set by screen changes; acted on from the main loop
   bool _wifi_up, _ble_up;
+  // Teardown completion must be tracked separately: _ble_up deliberately stays
+  // true after teardown (BLEDevice::deinit is avoided), so using it as the
+  // "needs teardown" test would restart the cycle forever.
+  bool _torn_down;
   unsigned long _next_step;
   int _scroll;
   int _last_n;
@@ -738,7 +754,13 @@ class RiftRadarScreen : public UIScreen {
       String ssid = WiFi.SSID(i);
       int8_t rssi = (int8_t) WiFi.RSSI(i);
       uint8_t ch = (uint8_t) WiFi.channel(i);
-      rfUpsert(ssid.c_str(), rssi, ch, true, WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+
+      // BSSID is the identity - hidden networks report an empty SSID
+      uint8_t key[6];
+      const uint8_t* bssid = WiFi.BSSID(i);
+      if (bssid != NULL) memcpy(key, bssid, 6); else memset(key, 0, 6);
+
+      rfUpsert(key, ssid.c_str(), rssi, ch, true, WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
 
       // strongest signal seen on each channel this sweep (0 means "nothing")
       if (ch < RIFT_WF_CHANNELS && (per_channel[ch] == 0 || rssi > per_channel[ch])) {
@@ -769,7 +791,8 @@ class RiftRadarScreen : public UIScreen {
 public:
   RiftRadarScreen(UITask* task)
      : _task(task), _state(OFF), _view(VIEW_SCATTER), _want_active(false),
-       _wifi_up(false), _ble_up(false), _next_step(0), _scroll(0), _last_n(0) { }
+       _wifi_up(false), _ble_up(false), _torn_down(true),
+       _next_step(0), _scroll(0), _last_n(0) { }
 
   // Only records intent. Screen changes can originate from a mesh callback
   // (an incoming message switches to the preview screen), and tearing the BT
@@ -806,6 +829,7 @@ public:
     rfClear();   // hand the heap back; the mesh is the primary job
     wfClear();   // history would be stale and misleading on return
     _state = OFF;
+    _torn_down = true;
   }
 
   // Driven every main-loop iteration, whichever screen is showing, so that
@@ -814,7 +838,7 @@ public:
     if (!_want_active) {
       if (_state == STOPPING) {
         if (millis() >= _next_step) finishTeardown();
-      } else if (_state != OFF || _wifi_up || _ble_up) {
+      } else if (!_torn_down) {
         beginTeardown();
       }
       return;
@@ -822,6 +846,7 @@ public:
     if (_state == OFF || _state == STOPPING) {
       _state = START_WIFI;   // came back before teardown finished
       _next_step = 0;
+      _torn_down = false;
     }
 
     if (millis() < _next_step) return;
@@ -934,6 +959,10 @@ public:
     memcpy(snap, rf_table, sizeof(RfContact) * n);
     portEXIT_CRITICAL(&rf_mux);
     _last_n = n;
+
+    // entries age out between renders, so a stale offset would leave the list
+    // drawing nothing at all
+    if (_scroll >= n) _scroll = (n > 0) ? n - 1 : 0;
 
     int wifi_n = 0, ble_n = 0;
     for (int i = 0; i < n; i++) {
@@ -1215,7 +1244,9 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
       snprintf(buf, buf_len, "ACK %.1fs", p->trip_ms / 1000.0f);
       return buf;
     }
-    if (p->timeout_ms > 0 && millis() > p->sent_at_ms + p->timeout_ms) return "no ack";
+    // subtract rather than add: millis() wraps at ~49.7 days, and
+    // (sent_at + timeout) would overflow and report a fresh send as timed out
+    if (p->timeout_ms > 0 && millis() - p->sent_at_ms > p->timeout_ms) return "no ack";
     return "...";
   }
 
