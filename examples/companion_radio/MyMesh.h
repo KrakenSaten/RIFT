@@ -102,6 +102,13 @@ public:
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
 
+  // Send a text message to a contact from local UI code. Mirrors the companion
+  // app's CMD_SEND_TXT_MSG path, including registering the expected ACK, which
+  // callers outside this class cannot do (expected_ack_table is private).
+  // 'recipient' must be a live pointer from lookupContactByPubKey(), not a copy.
+  // Returns MSG_SEND_FAILED / MSG_SEND_SENT_FLOOD / MSG_SEND_SENT_DIRECT.
+  int  sendTextTo(ContactInfo* recipient, const char* text, uint32_t& expected_ack, uint32_t& est_timeout);
+
 protected:
   float getAirtimeBudgetFactor() const override;
   int getInterferenceThreshold() const override;

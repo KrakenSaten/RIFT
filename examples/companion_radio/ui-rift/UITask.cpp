@@ -42,6 +42,14 @@ struct RiftMsgLog {
     char origin[62];
     char msg[78];
     bool outgoing;
+    // delivery tracking, only meaningful for outgoing direct messages.
+    // expected_ack == 0 means "no ACK possible" (channel sends, incoming) and
+    // renders no delivery state at all.
+    uint32_t expected_ack;
+    uint32_t sent_at_ms;
+    uint32_t timeout_ms;
+    uint32_t trip_ms;
+    bool delivered;
   };
 
   Entry entries[RIFT_MSG_LOG_SIZE];
@@ -57,7 +65,25 @@ struct RiftMsgLog {
     StrHelper::strncpy(p->origin, origin, sizeof(p->origin));
     StrHelper::strncpy(p->msg, msg, sizeof(p->msg));
     p->outgoing = outgoing;
+    p->expected_ack = 0;
+    p->sent_at_ms = 0;
+    p->timeout_ms = 0;
+    p->trip_ms = 0;
+    p->delivered = false;
     return p;
+  }
+
+  // mark the pending outgoing message matching this ACK hash as delivered
+  void markDelivered(uint32_t ack_hash, uint32_t trip_ms) {
+    if (ack_hash == 0) return;
+    for (int i = 0; i < count; i++) {
+      Entry* p = &entries[(head - i + RIFT_MSG_LOG_SIZE * 2) % RIFT_MSG_LOG_SIZE];
+      if (p->expected_ack == ack_hash && !p->delivered) {
+        p->delivered = true;
+        p->trip_ms = trip_ms;
+        return;
+      }
+    }
   }
 
   // 0 = newest, 1 = next older, ...
@@ -288,6 +314,9 @@ public:
     display.drawTextCentered(display.width() / 2, display.height() / 2 + 20, tmp);
 #endif
 
+    display.setColor(UIColor::title_txt);
+    display.drawTextCentered(display.width() / 2, display.height() - 34, "ENTER: send advert");
+
     renderNavBar(display, 3);
     return 300;
   }
@@ -295,6 +324,15 @@ public:
   bool handleInput(char c) override {
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
+    // Announce ourselves to the mesh. Other nodes cannot decrypt a direct
+    // message from a node they've never heard an advert from - they look the
+    // sender up in their contacts and silently drop it otherwise - so this is
+    // a prerequisite for two-way DMs, not just a nicety.
+    if (c == KEY_ENTER) {
+      _task->notify(UIEventType::ack);
+      _task->showAlert(the_mesh.advert() ? "Advert sent!" : "Advert failed", 1200);
+      return true;
+    }
     if (c >= 32 && c < 127) { onKey(c); return true; }
     return false;
   }
@@ -392,14 +430,33 @@ public:
   }
 };
 
-// COMMS: MeshCore text terminal - scrollable history plus a compose line that
-// sends to the Public channel. Channel messages are always flooded and carry no
-// ACK, so no delivery state is shown (there is none to report).
-class RiftCommsScreen : public UIScreen {
+// COMMS: MeshCore text terminal - scrollable history plus a compose line.
+// Sends either to the Public channel (flooded, no ACK possible) or direct to a
+// chosen contact (ACKed, so delivery state is shown). ESC on an empty line
+// opens the target picker.
+#define RIFT_PICKER_MAX 24
+
+class RiftCommsScreen : public UIScreen, ContactVisitor {
   UITask* _task;
   char _input[MAX_TEXT_LEN + 1];
   int _len;
   int _scroll;      // 0 = pinned to newest
+
+  // current send target: Public channel, or a contact by pubkey prefix
+  bool _target_is_channel;
+  uint8_t _target_key[6];
+  char _target_name[32];
+
+  // target picker sub-view
+  bool _picking;
+  int _pick_idx;
+  int _pick_scroll;   // index of the first visible row
+  struct PickEntry {
+    char name[32];
+    uint8_t key[6];
+  };
+  PickEntry _picks[RIFT_PICKER_MAX];
+  int _pick_count;
 
   static const int BODY_TOP = 20;
   static const int BODY_BOTTOM = 194;
@@ -409,9 +466,31 @@ class RiftCommsScreen : public UIScreen {
     return the_mesh.getChannel(RIFT_PUBLIC_CHANNEL_IDX, ch) && ch.name[0] != 0;
   }
 
-  void send() {
-    if (_len == 0) return;
+  // from ContactVisitor - called by scanRecentContacts(), already ordered by
+  // last_advert_timestamp descending (most recently heard first)
+  void onContactVisit(const ContactInfo& contact) override {
+    if (_pick_count >= RIFT_PICKER_MAX) return;
+    if (contact.name[0] == 0) return;   // skip the reserved anon slots
 
+    // only nodes that can actually receive a text message - repeaters and
+    // sensors have no one reading them
+    if (contact.type != ADV_TYPE_CHAT && contact.type != ADV_TYPE_ROOM) return;
+
+    PickEntry* e = &_picks[_pick_count++];
+    StrHelper::strncpy(e->name, contact.name, sizeof(e->name));
+    memcpy(e->key, contact.id.pub_key, 6);
+  }
+
+  void openPicker() {
+    _pick_count = 0;
+    // scan more than we can show, since repeaters/sensors get filtered out
+    the_mesh.scanRecentContacts(0, this);
+    _picking = true;
+    _pick_idx = 0;
+    _pick_scroll = 0;
+  }
+
+  void sendToChannel() {
     ChannelDetails ch;
     if (!getPublicChannel(ch)) {
       _task->showAlert("No channel!", 1200);
@@ -425,22 +504,169 @@ class RiftCommsScreen : public UIScreen {
       char origin[62];
       sprintf(origin, "%s:", the_mesh.getNodeName());
       msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, _input, true);
-      _input[0] = 0;
-      _len = 0;
-      _scroll = 0;
+      clearInput();
     } else {
       _task->showAlert("Send failed", 1200);
     }
   }
 
+  void sendToContact() {
+    // must be a live pointer - MyMesh stores it in its ACK table
+    ContactInfo* rcpt = the_mesh.lookupContactByPubKey(_target_key, 6);
+    if (rcpt == NULL) {
+      _task->showAlert("Contact lost", 1200);
+      return;
+    }
+
+    uint32_t expected_ack = 0, est_timeout = 0;
+    int result = the_mesh.sendTextTo(rcpt, _input, expected_ack, est_timeout);
+    if (result == MSG_SEND_FAILED) {
+      _task->showAlert("Send failed", 1200);
+      return;
+    }
+    // surface the routing choice - a stale stored path sends DIRECT into the
+    // void, which looks identical to success until the ACK never arrives
+    _task->showAlert(result == MSG_SEND_SENT_FLOOD ? "Sent (flood)" : "Sent (direct)", 1500);
+
+    char origin[62];
+    sprintf(origin, "to %s:", _target_name);
+    auto p = msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, _input, true);
+    p->expected_ack = expected_ack;
+    p->sent_at_ms = millis();
+    p->timeout_ms = est_timeout;
+    clearInput();
+  }
+
+  void clearInput() {
+    _input[0] = 0;
+    _len = 0;
+    _scroll = 0;
+  }
+
+  void send() {
+    if (_len == 0) return;
+    if (_target_is_channel) sendToChannel(); else sendToContact();
+  }
+
+  // delivery suffix for an outgoing direct message, or NULL if not applicable
+  const char* deliveryLabel(const RiftMsgLog::Entry* p, char* buf, size_t buf_len) {
+    if (!p->outgoing || p->expected_ack == 0) return NULL;   // channel send / incoming
+    if (p->delivered) {
+      snprintf(buf, buf_len, "ACK %.1fs", p->trip_ms / 1000.0f);
+      return buf;
+    }
+    if (p->timeout_ms > 0 && millis() > p->sent_at_ms + p->timeout_ms) return "no ack";
+    return "...";
+  }
+
+  int pickerRows() const { return (BODY_BOTTOM - (BODY_TOP + 4)) / RIFT_LINE_H; }
+
+  // name for row i of the combined list (row 0 is always the Public channel)
+  const char* pickRowName(int i, ChannelDetails& ch) {
+    if (i == 0) return getPublicChannel(ch) ? ch.name : "Public";
+    return _picks[i - 1].name;
+  }
+
+  int renderPicker(DisplayDriver& display) {
+    renderTitleBar(display, _task, "SELECT TARGET");
+    display.setTextSize(1);
+
+    int total = _pick_count + 1;
+    int rows = pickerRows();
+    int y = BODY_TOP + 4;
+    ChannelDetails ch;
+
+    for (int i = _pick_scroll; i < total && i < _pick_scroll + rows; i++, y += RIFT_LINE_H) {
+      bool sel = (_pick_idx == i);
+      display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
+      char filtered[32];
+      display.translateUTF8ToBlocks(filtered, pickRowName(i, ch), sizeof(filtered));
+      display.setCursor(4, y);
+      display.print(sel ? "> " : "  ");
+      display.print(filtered);
+    }
+
+    if (_pick_count == 0) {
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextLeftAlign(4, y + RIFT_LINE_H, "(no contacts heard yet)");
+    }
+
+    // scroll position indicator when the list doesn't fit
+    if (total > rows) {
+      display.setColor(UIColor::secondary_txt);
+      char pos[16];
+      sprintf(pos, "%d/%d", _pick_idx + 1, total);
+      display.drawTextRightAlign(display.width() - 4, BODY_TOP + 4, pos);
+    }
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, INPUT_Y, "trackball up/down  ENTER pick  click back");
+
+    renderNavBar(display, 2);
+    return 1000;
+  }
+
+  // keep the selected row inside the visible window
+  void ensurePickVisible() {
+    int rows = pickerRows();
+    if (_pick_idx < _pick_scroll) _pick_scroll = _pick_idx;
+    if (_pick_idx >= _pick_scroll + rows) _pick_scroll = _pick_idx - rows + 1;
+    if (_pick_scroll < 0) _pick_scroll = 0;
+  }
+
+  bool handlePickerInput(char c) {
+    int total = _pick_count + 1;   // +1 for Public
+    if (c == KEY_UP) {
+      _pick_idx = (_pick_idx + total - 1) % total;
+      ensurePickVisible();
+      return true;
+    }
+    if (c == KEY_DOWN) {
+      _pick_idx = (_pick_idx + 1) % total;
+      ensurePickVisible();
+      return true;
+    }
+    if (c == KEY_ENTER) {
+      if (_pick_idx == 0) {
+        _target_is_channel = true;
+      } else {
+        _target_is_channel = false;
+        PickEntry* e = &_picks[_pick_idx - 1];
+        memcpy(_target_key, e->key, 6);
+        StrHelper::strncpy(_target_name, e->name, sizeof(_target_name));
+      }
+      _picking = false;
+      return true;
+    }
+    // no dedicated ESC key on this keyboard - trackball click backs out too
+    if (c == KEY_CANCEL || c == KEY_NEXT || c == KEY_PREV) { _picking = false; return true; }
+    return true;   // swallow everything else while picking
+  }
+
 public:
-  RiftCommsScreen(UITask* task) : _task(task), _len(0), _scroll(0) { _input[0] = 0; }
+  RiftCommsScreen(UITask* task)
+     : _task(task), _len(0), _scroll(0), _target_is_channel(true),
+       _picking(false), _pick_idx(0), _pick_scroll(0), _pick_count(0) {
+    _input[0] = 0;
+    _target_name[0] = 0;
+    memset(_target_key, 0, sizeof(_target_key));
+  }
 
   bool isComposing() const { return _len > 0; }
 
+  void onDelivered(uint32_t ack_hash, uint32_t trip_ms) {
+    msg_log.markDelivered(ack_hash, trip_ms);
+  }
+
   int render(DisplayDriver& display) override {
+    if (_picking) return renderPicker(display);
+
     ChannelDetails ch;
-    renderTitleBar(display, _task, getPublicChannel(ch) ? ch.name : "NO CHANNEL");
+    if (_target_is_channel) {
+      renderTitleBar(display, _task, getPublicChannel(ch) ? ch.name : "NO CHANNEL");
+    } else {
+      renderTitleBar(display, _task, _target_name);
+    }
 
     display.setTextSize(1);
 
@@ -454,12 +680,19 @@ public:
       char filtered[sizeof(p->msg)];
       display.translateUTF8ToBlocks(filtered, p->msg, sizeof(filtered));
 
-      char head_line[80];
+      char head_line[96];
       char filtered_origin[sizeof(p->origin)];
       display.translateUTF8ToBlocks(filtered_origin, p->origin, sizeof(filtered_origin));
       int hh = (p->timestamp / 3600) % 24;
       int mm = (p->timestamp / 60) % 60;
-      sprintf(head_line, "%02d:%02d %s", hh, mm, filtered_origin);
+
+      char ack_buf[16];
+      const char* ack = deliveryLabel(p, ack_buf, sizeof(ack_buf));
+      if (ack != NULL) {
+        sprintf(head_line, "%02d:%02d %s  %s", hh, mm, filtered_origin, ack);
+      } else {
+        sprintf(head_line, "%02d:%02d %s", hh, mm, filtered_origin);
+      }
 
       int body_lines = wrapText(filtered, avail_px, 0, NULL, 0);
       int block_h = (body_lines + 1) * RIFT_LINE_H;
@@ -479,6 +712,10 @@ public:
     display.setColor(UIColor::secondary_txt);
     display.drawRect(0, INPUT_Y - 4, display.width(), 1);
 
+    if (_len == 0) {
+      display.drawTextRightAlign(display.width() - 4, INPUT_Y, "ENTER: pick target");
+    }
+
     int max_chars = (display.width() - 16) / RIFT_CHAR_W;
     const char* shown = _input;
     if (_len > max_chars) shown = _input + (_len - max_chars);
@@ -494,6 +731,8 @@ public:
   }
 
   bool handleInput(char c) override {
+    if (_picking) return handlePickerInput(c);
+
     if (c == KEY_NEXT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV) { _task->cycleNavScreen(-1); return true; }
     if (c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
@@ -508,8 +747,13 @@ public:
       return true;
     }
 
-    if (c == KEY_ENTER) { send(); return true; }
-    if (c == KEY_CANCEL) { _input[0] = 0; _len = 0; return true; }
+    // Enter sends, or opens the target picker when there's nothing to send.
+    // (The T-Deck keyboard has no dedicated ESC key, so Enter carries both.)
+    if (c == KEY_ENTER) {
+      if (_len > 0) { send(); } else { openPicker(); }
+      return true;
+    }
+    if (c == KEY_CANCEL) { clearInput(); return true; }
     if (c == 8) {          // backspace - no KEY_* constant for it
       if (_len > 0) _input[--_len] = 0;
       return true;
@@ -643,6 +887,11 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
       _next_refresh = 100;
     }
   }
+}
+
+void UITask::msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) {
+  ((RiftCommsScreen *) nav_screens[2])->onDelivered(ack_hash, trip_time_millis);
+  _next_refresh = 100;   // reflect the new delivery state promptly
 }
 
 void UITask::userLedHandler() {

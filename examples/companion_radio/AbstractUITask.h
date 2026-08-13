@@ -41,6 +41,9 @@ public:
   void disableBluetooth() { _interfaceManager->disableBluetooth(); }
   virtual void msgRead(int msgcount) = 0;
   virtual void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) = 0;
+  // an outgoing direct message was acknowledged by its recipient. Intentionally
+  // not pure - UIs that don't surface delivery state need no implementation.
+  virtual void msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) { }
   virtual void notify(UIEventType t = UIEventType::none) = 0;
   virtual void loop() = 0;
 };

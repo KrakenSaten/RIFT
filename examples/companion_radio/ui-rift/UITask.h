@@ -99,6 +99,7 @@ public:
   // from AbstractUITask
   void msgRead(int msgcount) override;
   void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override;
+  void msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) override;
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;
 

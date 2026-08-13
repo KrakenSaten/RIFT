@@ -411,6 +411,24 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
   dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
 }
 
+int MyMesh::sendTextTo(ContactInfo* recipient, const char* text, uint32_t& expected_ack, uint32_t& est_timeout) {
+  expected_ack = 0;
+  est_timeout = 0;
+  if (recipient == NULL) return MSG_SEND_FAILED;
+
+  // use our own RTC rather than an externally supplied timestamp, to avoid
+  // tripping replay protection (see CMD_SEND_TXT_MSG handler)
+  int result = sendMessage(*recipient, getRTCClock()->getCurrentTimeUnique(), 0, text, expected_ack, est_timeout);
+
+  if (result != MSG_SEND_FAILED && expected_ack) {
+    expected_ack_table[next_ack_idx].msg_sent = _ms->getMillis(); // add to circular table
+    expected_ack_table[next_ack_idx].ack = expected_ack;
+    expected_ack_table[next_ack_idx].contact = recipient;
+    next_ack_idx = (next_ack_idx + 1) % EXPECTED_ACK_TABLE_SIZE;
+  }
+  return result;
+}
+
 ContactInfo*  MyMesh::processAck(const uint8_t *data) {
   // see if matches any in a table
   for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; i++) {
@@ -420,6 +438,12 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
       uint32_t trip_time = _ms->getMillis() - expected_ack_table[i].msg_sent;
       memcpy(&out_frame[5], &trip_time, 4);
       _serial->writeFrame(out_frame, 9);
+
+      if (_ui) {
+        uint32_t ack_hash;
+        memcpy(&ack_hash, data, 4);
+        _ui->msgDelivered(ack_hash, trip_time);
+      }
 
       // NOTE: the same ACK can be received multiple times!
       expected_ack_table[i].ack = 0; // clear expected hash, now that we have received ACK

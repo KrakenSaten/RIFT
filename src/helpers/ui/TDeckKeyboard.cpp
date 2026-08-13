@@ -63,6 +63,12 @@ char TDeckKeyboard::poll() {
   }
 
   // stock firmware reports 0x00 when idle; anything >127 is bogus
-  if ((uint8_t) key > 127) return 0;
-  return key;
+  if ((uint8_t) key > 127) key = 0;
+
+  // Edge detection: the co-processor keeps returning the same key while it is
+  // held, so report it only on the transition out of idle. Without this a
+  // single press fires repeatedly at our poll rate.
+  char emit = (key != 0 && _last_raw == 0) ? key : 0;
+  _last_raw = key;
+  return emit;
 }

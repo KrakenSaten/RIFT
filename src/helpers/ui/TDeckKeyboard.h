@@ -44,11 +44,12 @@ class TDeckKeyboard {
   unsigned long _next_poll;
   uint8_t _seen[8];      // I2C addresses that responded at begin(), for diagnostics
   uint8_t _seen_count;
+  char _last_raw;        // previous raw read, for edge detection
 
   uint8_t scanBus();
 
 public:
-  TDeckKeyboard() : _present(false), _failures(0), _next_poll(0), _seen_count(0) { }
+  TDeckKeyboard() : _present(false), _failures(0), _next_poll(0), _seen_count(0), _last_raw(0) { }
 
   void begin();
 
