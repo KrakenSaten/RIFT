@@ -47,6 +47,8 @@
 
 static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "MESH", "NODES", "RADAR", "COMMS", "SYSTEM" };
 
+// channel the COMMS screen starts on; any configured channel can be selected
+// from the target picker at runtime
 #ifndef RIFT_PUBLIC_CHANNEL_IDX
   #define RIFT_PUBLIC_CHANNEL_IDX 0
 #endif
@@ -1131,18 +1133,22 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
   int _len;
   int _scroll;      // 0 = pinned to newest
 
-  // current send target: Public channel, or a contact by pubkey prefix
+  // current send target: a group channel by index, or a contact by pubkey prefix
   bool _target_is_channel;
+  uint8_t _target_channel_idx;
   uint8_t _target_key[6];
   char _target_name[32];
 
-  // target picker sub-view
+  // target picker sub-view. Channels and contacts share one list; each entry
+  // carries what it needs to become the send target.
   bool _picking;
   int _pick_idx;
   int _pick_scroll;   // index of the first visible row
   struct PickEntry {
     char name[32];
-    uint8_t key[6];
+    bool is_channel;
+    uint8_t channel_idx;   // channels only
+    uint8_t key[6];        // contacts only
   };
   PickEntry _picks[RIFT_PICKER_MAX];
   int _pick_count;
@@ -1151,8 +1157,8 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
   static const int BODY_BOTTOM = 194;
   static const int INPUT_Y = 204;
 
-  bool getPublicChannel(ChannelDetails& ch) {
-    return the_mesh.getChannel(RIFT_PUBLIC_CHANNEL_IDX, ch) && ch.name[0] != 0;
+  bool getTargetChannel(ChannelDetails& ch) {
+    return the_mesh.getChannel(_target_channel_idx, ch) && ch.name[0] != 0;
   }
 
   // from ContactVisitor - called by scanRecentContacts(), already ordered by
@@ -1167,13 +1173,31 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
 
     PickEntry* e = &_picks[_pick_count++];
     StrHelper::strncpy(e->name, contact.name, sizeof(e->name));
+    e->is_channel = false;
+    e->channel_idx = 0;
     memcpy(e->key, contact.id.pub_key, 6);
   }
 
   void openPicker() {
     _pick_count = 0;
-    // scan more than we can show, since repeaters/sensors get filtered out
+
+    // configured channels first. There is no getNumChannels() - num_channels is
+    // protected and only tracks addChannel() - so probe the slots and skip the
+    // ones with no name.
+    for (int i = 0; i < MAX_GROUP_CHANNELS && _pick_count < RIFT_PICKER_MAX; i++) {
+      ChannelDetails ch;
+      if (!the_mesh.getChannel(i, ch) || ch.name[0] == 0) continue;
+
+      PickEntry* e = &_picks[_pick_count++];
+      StrHelper::strncpy(e->name, ch.name, sizeof(e->name));
+      e->is_channel = true;
+      e->channel_idx = (uint8_t) i;
+      memset(e->key, 0, sizeof(e->key));
+    }
+
+    // then contacts, most recently heard first (scanRecentContacts sorts them)
     the_mesh.scanRecentContacts(0, this);
+
     _picking = true;
     _pick_idx = 0;
     _pick_scroll = 0;
@@ -1181,7 +1205,7 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
 
   void sendToChannel() {
     ChannelDetails ch;
-    if (!getPublicChannel(ch)) {
+    if (!getTargetChannel(ch)) {
       _task->showAlert("No channel!", 1200);
       return;
     }
@@ -1252,34 +1276,32 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
 
   int pickerRows() const { return (BODY_BOTTOM - (BODY_TOP + 4)) / RIFT_LINE_H; }
 
-  // name for row i of the combined list (row 0 is always the Public channel)
-  const char* pickRowName(int i, ChannelDetails& ch) {
-    if (i == 0) return getPublicChannel(ch) ? ch.name : "Public";
-    return _picks[i - 1].name;
-  }
-
   int renderPicker(DisplayDriver& display) {
     renderTitleBar(display, _task, "SELECT TARGET");
     display.setTextSize(1);
 
-    int total = _pick_count + 1;
+    int total = _pick_count;
     int rows = pickerRows();
     int y = BODY_TOP + 4;
-    ChannelDetails ch;
 
     for (int i = _pick_scroll; i < total && i < _pick_scroll + rows; i++, y += RIFT_LINE_H) {
       bool sel = (_pick_idx == i);
       display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
       char filtered[32];
-      display.translateUTF8ToBlocks(filtered, pickRowName(i, ch), sizeof(filtered));
+      display.translateUTF8ToBlocks(filtered, _picks[i].name, sizeof(filtered));
       display.setCursor(4, y);
       display.print(sel ? "> " : "  ");
       display.print(filtered);
+
+      // channels are broadcast, contacts are addressed - worth distinguishing,
+      // not least because only contacts can report delivery
+      display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
+      display.drawTextRightAlign(display.width() - 4, y, _picks[i].is_channel ? "channel" : "direct");
     }
 
     if (_pick_count == 0) {
       display.setColor(UIColor::secondary_txt);
-      display.drawTextLeftAlign(4, y + RIFT_LINE_H, "(no contacts heard yet)");
+      display.drawTextLeftAlign(4, y + RIFT_LINE_H, "(no channels or contacts)");
     }
 
     // scroll position indicator when the list doesn't fit
@@ -1306,7 +1328,12 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
   }
 
   bool handlePickerInput(char c) {
-    int total = _pick_count + 1;   // +1 for Public
+    int total = _pick_count;
+    if (total == 0) {
+      // nothing to choose - don't trap the user in an empty picker
+      if (c == KEY_CANCEL || c == KEY_ENTER || c == KEY_NEXT || c == KEY_PREV) _picking = false;
+      return true;
+    }
     if (c == KEY_UP) {
       _pick_idx = (_pick_idx + total - 1) % total;
       ensurePickVisible();
@@ -1318,14 +1345,14 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
       return true;
     }
     if (c == KEY_ENTER) {
-      if (_pick_idx == 0) {
-        _target_is_channel = true;
+      PickEntry* e = &_picks[_pick_idx];
+      _target_is_channel = e->is_channel;
+      if (e->is_channel) {
+        _target_channel_idx = e->channel_idx;
       } else {
-        _target_is_channel = false;
-        PickEntry* e = &_picks[_pick_idx - 1];
         memcpy(_target_key, e->key, 6);
-        StrHelper::strncpy(_target_name, e->name, sizeof(_target_name));
       }
+      StrHelper::strncpy(_target_name, e->name, sizeof(_target_name));
       _picking = false;
       return true;
     }
@@ -1336,7 +1363,8 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
 
 public:
   RiftCommsScreen(UITask* task)
-     : _task(task), _len(0), _scroll(0), _target_is_channel(true),
+     : _task(task), _len(0), _scroll(0),
+       _target_is_channel(true), _target_channel_idx(RIFT_PUBLIC_CHANNEL_IDX),
        _picking(false), _pick_idx(0), _pick_scroll(0), _pick_count(0) {
     _input[0] = 0;
     _target_name[0] = 0;
@@ -1354,7 +1382,9 @@ public:
 
     ChannelDetails ch;
     if (_target_is_channel) {
-      renderTitleBar(display, _task, getPublicChannel(ch) ? ch.name : "NO CHANNEL");
+      // read the name live rather than trusting the cached one, so a channel
+      // reconfigured from the companion app doesn't show a stale label
+      renderTitleBar(display, _task, getTargetChannel(ch) ? ch.name : "NO CHANNEL");
     } else {
       renderTitleBar(display, _task, _target_name);
     }

@@ -100,9 +100,10 @@ packet. So **send an advert from SYSTEM first**, and confirm the T-Deck appears
 in the other node's contact list. Public-channel messages work without this,
 because channels use a shared key.
 
-In COMMS, press Enter on an empty line to pick a target: the Public channel, or
-a contact. Repeaters and sensors are filtered out of the picker — nobody is
-reading them.
+In COMMS, press Enter on an empty line to pick a target. The list holds every
+configured group channel (marked `channel`) followed by contacts, most recently
+heard first (marked `direct`). Repeaters and sensors are filtered out — nobody
+is reading them.
 
 Direct messages show delivery state (`...` → `ACK 1.2s`, or `no ack` on
 timeout). Channel messages show none: they are always flooded and carry no
@@ -194,9 +195,6 @@ channel, one row per sweep.
 **No per-node signal strength in NODES.** Adverts are cached without RSSI, so
 brightness encodes recency instead of link quality.
 
-**The Public channel is hardcoded to channel index 0.** Other configured
-channels are not yet selectable.
-
 **Keyboard arrow keys are unreachable.** `TDeckKeyboard` discards bytes above
 127, which is where the arrow codes live. The trackball provides directions
 instead, so this has not mattered in practice.
@@ -225,7 +223,6 @@ Resource use: ~49 % of internal static RAM, ~24 % of the 6.5 MB app partition.
 
 Possible next steps, roughly by value:
 
-- Channel selection in COMMS, instead of the hardcoded Public channel
 - Persist message history across reboots
 - Report the `Wire.begin()` ordering bug upstream
 - Per-contact detail view (paths, keys, last-heard history)
