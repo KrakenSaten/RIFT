@@ -727,6 +727,23 @@ public:
     display.drawTextLeftAlign(4, y, tmp);
     y += RIFT_LINE_H;
 
+#if ENV_INCLUDE_GPS == 1
+    // whether this unit actually has a receiver fitted is answerable here rather
+    // than from a spec sheet: the sensor manager probes the UART at boot
+    if (_task->hasGPSHardware()) {
+      LocationProvider* nmea = sensors.getLocationProvider();
+      if (nmea != NULL && nmea->isValid()) {
+        sprintf(tmp, "GPS: %s, fix, %d sat", _task->getGPSState() ? "on" : "off",
+                nmea->satellitesCount());
+      } else {
+        sprintf(tmp, "GPS: %s, no fix", _task->getGPSState() ? "on" : "off");
+      }
+    } else {
+      strcpy(tmp, "GPS: none detected");
+    }
+    display.drawTextLeftAlign(4, y, tmp);
+#endif
+
 #ifdef RIFT_INPUT_TOUCH
     // shown while confirming the raw->display axis mapping is right
     if (rift_touch.isPresent()) {
@@ -2463,6 +2480,15 @@ char UITask::handleTripleClick(char c) {
   toggleBuzzer();
   c = 0;
   return c;
+}
+
+bool UITask::hasGPSHardware() {
+  if (_sensors == NULL) return false;
+  int num = _sensors->getNumSettings();
+  for (int i = 0; i < num; i++) {
+    if (strcmp(_sensors->getSettingName(i), "gps") == 0) return true;
+  }
+  return false;
 }
 
 bool UITask::getGPSState() {

@@ -108,6 +108,9 @@ public:
 
   void toggleBuzzer();
   bool getGPSState();
+  // whether GPS hardware was detected at boot; the "gps" setting only exists
+  // when the sensor manager actually saw a receiver on the UART
+  bool hasGPSHardware();
   void toggleGPS();
 
 

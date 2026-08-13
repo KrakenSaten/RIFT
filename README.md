@@ -1,16 +1,30 @@
 # RIFT — Radio Intelligence & Field Terminal
 
-A custom firmware UI for the **original LilyGO T-Deck**, built on upstream
-[MeshCore](https://github.com/meshcore-dev/MeshCore).
+A custom firmware UI for the **original LilyGO T-Deck**, built on
+[**MeshCore**](https://github.com/meshcore-dev/MeshCore) by
+**Scott Powell** ([rippleradios.com](https://rippleradios.com)) and the MeshCore
+contributors.
+
+> RIFT is only a user interface. Every part that makes the radio work — the mesh
+> protocol, routing, encryption, the SX1262 and RadioLib integration, the board
+> support — is MeshCore's work, used unmodified. All credit for that belongs
+> upstream. If MeshCore is useful to you, support it:
+> [buymeacoffee.com/ripplebiz](https://buymeacoffee.com/ripplebiz) ·
+> [Discord](https://meshcore.gg) · [docs.meshcore.io](https://docs.meshcore.io)
 
 RIFT turns the T-Deck into a standalone mesh terminal: read and write MeshCore
 messages using the physical keyboard, with no phone or companion app involved,
 plus passive Wi-Fi/BLE situational awareness and a view of the mesh topology.
 
 Upstream's on-device UI is a status display — it shows an unread count and
-previews incoming messages, but cannot compose. The companion phone app is what
-normally does the typing. RIFT replaces that UI with one designed for a device
-that has its own keyboard.
+previews incoming messages, but cannot compose. Writing a message normally means
+pairing the node to a MeshCore client over BLE, USB or Wi-Fi: the
+[web app](https://app.meshcore.nz),
+[Android](https://play.google.com/store/apps/details?id=com.liamcottle.meshcore.android)
+or [iOS](https://apps.apple.com/us/app/meshcore/id6742354151) apps, or
+[meshcore-cli](https://github.com/fdlamotte/meshcore-cli). RIFT replaces the
+on-device UI with one built around the keyboard the T-Deck already has, so no
+second device is needed.
 
 ---
 
@@ -24,11 +38,8 @@ Original LilyGO T-Deck — **not** T-Deck Pro:
 - Physical QWERTY keyboard (I²C co-processor at `0x55`)
 - Trackball (4 directional lines + centre click)
 - GT911 capacitive touchscreen at I²C `0x14`
-- No onboard GPS
-
-Note: the design document this project started from stated the original T-Deck
-has no touchscreen. That is wrong - an I²C scan from the device found the GT911.
-Worth remembering when trusting other claims in that document.
+- GPS is optional and varies by unit — the firmware probes for a receiver on
+  GPIO43/44 at boot, and SYSTEM reports whether one was found
 
 ---
 
@@ -243,9 +254,25 @@ colour-LCD boards likely has the same latent issue.
 
 ## Upstream MeshCore
 
-RIFT is a fork of [MeshCore](https://github.com/meshcore-dev/MeshCore) by Scott
-Powell / rippleradios.com, MIT licensed (see `license.txt`). The mesh protocol,
-RadioLib integration and radio drivers are upstream's work, used unmodified.
+RIFT is a fork of [MeshCore](https://github.com/meshcore-dev/MeshCore), created
+by **Scott Powell** (rippleradios.com) and developed with contributions from well
+over a hundred people — see the
+[contributor list](https://github.com/meshcore-dev/MeshCore/graphs/contributors).
+MIT licensed; `license.txt` is unchanged.
+
+To be clear about the split: MeshCore is the hard part. Multi-hop routing, the
+packet protocol, encryption, ACK handling, path discovery, the radio drivers and
+support for dozens of boards are all theirs, and RIFT changes none of it. What
+this fork adds is a T-Deck-specific user interface and its input drivers.
+
+If you are looking for MeshCore itself, go upstream. It supports far more
+hardware, has prebuilt firmware and a web flasher, and actual releases:
+
+- Project: <https://github.com/meshcore-dev/MeshCore>
+- Documentation: <https://docs.meshcore.io>
+- Flasher: <https://meshcore.io/flasher>
+- Community: <https://meshcore.gg>
+- Support the work: <https://buymeacoffee.com/ripplebiz>
 
 The rest of this repository is upstream's tree: other boards, the repeater and
 room-server examples, the companion protocol, and so on. Useful references:
