@@ -3,6 +3,29 @@
 #include "../MyMesh.h"
 #include "target.h"
 
+#ifdef RIFT_RADAR
+  #include <WiFi.h>
+  #include <BLEDevice.h>
+  #include <BLEScan.h>
+  #include <BLEAdvertisedDevice.h>
+
+  #ifndef RIFT_WIFI_DWELL_MILLIS
+    #define RIFT_WIFI_DWELL_MILLIS 120    // per channel; ~1.6s for a full sweep
+  #endif
+  #ifndef RIFT_BLE_DWELL_SECS
+    #define RIFT_BLE_DWELL_SECS 3
+  #endif
+  #ifndef RIFT_SCAN_GAP_MILLIS
+    #define RIFT_SCAN_GAP_MILLIS 400      // breathing room between sweeps
+  #endif
+  #ifndef RIFT_RF_AGE_MILLIS
+    #define RIFT_RF_AGE_MILLIS 45000      // forget contacts not heard for 45s
+  #endif
+  #ifndef RIFT_SCAN_STOP_GRACE_MILLIS
+    #define RIFT_SCAN_STOP_GRACE_MILLIS 700   // let a scan wind down before deinit
+  #endif
+#endif
+
 #ifndef AUTO_OFF_MILLIS
   #define AUTO_OFF_MILLIS     15000   // 15 seconds
 #endif
@@ -314,6 +337,30 @@ public:
     display.drawTextCentered(display.width() / 2, display.height() / 2 + 20, tmp);
 #endif
 
+    // free heap matters here: bringing up the Wi-Fi/BLE stacks for RADAR is by
+    // far the largest allocation this firmware makes
+    display.setColor(UIColor::secondary_txt);
+    sprintf(tmp, "free heap: %u KB", (unsigned) (ESP.getFreeHeap() / 1024));
+    display.drawTextCentered(display.width() / 2, display.height() / 2 + 32, tmp);
+
+    // why we last restarted - distinguishes a software crash (PANIC) from a
+    // power problem (BROWNOUT), which look identical from the outside
+    const char* rr;
+    switch (esp_reset_reason()) {
+      case ESP_RST_POWERON:  rr = "power on"; break;
+      case ESP_RST_SW:       rr = "sw restart"; break;
+      case ESP_RST_PANIC:    rr = "PANIC (crash)"; break;
+      case ESP_RST_INT_WDT:  rr = "int watchdog"; break;
+      case ESP_RST_TASK_WDT: rr = "task watchdog"; break;
+      case ESP_RST_WDT:      rr = "watchdog"; break;
+      case ESP_RST_BROWNOUT: rr = "BROWNOUT (power)"; break;
+      case ESP_RST_DEEPSLEEP: rr = "deep sleep"; break;
+      case ESP_RST_EXT:      rr = "ext reset"; break;
+      default:               rr = "unknown"; break;
+    }
+    sprintf(tmp, "last reset: %s", rr);
+    display.drawTextCentered(display.width() / 2, display.height() / 2 + 44, tmp);
+
     display.setColor(UIColor::title_txt);
     display.drawTextCentered(display.width() / 2, display.height() - 34, "ENTER: send advert");
 
@@ -371,6 +418,362 @@ public:
     return false;
   }
 };
+
+#ifdef RIFT_RADAR
+
+// Shared scan result table. BLE advertisement callbacks fire on the Bluedroid
+// task (core 0) while rendering happens on the loop task (core 1), so every
+// touch of this table is inside the spinlock.
+#define RIFT_RF_MAX 48
+
+struct RfContact {
+  char name[24];
+  int8_t rssi;
+  uint8_t channel;    // wifi only
+  bool is_wifi;
+  bool encrypted;     // wifi only
+  unsigned long seen_at;
+};
+
+static RfContact rf_table[RIFT_RF_MAX];
+static int rf_count = 0;
+static portMUX_TYPE rf_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// insert or refresh by name+type
+static void rfUpsert(const char* name, int8_t rssi, uint8_t channel, bool is_wifi, bool encrypted) {
+  portENTER_CRITICAL(&rf_mux);
+  int slot = -1;
+  for (int i = 0; i < rf_count; i++) {
+    if (rf_table[i].is_wifi == is_wifi && strncmp(rf_table[i].name, name, sizeof(rf_table[i].name) - 1) == 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) {
+    if (rf_count < RIFT_RF_MAX) {
+      slot = rf_count++;
+    } else {
+      int weakest = 0;   // table full - let stronger signals displace weaker
+      for (int i = 1; i < rf_count; i++) {
+        if (rf_table[i].rssi < rf_table[weakest].rssi) weakest = i;
+      }
+      if (rssi <= rf_table[weakest].rssi) { portEXIT_CRITICAL(&rf_mux); return; }
+      slot = weakest;
+    }
+  }
+  RfContact* e = &rf_table[slot];
+  StrHelper::strncpy(e->name, (name && name[0]) ? name : "(hidden)", sizeof(e->name));
+  e->rssi = rssi;
+  e->channel = channel;
+  e->is_wifi = is_wifi;
+  e->encrypted = encrypted;
+  e->seen_at = millis();
+  portEXIT_CRITICAL(&rf_mux);
+}
+
+static void rfClear() {
+  portENTER_CRITICAL(&rf_mux);
+  rf_count = 0;
+  portEXIT_CRITICAL(&rf_mux);
+}
+
+// drop entries not heard recently, so the picture reflects what's here now
+static void rfAgeOut() {
+  unsigned long now = millis();
+  portENTER_CRITICAL(&rf_mux);
+  int w = 0;
+  for (int i = 0; i < rf_count; i++) {
+    if (now - rf_table[i].seen_at <= RIFT_RF_AGE_MILLIS) {
+      if (w != i) rf_table[w] = rf_table[i];
+      w++;
+    }
+  }
+  rf_count = w;
+  portEXIT_CRITICAL(&rf_mux);
+}
+
+class RiftBleCallbacks : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice dev) override {
+    // copy immediately - getName()/toString() return temporaries whose c_str()
+    // would dangle past the end of this statement
+    char name[24];
+    if (dev.haveName()) {
+      StrHelper::strncpy(name, dev.getName().c_str(), sizeof(name));
+    } else {
+      StrHelper::strncpy(name, dev.getAddress().toString().c_str(), sizeof(name));
+    }
+    rfUpsert(name, (int8_t) dev.getRSSI(), 0, false, false);
+  }
+};
+static RiftBleCallbacks ble_callbacks;
+
+// set on core 0 by the scan-completion callback, consumed by poll() on core 1
+static volatile bool ble_scan_done = false;
+static void onBleScanComplete(BLEScanResults results) { ble_scan_done = true; }
+
+// evenly spread directions for the scatter plot (cos/sin * 100)
+static const int8_t RF_DIR_X[16] = { 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92, -100, -92, -71, -38 };
+static const int8_t RF_DIR_Y[16] = { -100, -92, -71, -38, 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92 };
+
+// RADAR: passive Wi-Fi + BLE situational awareness.
+//
+// Wi-Fi and BLE share one 2.4GHz PHY and antenna on the ESP32-S3, and the
+// coexistence arbiter time-slices them - running both at once halves each. So
+// this alternates strictly: Wi-Fi scan, then BLE scan, then repeat.
+//
+// Everything here must stay non-blocking. There is no watchdog on the main
+// loop (loopTaskWDTEnabled is false, and the IDF task WDT only watches core 0
+// idle), so a blocking call would silently starve the LoRa radio rather than
+// panicking. Both scan APIs have a blocking overload that is easy to hit by
+// accident - see the comments at each call site.
+class RiftRadarScreen : public UIScreen {
+  UITask* _task;
+
+  enum ScanState { OFF, START_WIFI, WIFI_RUNNING, START_BLE, BLE_RUNNING, STOPPING };
+  ScanState _state;
+  bool _want_active;   // set by screen changes; acted on from the main loop
+  bool _wifi_up, _ble_up;
+  unsigned long _next_step;
+  int _scroll;
+  int _last_n;
+
+  static const int LIST_TOP = 118;
+  static const int LIST_BOTTOM = 208;
+
+  void beginWifi() {
+    if (!_wifi_up) {
+      WiFi.mode(WIFI_STA);
+      WiFi.disconnect(false, false);   // never associate; listen only
+      _wifi_up = true;
+    }
+    // async=true is essential - the default-argument form blocks up to 10s.
+    // passive=true means no probe requests are transmitted.
+    WiFi.scanNetworks(true, true, true, RIFT_WIFI_DWELL_MILLIS);
+  }
+
+  void collectWifi(int n) {
+    for (int i = 0; i < n; i++) {
+      String ssid = WiFi.SSID(i);
+      rfUpsert(ssid.c_str(), (int8_t) WiFi.RSSI(i), (uint8_t) WiFi.channel(i),
+               true, WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    }
+    WiFi.scanDelete();   // free the result array promptly
+  }
+
+  void beginBle() {
+    if (!_ble_up) {
+      BLEDevice::init("");
+      _ble_up = true;
+    }
+    BLEScan* scan = BLEDevice::getScan();
+    scan->setActiveScan(false);   // passive: do NOT transmit SCAN_REQ
+    scan->setInterval(100);
+    scan->setWindow(99);
+    scan->setAdvertisedDeviceCallbacks(&ble_callbacks, false, true);
+    ble_scan_done = false;
+    // the function-pointer overload returns immediately; start(duration, bool)
+    // would block for the whole duration
+    scan->start(RIFT_BLE_DWELL_SECS, onBleScanComplete, false);
+  }
+
+public:
+  RiftRadarScreen(UITask* task)
+     : _task(task), _state(OFF), _want_active(false), _wifi_up(false), _ble_up(false),
+       _next_step(0), _scroll(0), _last_n(0) { }
+
+  // Only records intent. Screen changes can originate from a mesh callback
+  // (an incoming message switches to the preview screen), and tearing the BT
+  // controller down from inside the LoRa receive path crashes the device -
+  // so the actual work happens in service(), on the main loop.
+  void setActive(bool active) { _want_active = active; }
+
+  // Ask the radios to stop, but do NOT deinit yet - BLEDevice::deinit() while a
+  // scan is still winding down panics the device. The actual teardown happens
+  // in the STOPPING state after a grace period.
+  void beginTeardown() {
+    if (_ble_up) {
+      BLEDevice::getScan()->setAdvertisedDeviceCallbacks(NULL);   // no late callbacks
+      BLEDevice::getScan()->stop();
+    }
+    _state = STOPPING;
+    _next_step = millis() + RIFT_SCAN_STOP_GRACE_MILLIS;
+  }
+
+  void finishTeardown() {
+    if (_ble_up) {
+      // Deliberately NOT calling BLEDevice::deinit(): in this ESP32 core it
+      // panics when a scan has recently been active, and no amount of grace
+      // period made it reliable. The stack stays initialised and idle - it
+      // transmits nothing once the scan is stopped. _ble_up stays true so we
+      // don't re-init on the next visit.
+      BLEDevice::getScan()->clearResults();
+    }
+    if (_wifi_up) {
+      WiFi.scanDelete();
+      WiFi.mode(WIFI_OFF);
+      _wifi_up = false;
+    }
+    rfClear();   // hand the heap back; the mesh is the primary job
+    _state = OFF;
+  }
+
+  // Driven every main-loop iteration, whichever screen is showing, so that
+  // teardown still happens after the user navigates away.
+  void service() {
+    if (!_want_active) {
+      if (_state == STOPPING) {
+        if (millis() >= _next_step) finishTeardown();
+      } else if (_state != OFF || _wifi_up || _ble_up) {
+        beginTeardown();
+      }
+      return;
+    }
+    if (_state == OFF || _state == STOPPING) {
+      _state = START_WIFI;   // came back before teardown finished
+      _next_step = 0;
+    }
+
+    if (millis() < _next_step) return;
+
+    switch (_state) {
+      case START_WIFI:
+        beginWifi();
+        _state = WIFI_RUNNING;
+        break;
+
+      case WIFI_RUNNING: {
+        int n = WiFi.scanComplete();
+        if (n >= 0) {
+          collectWifi(n);
+          _state = START_BLE;
+        } else if (n == WIFI_SCAN_FAILED) {
+          _state = START_BLE;   // don't get stuck; try the other radio
+        }
+        break;
+      }
+
+      case START_BLE:
+        beginBle();
+        _state = BLE_RUNNING;
+        break;
+
+      case BLE_RUNNING:
+        if (ble_scan_done) {
+          BLEDevice::getScan()->clearResults();   // keep the internal map bounded
+          rfAgeOut();
+          _state = START_WIFI;
+          _next_step = millis() + RIFT_SCAN_GAP_MILLIS;
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  int render(DisplayDriver& display) override {
+    const char* status = "LIVE";
+    if (_state == OFF) status = "IDLE";
+    else if (!_wifi_up && !_ble_up) status = "INITIALISING";
+    renderTitleBar(display, _task, status);
+
+    // snapshot under the lock, then draw without holding it
+    RfContact snap[RIFT_RF_MAX];
+    int n;
+    portENTER_CRITICAL(&rf_mux);
+    n = rf_count;
+    memcpy(snap, rf_table, sizeof(RfContact) * n);
+    portEXIT_CRITICAL(&rf_mux);
+    _last_n = n;
+
+    int wifi_n = 0, ble_n = 0;
+    for (int i = 0; i < n; i++) {
+      if (snap[i].is_wifi) wifi_n++; else ble_n++;
+    }
+
+    // scatter: distance from centre derived from signal strength
+    int cx = display.width() / 2;
+    int cy = 66;
+    display.setColor(UIColor::secondary_txt);
+    display.drawRect(cx - 46, cy - 44, 92, 88);
+    display.drawRect(cx - 24, cy - 23, 48, 46);
+    display.setColor(UIColor::title_txt);
+    display.fillRect(cx - 1, cy - 1, 3, 3);   // us
+
+    for (int i = 0; i < n; i++) {
+      int s = snap[i].rssi;
+      if (s < -100) s = -100;
+      if (s > -30) s = -30;
+      int radius = ((-s - 30) * 42) / 70;   // -30dBm near centre, -100 at edge
+      int d = i & 15;
+      display.setColor(snap[i].is_wifi ? UIColor::corp_blue : UIColor::primary_txt);
+      display.fillRect(cx + (radius * RF_DIR_X[d]) / 100, cy + (radius * RF_DIR_Y[d]) / 100, 2, 2);
+    }
+
+    char tmp[64];
+    display.setTextSize(1);
+    display.setColor(UIColor::primary_txt);
+    sprintf(tmp, "%d WIFI   %d BLE", wifi_n, ble_n);
+    display.drawTextCentered(cx, 112, tmp);
+
+    // live heap while the RF stacks are up - this is where memory gets tight
+    display.setColor(UIColor::secondary_txt);
+    sprintf(tmp, "%uK", (unsigned) (ESP.getFreeHeap() / 1024));
+    display.drawTextRightAlign(display.width() - 4, 112, tmp);
+
+    // strongest first
+    for (int i = 0; i < n - 1; i++) {
+      for (int j = i + 1; j < n; j++) {
+        if (snap[j].rssi > snap[i].rssi) {
+          RfContact t = snap[i]; snap[i] = snap[j]; snap[j] = t;
+        }
+      }
+    }
+
+    int y = LIST_TOP;
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, y, "strongest:");
+    y += RIFT_LINE_H;
+
+    int type_x = display.width() - 108;
+    for (int i = _scroll; i < n && y < LIST_BOTTOM; i++, y += RIFT_LINE_H) {
+      char filtered[sizeof(snap[i].name)];
+      display.translateUTF8ToBlocks(filtered, snap[i].name, sizeof(filtered));
+
+      display.setColor(snap[i].is_wifi ? UIColor::corp_blue : UIColor::primary_txt);
+      display.drawTextEllipsized(4, y, type_x - 8, filtered);
+
+      display.setColor(UIColor::secondary_txt);
+      if (snap[i].is_wifi) {
+        sprintf(tmp, "WIFI c%d%s", snap[i].channel, snap[i].encrypted ? " *" : "");
+      } else {
+        strcpy(tmp, "BLE");
+      }
+      display.drawTextLeftAlign(type_x, y, tmp);
+
+      sprintf(tmp, "%d", snap[i].rssi);
+      display.drawTextRightAlign(display.width() - 4, y, tmp);
+    }
+
+    if (n == 0) {
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextCentered(cx, LIST_TOP + RIFT_LINE_H * 2, "listening...");
+    }
+
+    renderNavBar(display, 1);
+    return 700;   // coarse: the TFT shares its SPI bus with the LoRa radio
+  }
+
+  bool handleInput(char c) override {
+    if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
+    if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
+    if (c == KEY_UP) { if (_scroll > 0) _scroll--; return true; }
+    if (c == KEY_DOWN) { if (_scroll + 1 < _last_n) _scroll++; return true; }
+    return false;
+  }
+};
+
+#endif   // RIFT_RADAR
 
 class RiftMsgPreviewScreen : public UIScreen {
   UITask* _task;
@@ -808,7 +1211,11 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   splash = new RiftSplashScreen(this);
   msg_preview = new RiftMsgPreviewScreen(this);
   nav_screens[0] = new RiftMeshScreen(this, node_prefs);
+#ifdef RIFT_RADAR
+  nav_screens[1] = new RiftRadarScreen(this);
+#else
   nav_screens[1] = new RiftPlaceholderScreen(this, 1, "RF RADAR", "Wi-Fi / BLE / RF scan");
+#endif
   nav_screens[2] = new RiftCommsScreen(this);
   nav_screens[3] = new RiftSystemScreen(this);
   nav_idx = 0;
@@ -916,6 +1323,23 @@ void UITask::userLedHandler() {
 }
 
 void UITask::setCurrScreen(UIScreen* c) {
+#ifdef RIFT_RADAR
+  // UIScreen has no enter/exit hook and this is the single funnel every screen
+  // change passes through, so RADAR learns about focus here. This only records
+  // intent - see RiftRadarScreen::setActive().
+  //
+  // Only real navigation counts: a transient popup (an incoming message
+  // switching to the preview screen) must not tear the RF stacks down, both
+  // because the user is still "on" RADAR and because doing it mid-scan used to
+  // panic the device.
+  if (nav_screens[1] != NULL) {
+    bool is_nav = false;
+    for (int i = 0; i < RIFT_NAV_COUNT; i++) {
+      if (c == nav_screens[i]) { is_nav = true; break; }
+    }
+    if (is_nav) ((RiftRadarScreen *) nav_screens[1])->setActive(c == nav_screens[1]);
+  }
+#endif
   curr = c;
   _next_refresh = 100;
 }
@@ -1044,6 +1468,12 @@ void UITask::loop() {
 
 #ifdef PIN_BUZZER
   if (buzzer.isPlaying())  buzzer.loop();
+#endif
+
+#ifdef RIFT_RADAR
+  // serviced unconditionally, not via curr->poll(), so RF teardown still runs
+  // after navigating away from RADAR
+  if (nav_screens[1] != NULL) ((RiftRadarScreen *) nav_screens[1])->service();
 #endif
 
   if (curr) curr->poll();
