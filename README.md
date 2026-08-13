@@ -28,6 +28,33 @@ second device is needed.
 
 ---
 
+## How this was built
+
+The RIFT code in this fork was written by an AI assistant (Claude), directed and
+supervised by **mstr** ([KrakenSaten](https://github.com/KrakenSaten)), who
+specified the work, tested every change and is accountable for what ships here.
+
+That supervision is not a formality. The AI cannot flash a board or watch a
+radio, so nothing was accepted on the strength of "it compiles" — each change was
+flashed to physical hardware and verified before being committed. Several things
+the AI got wrong were caught exactly there:
+
+- it used a USB API that only reports true once a host *opens* the serial port,
+  so "keep the display on while charging" silently never worked
+- it parsed the touch controller using the datasheet's byte layout instead of the
+  one the hardware actually returns, giving impossible coordinates
+- it assumed keyboard and trackball pin behaviour that the hardware contradicted,
+  three separate times
+- it wrote documentation stating as fact things this device disproves
+
+Where its assumptions and the hardware disagreed, the hardware won — and the
+diagnostics on the SYSTEM screen exist because of it.
+
+**MeshCore itself is not AI-written.** The protocol, routing, encryption and radio
+drivers are the upstream project's work by human authors; see the credit above.
+
+---
+
 ## Hardware
 
 Original LilyGO T-Deck — **not** T-Deck Pro:
