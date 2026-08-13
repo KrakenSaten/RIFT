@@ -1,6 +1,4 @@
-## About MeshCore
-
-MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.
+Standalone MeshCore firmware UI for the original LilyGO T-Deck: keyboard-driven mesh messaging, passive Wi-Fi/BLE radar, and mesh topology view
 
 ## 🔍 What is MeshCore?
 
