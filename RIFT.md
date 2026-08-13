@@ -83,9 +83,10 @@ companion-radio build on every board.
 
 ## Screens and controls
 
-Navigation is shared: **trackball click** = next screen, **double-click** =
-previous, **trackball left/right** = previous/next, or **tap a nav-bar tab** to
-jump straight to it. **Backspace** goes one level back out of any sub-view.
+**Trackball click is Enter** — it selects, activates and sends, the same as the
+keyboard's Enter. Screen changes are covered by **rolling the trackball
+left/right**, **double-click** (previous screen), or **tapping a nav-bar tab**.
+**Backspace** goes one level back out of any sub-view.
 
 | Screen | What it shows | Screen-specific controls |
 |---|---|---|

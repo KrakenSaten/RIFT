@@ -1530,18 +1530,16 @@ public:
   }
 
   bool handleInput(char c) override {
-    if (c == KEY_NEXT || c == KEY_RIGHT) {
+    // Enter (and so a trackball click) steps through the unread one at a time -
+    // it used to clear the whole queue, which with click mapped to Enter would
+    // have discarded several messages on a single press.
+    if (c == KEY_NEXT || c == KEY_RIGHT || c == KEY_ENTER) {
       if (_back + 1 < msg_log.count) _back++;
       num_unread--;
       if (num_unread <= 0) {
         num_unread = 0;
         _task->gotoHomeScreen();
       }
-      return true;
-    }
-    if (c == KEY_ENTER) {
-      num_unread = 0;
-      _task->gotoHomeScreen();
       return true;
     }
     // the preview is an overlay on whatever you were doing - back dismisses it
@@ -2160,8 +2158,14 @@ void UITask::loop() {
   }
 #elif defined(PIN_USER_BTN)
   int ev = user_btn.check();
+  // A trackball with a click button should select, not page - so click is Enter,
+  // the same as the keyboard. Screen changes are already covered by rolling the
+  // trackball left/right and by tapping the nav bar, which is what freed this up.
+  // Double-click stays "previous screen": as a back action it would do nothing
+  // on most screens, and it keeps a navigation route that doesn't need the touch
+  // panel or a precise roll.
   if (ev == BUTTON_EVENT_CLICK) {
-    c = checkDisplayOn(KEY_NEXT);
+    c = checkDisplayOn(KEY_ENTER);
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
     c = handleLongPress(KEY_ENTER);
   } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
