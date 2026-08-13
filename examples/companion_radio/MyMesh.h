@@ -100,6 +100,12 @@ public:
   bool advert();
   void enterCLIRescue();
 
+  // advert() sends zero-hop, so only direct neighbours hear it. This floods the
+  // advert through the mesh instead, which is what distant nodes need before
+  // they can decrypt a direct message from us. Mirrors the companion protocol's
+  // CMD_SEND_SELF_ADVERT with its flood flag set.
+  bool advertFlood();
+
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
 
   // Send a text message to a contact from local UI code. Mirrors the companion

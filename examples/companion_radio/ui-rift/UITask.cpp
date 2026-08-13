@@ -402,8 +402,23 @@ class RiftSystemScreen : public UIScreen {
   // A small action menu rather than hidden letter shortcuts - discoverable, and
   // it leaves the printable keys free for the text fields.
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY };
-  enum Item { IT_ADVERT, IT_NAME, IT_CHANNEL, IT_COUNT };
-  static const char* ITEM_LABELS[IT_COUNT];
+  enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_PATHMODE, IT_COUNT };
+
+  // most labels are fixed; the path-mode row shows its current value
+  void itemLabel(int i, char* buf, size_t len) {
+    static const char* FIXED[] = {
+      "Send advert (neighbours)",
+      "Send advert (whole mesh)",
+      "Edit node name",
+      "Add channel",
+    };
+    if (i == IT_PATHMODE) {
+      uint8_t mode = the_mesh.getNodePrefs()->path_hash_mode;
+      snprintf(buf, len, "Path hash size: %d byte%s", mode + 1, mode == 0 ? "" : "s");
+    } else {
+      StrHelper::strncpy(buf, FIXED[i], len);
+    }
+  }
 
   Mode _mode;
   int _sel;
@@ -420,8 +435,29 @@ class RiftSystemScreen : public UIScreen {
         // contacts and silently drop it - so this is a prerequisite for
         // two-way DMs, not a nicety.
         _task->notify(UIEventType::ack);
-        _task->showAlert(the_mesh.advert() ? "Advert sent!" : "Advert failed", 1200);
+        _task->showAlert(the_mesh.advert() ? "Advert sent (direct)" : "Advert failed", 1200);
         break;
+
+      case IT_ADVERT_FLOOD:
+        // reaches nodes beyond direct RF range, which is what they need before
+        // they can decrypt a DM from us
+        _task->notify(UIEventType::ack);
+        _task->showAlert(the_mesh.advertFlood() ? "Advert flooded!" : "Advert failed", 1200);
+        break;
+
+      case IT_PATHMODE: {
+        // 0..2 maps to 1..3 bytes per path hash. Bigger hashes mean fewer
+        // collisions in a busy mesh, at slightly larger packets - and only
+        // affects flood-sent traffic, since direct sends carry a stored path.
+        NodePrefs* prefs = the_mesh.getNodePrefs();
+        prefs->path_hash_mode = (prefs->path_hash_mode + 1) % 3;
+        the_mesh.savePrefs();
+        char msg[40];
+        sprintf(msg, "Path hash: %d byte%s", prefs->path_hash_mode + 1,
+                prefs->path_hash_mode == 0 ? "" : "s");
+        _task->showAlert(msg, 1400);
+        break;
+      }
 
       case IT_NAME:
         _edit.begin(the_mesh.getNodeName(), sizeof(((NodePrefs*)0)->node_name) - 1);
@@ -616,7 +652,9 @@ public:
       display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
       display.setCursor(4, y);
       display.print(sel ? "> " : "  ");
-      display.print(ITEM_LABELS[i]);
+      char label[40];
+      itemLabel(i, label, sizeof(label));
+      display.print(label);
     }
 
     display.setColor(UIColor::secondary_txt);
@@ -758,11 +796,6 @@ public:
   }
 };
 
-const char* RiftSystemScreen::ITEM_LABELS[RiftSystemScreen::IT_COUNT] = {
-  "Send advert",
-  "Edit node name",
-  "Add channel",
-};
 
 // CONSTELLATION: the mesh as observed topology rather than a node count.
 //
