@@ -597,6 +597,29 @@ static RfContact rf_table[RIFT_RF_MAX];
 static int rf_count = 0;
 static portMUX_TYPE rf_mux = portMUX_INITIALIZER_UNLOCKED;
 
+// Waterfall history: strongest signal seen per Wi-Fi channel, one column per
+// completed sweep. This is not an SDR spectrum - the ESP32 gives no access to
+// raw RF - it is observed 802.11 channel occupancy over time, which is what
+// actually matters for picking a clear channel or spotting congestion.
+#define RIFT_WF_CHANNELS 14    // index 1..13 used
+#define RIFT_WF_SLICES   40
+
+static int8_t wf_hist[RIFT_WF_SLICES][RIFT_WF_CHANNELS];
+static int wf_count = 0;
+static int wf_head = RIFT_WF_SLICES - 1;   // newest slice
+
+static void wfPushSlice(const int8_t* per_channel) {
+  wf_head = (wf_head + 1) % RIFT_WF_SLICES;
+  if (wf_count < RIFT_WF_SLICES) wf_count++;
+  memcpy(wf_hist[wf_head], per_channel, RIFT_WF_CHANNELS);
+}
+
+static void wfClear() {
+  wf_count = 0;
+  wf_head = RIFT_WF_SLICES - 1;
+  memset(wf_hist, 0, sizeof(wf_hist));
+}
+
 // insert or refresh by name+type
 static void rfUpsert(const char* name, int8_t rssi, uint8_t channel, bool is_wifi, bool encrypted) {
   portENTER_CRITICAL(&rf_mux);
@@ -684,7 +707,9 @@ class RiftRadarScreen : public UIScreen {
   UITask* _task;
 
   enum ScanState { OFF, START_WIFI, WIFI_RUNNING, START_BLE, BLE_RUNNING, STOPPING };
+  enum View { VIEW_SCATTER, VIEW_WATERFALL };
   ScanState _state;
+  View _view;
   bool _want_active;   // set by screen changes; acted on from the main loop
   bool _wifi_up, _ble_up;
   unsigned long _next_step;
@@ -706,12 +731,23 @@ class RiftRadarScreen : public UIScreen {
   }
 
   void collectWifi(int n) {
+    int8_t per_channel[RIFT_WF_CHANNELS];
+    memset(per_channel, 0, sizeof(per_channel));
+
     for (int i = 0; i < n; i++) {
       String ssid = WiFi.SSID(i);
-      rfUpsert(ssid.c_str(), (int8_t) WiFi.RSSI(i), (uint8_t) WiFi.channel(i),
-               true, WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+      int8_t rssi = (int8_t) WiFi.RSSI(i);
+      uint8_t ch = (uint8_t) WiFi.channel(i);
+      rfUpsert(ssid.c_str(), rssi, ch, true, WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+
+      // strongest signal seen on each channel this sweep (0 means "nothing")
+      if (ch < RIFT_WF_CHANNELS && (per_channel[ch] == 0 || rssi > per_channel[ch])) {
+        per_channel[ch] = rssi;
+      }
     }
     WiFi.scanDelete();   // free the result array promptly
+
+    wfPushSlice(per_channel);
   }
 
   void beginBle() {
@@ -732,8 +768,8 @@ class RiftRadarScreen : public UIScreen {
 
 public:
   RiftRadarScreen(UITask* task)
-     : _task(task), _state(OFF), _want_active(false), _wifi_up(false), _ble_up(false),
-       _next_step(0), _scroll(0), _last_n(0) { }
+     : _task(task), _state(OFF), _view(VIEW_SCATTER), _want_active(false),
+       _wifi_up(false), _ble_up(false), _next_step(0), _scroll(0), _last_n(0) { }
 
   // Only records intent. Screen changes can originate from a mesh callback
   // (an incoming message switches to the preview screen), and tearing the BT
@@ -768,6 +804,7 @@ public:
       _wifi_up = false;
     }
     rfClear();   // hand the heap back; the mesh is the primary job
+    wfClear();   // history would be stale and misleading on return
     _state = OFF;
   }
 
@@ -825,7 +862,65 @@ public:
     }
   }
 
+  // colour ramp for observed signal strength; 0 means nothing heard
+  static ColorVal wfColor(int8_t rssi) {
+    if (rssi == 0) return 0;
+    if (rssi >= -55) return UIColor::warning_txt;     // strong
+    if (rssi >= -70) return UIColor::corp_blue;       // moderate
+    if (rssi >= -85) return UIColor::primary_txt;     // weak
+    return UIColor::secondary_txt;                    // barely there
+  }
+
+  int renderWaterfall(DisplayDriver& display) {
+    const char* status = (_state == OFF) ? "IDLE" : "WATERFALL";
+    renderTitleBar(display, _task, status);
+
+    display.setTextSize(1);
+
+    // channels across, time down (newest at top)
+    const int left = 22;
+    const int top = 30;
+    const int cell_w = 21;
+    const int cell_h = 4;
+    const int channels = 13;
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(2, top - 12, "now");
+
+    for (int s = 0; s < wf_count && s < RIFT_WF_SLICES; s++) {
+      int idx = (wf_head - s + RIFT_WF_SLICES * 2) % RIFT_WF_SLICES;
+      int y = top + s * cell_h;
+      if (y + cell_h > 186) break;
+
+      for (int ch = 1; ch <= channels; ch++) {
+        ColorVal c = wfColor(wf_hist[idx][ch]);
+        if (c == 0) continue;   // nothing heard - leave background
+        display.setColor(c);
+        display.fillRect(left + (ch - 1) * cell_w, y, cell_w - 2, cell_h - 1);
+      }
+    }
+
+    if (wf_count == 0) {
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextCentered(display.width() / 2, top + 40, "waiting for first sweep...");
+    }
+
+    // channel axis
+    display.setColor(UIColor::secondary_txt);
+    char tmp[8];
+    for (int ch = 1; ch <= channels; ch += 2) {
+      sprintf(tmp, "%d", ch);
+      display.drawTextCentered(left + (ch - 1) * cell_w + cell_w / 2, 190, tmp);
+    }
+    display.drawTextCentered(display.width() / 2, 202, "WIFI CHANNEL");
+
+    renderNavBar(display, RIFT_NAV_RADAR);
+    return 700;
+  }
+
   int render(DisplayDriver& display) override {
+    if (_view == VIEW_WATERFALL) return renderWaterfall(display);
+
     const char* status = "LIVE";
     if (_state == OFF) status = "IDLE";
     else if (!_wifi_up && !_ble_up) status = "INITIALISING";
@@ -887,6 +982,7 @@ public:
     int y = LIST_TOP;
     display.setColor(UIColor::secondary_txt);
     display.drawTextLeftAlign(4, y, "strongest:");
+    display.drawTextRightAlign(display.width() - 4, y, "ENTER: waterfall");
     y += RIFT_LINE_H;
 
     int type_x = display.width() - 108;
@@ -921,8 +1017,15 @@ public:
   bool handleInput(char c) override {
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
-    if (c == KEY_UP) { if (_scroll > 0) _scroll--; return true; }
-    if (c == KEY_DOWN) { if (_scroll + 1 < _last_n) _scroll++; return true; }
+    // both views are fed by the same scan cycle, so this is just a display swap
+    if (c == KEY_ENTER) {
+      _view = (_view == VIEW_SCATTER) ? VIEW_WATERFALL : VIEW_SCATTER;
+      return true;
+    }
+    if (_view == VIEW_SCATTER) {
+      if (c == KEY_UP) { if (_scroll > 0) _scroll--; return true; }
+      if (c == KEY_DOWN) { if (_scroll + 1 < _last_n) _scroll++; return true; }
+    }
     return false;
   }
 };
