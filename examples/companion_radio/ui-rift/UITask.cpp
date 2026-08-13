@@ -650,7 +650,8 @@ public:
     display.drawTextLeftAlign(4, y, tmp);
     y += RIFT_LINE_H;
 
-    sprintf(tmp, "power: %s", the_mesh.getNodePrefs() && board.isExternalPowered() ? "external" : "battery");
+    sprintf(tmp, "power: %s  (%u mV)", board.isExternalPowered() ? "external" : "battery",
+            (unsigned) _task->getBattMilliVolts());
     display.drawTextLeftAlign(4, y, tmp);
     y += RIFT_LINE_H;
 

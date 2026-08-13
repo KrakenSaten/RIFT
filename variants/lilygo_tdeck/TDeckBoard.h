@@ -38,16 +38,17 @@ public:
     #endif
   }
 
-  // The base class returns false, and the ESP32-S3 has no simple VBUS-detect
-  // register like the nRF52 does (see NRF52Board::isExternalPowered). The USB
-  // CDC connection state is the closest signal available: it goes true once a
-  // USB host enumerates the device.
+  // The base class returns false and no ESP32 board overrides it, so anything
+  // depending on external power (KEEP_DISPLAY_ON_USB) was previously dead.
   //
-  // Caveat: a dumb charger with no data lines will not be detected, so the
-  // display can still time out while charging from one of those.
+  // Uses HWCDC::isPlugged(), which reads the USB-Serial-JTAG bus connection
+  // status - i.e. whether a cable is attached. Deliberately NOT `(bool) Serial`:
+  // that resolves to isCDC_Connected(), which additionally requires the host to
+  // have *opened* the port, returns false on its first call by design, and so
+  // stays false with a charger or an unopened port.
   bool isExternalPowered() override {
-  #if ARDUINO_USB_CDC_ON_BOOT
-    return (bool) Serial;
+  #if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+    return HWCDC::isPlugged();
   #else
     return false;
   #endif
