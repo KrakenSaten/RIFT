@@ -23,7 +23,12 @@ Original LilyGO T-Deck — **not** T-Deck Pro:
 - 320×240 ST7789 colour LCD
 - Physical QWERTY keyboard (I²C co-processor at `0x55`)
 - Trackball (4 directional lines + centre click)
-- No touchscreen, no onboard GPS
+- GT911 capacitive touchscreen at I²C `0x14`
+- No onboard GPS
+
+Note: the design document this project started from stated the original T-Deck
+has no touchscreen. That is wrong - an I²C scan from the device found the GT911.
+Worth remembering when trusting other claims in that document.
 
 ---
 
@@ -79,15 +84,16 @@ companion-radio build on every board.
 ## Screens and controls
 
 Navigation is shared: **trackball click** = next screen, **double-click** =
-previous, **trackball left/right** = previous/next.
+previous, **trackball left/right** = previous/next, or **tap a nav-bar tab** to
+jump straight to it. **Backspace** goes one level back out of any sub-view.
 
 | Screen | What it shows | Screen-specific controls |
 |---|---|---|
 | **MESH** | Dashboard: connection state, battery, node count, link RSSI/SNR, radio config, radar ping animation | — |
-| **NODES** | Mesh topology — nodes placed by real hop distance, branched by the repeater they arrived through | trackball up/down selects a node |
+| **NODES** | Mesh topology — nodes placed by real hop distance, branched by the repeater they arrived through | trackball up/down selects a node, or tap one |
 | **RADAR** | Passive Wi-Fi + BLE scatter and strongest-signal list | **Enter** toggles waterfall view; up/down scrolls the list |
 | **COMMS** | MeshCore text terminal — message history plus a compose line | **Enter** sends, or opens the target picker when the line is empty; **backspace** deletes; up/down scrolls history |
-| **SYSTEM** | Diagnostics: last key, keyboard status, I²C bus, free heap, last reset reason | **Enter** sends an advert |
+| **SYSTEM** | Action menu plus diagnostics: node name, keyboard status and last key code, I²C bus, free heap, external-power state, last reset reason, touch coordinates | up/down or tap selects; **Enter** activates. Actions: send advert, edit node name, add channel |
 
 **Long-press the trackball within 8 seconds of boot** to enter MeshCore's CLI
 rescue mode (upstream behaviour, preserved).
@@ -122,6 +128,7 @@ examples/companion_radio/ui-rift/     RIFT UI (all screens)
 src/helpers/ui/ST7789NativeDisplay.*  native 320x240 display driver
 src/helpers/ui/TDeckKeyboard.*        I2C keyboard driver
 src/helpers/ui/TDeckTrackball.*       trackball directional driver
+src/helpers/ui/TDeckTouch.*           GT911 touchscreen driver
 variants/lilygo_tdeck/                +RIFT_* build flags and globals
 ```
 
@@ -139,10 +146,18 @@ Two shared files were extended, both additively:
   so the other three UI implementations need no changes.
 - `MyMesh` gained `sendTextTo()`, which registers the expected ACK in a table
   that is private to the class, and `processAck()` now notifies the UI as well
-  as the serial link.
+  as the serial link. It also gained channel-creation methods, because
+  `saveChannels()` is private.
+- `UIScreen` gained `handleTouch()`, also non-pure with an empty default.
+
+`BaseChatMesh::addChannel()` is deliberately **not** used to add channels. It
+writes at `num_channels`, which only counts channels added through that method
+and stays 0 for channels restored from storage — so it would silently overwrite
+an existing channel, including Public. The RIFT methods find a genuinely free
+slot instead. This is a trap waiting for the next person.
 
 Feature flags: `RIFT_DISPLAY`, `RIFT_INPUT_KEYBOARD`, `RIFT_INPUT_TRACKBALL`,
-`RIFT_RADAR`. Each guards its own code, so features can be disabled
+`RIFT_INPUT_TOUCH`, `RIFT_RADAR`. Each guards its own code, so features can be disabled
 independently when bisecting a problem.
 
 ### Not blocking the radio
@@ -195,6 +210,14 @@ channel, one row per sweep.
 **No per-node signal strength in NODES.** Adverts are cached without RSSI, so
 brightness encodes recency instead of link quality.
 
+**Nordic characters can be read but not typed.** Incoming UTF-8 is mapped to
+CP437, which carries æ Æ å Å ä Ä ö Ö; ø and Ø are absent from the font entirely
+and are drawn by the display driver as the base letter plus a stroke. Input is a
+different problem: the keyboard is a US QWERTY with no Nordic keys, and no
+alt/sym combination produces distinct codes for them, so entering them would
+need a software compose scheme (a dead key, or a cycle key). Not implemented —
+reading was the part that actually hurt.
+
 **Keyboard arrow keys are unreachable.** `TDeckKeyboard` discards bytes above
 127, which is where the arrow codes live. The trackball provides directions
 instead, so this has not mattered in practice.
@@ -221,8 +244,12 @@ physical hardware: MESH, CONSTELLATION (NODES), RADAR, RF WATERFALL, COMMS.
 
 Resource use: ~49 % of internal static RAM, ~24 % of the 6.5 MB app partition.
 
+Touch, channel creation, node renaming and Nordic character rendering were added
+afterwards from field use.
+
 Possible next steps, roughly by value:
 
 - Persist message history across reboots
+- A compose scheme for typing Nordic characters (see limitations)
 - Report the `Wire.begin()` ordering bug upstream
 - Per-contact detail view (paths, keys, last-heard history)
