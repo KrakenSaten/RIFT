@@ -361,13 +361,16 @@ class RiftSystemScreen : public UIScreen {
 
   // A small action menu rather than hidden letter shortcuts - discoverable, and
   // it leaves the printable keys free for the text fields.
-  enum Mode { MENU, EDIT_NAME };
-  enum Item { IT_ADVERT, IT_NAME, IT_COUNT };
+  enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY };
+  enum Item { IT_ADVERT, IT_NAME, IT_CHANNEL, IT_COUNT };
   static const char* ITEM_LABELS[IT_COUNT];
 
   Mode _mode;
   int _sel;
   RiftTextInput _edit;
+  char _ch_name[32];       // held while the key is being chosen
+  char _ch_key[48];        // generated key, shown so it can be typed elsewhere
+  int _key_choice;         // 0 = generate, 1 = enter existing
 
   void activate() {
     switch (_sel) {
@@ -384,6 +387,11 @@ class RiftSystemScreen : public UIScreen {
         _edit.begin(the_mesh.getNodeName(), sizeof(((NodePrefs*)0)->node_name) - 1);
         _mode = EDIT_NAME;
         break;
+
+      case IT_CHANNEL:
+        _edit.begin("", sizeof(_ch_name) - 1);
+        _mode = CH_NAME;
+        break;
     }
   }
 
@@ -399,6 +407,123 @@ class RiftSystemScreen : public UIScreen {
     // the new name is what outgoing channel messages are signed with, and what
     // other nodes will show once they hear the next advert
     _task->showAlert("Name saved - send advert", 1500);
+  }
+
+  // 0 = hashtag (key derived from name), 1 = random private key, 2 = paste key
+  void finishChannel(int kind) {
+    int idx;
+    switch (kind) {
+      case 0:  idx = the_mesh.addGroupChannelHashtag(_ch_name); _ch_key[0] = 0; break;
+      case 1:  idx = the_mesh.addGroupChannelRandom(_ch_name, _ch_key, sizeof(_ch_key)); break;
+      default: idx = the_mesh.addGroupChannelFromBase64(_ch_name, _edit.buf); _ch_key[0] = 0; break;
+    }
+
+    if (idx < 0) {
+      // either the pasted key wasn't a valid 128/256-bit base64 value, or every
+      // channel slot is taken
+      _task->showAlert(kind == 2 ? "Bad key or no slot" : "No free channel slot", 1800);
+      _mode = MENU;
+      return;
+    }
+
+    if (kind == 1) {
+      _mode = CH_SHOW_KEY;   // let the user read the key off the screen
+    } else {
+      _mode = MENU;
+      _task->showAlert("Channel added", 1500);
+    }
+  }
+
+  int renderChannelName(DisplayDriver& display) {
+    renderTitleBar(display, _task, "NEW CHANNEL");
+    display.setTextSize(1);
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 30, "Channel name:");
+    display.drawTextLeftAlign(4, 96, "A '#' is added for hashtag channels.");
+    _edit.render(display, 4, 54, display.width() - 8);
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 84, "ENTER next   BACKSPACE delete / back");
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
+  int renderKeyChoice(DisplayDriver& display) {
+    renderTitleBar(display, _task, "CHANNEL KEY");
+    display.setTextSize(1);
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 30, "A channel is shared by its key.");
+
+    const char* opts[3] = { "Hashtag - open topic", "Private - new random key",
+                            "Private - paste a key" };
+    int y = 56;
+    for (int i = 0; i < 3; i++, y += RIFT_LINE_H) {
+      bool sel = (i == _key_choice);
+      display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
+      display.setCursor(4, y);
+      display.print(sel ? "> " : "  ");
+      display.print(opts[i]);
+    }
+
+    // the difference that matters is secrecy, not encryption - all three are
+    // AES encrypted on air
+    if (_key_choice == 0) {
+      display.setColor(UIColor::warning_txt);
+      display.drawTextLeftAlign(4, y + 8, "Key comes from the name: anyone who");
+      display.drawTextLeftAlign(4, y + 20, "knows it can read. Not secret.");
+    } else if (_key_choice == 1) {
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextLeftAlign(4, y + 8, "Secret. Key is shown so you can");
+      display.drawTextLeftAlign(4, y + 20, "enter it on your other nodes.");
+    } else {
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextLeftAlign(4, y + 8, "Joins a private channel someone");
+      display.drawTextLeftAlign(4, y + 20, "else created.");
+    }
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, y + 40, "up/down select  ENTER ok  BACKSPACE back");
+
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
+  int renderKeyEntry(DisplayDriver& display) {
+    renderTitleBar(display, _task, "CHANNEL KEY");
+    display.setTextSize(1);
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 30, "Paste the base64 key (24 or 44 chars):");
+    _edit.render(display, 4, 54, display.width() - 8);
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 90, "ENTER add   BACKSPACE delete / back");
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
+  int renderShowKey(DisplayDriver& display) {
+    renderTitleBar(display, _task, "CHANNEL ADDED");
+    display.setTextSize(1);
+
+    display.setColor(UIColor::title_txt);
+    char tmp[48];
+    sprintf(tmp, "\"%s\" created", _ch_name);
+    display.drawTextLeftAlign(4, 30, tmp);
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 52, "Enter this key on your other nodes");
+    display.drawTextLeftAlign(4, 64, "to join the same channel:");
+
+    display.setColor(UIColor::primary_txt);
+    wrapText(_ch_key, display.width() - 8, 88, &display, 4);
+
+    display.setColor(UIColor::warning_txt);
+    display.drawTextLeftAlign(4, 130, "Write it down - not shown again.");
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 156, "ENTER done");
+
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
   }
 
   int renderEditName(DisplayDriver& display) {
@@ -419,10 +544,20 @@ class RiftSystemScreen : public UIScreen {
   }
 
 public:
-  RiftSystemScreen(UITask* task) : _task(task), _mode(MENU), _sel(0) { }
+  RiftSystemScreen(UITask* task) : _task(task), _mode(MENU), _sel(0), _key_choice(0) {
+    _ch_name[0] = 0;
+    _ch_key[0] = 0;
+  }
 
   int render(DisplayDriver& display) override {
-    if (_mode == EDIT_NAME) return renderEditName(display);
+    switch (_mode) {
+      case EDIT_NAME:      return renderEditName(display);
+      case CH_NAME:        return renderChannelName(display);
+      case CH_KEY_CHOICE:  return renderKeyChoice(display);
+      case CH_KEY_ENTRY:   return renderKeyEntry(display);
+      case CH_SHOW_KEY:    return renderShowKey(display);
+      default: break;
+    }
 
     renderTitleBar(display, _task, NAV_LABELS[RIFT_NAV_SYSTEM]);
     display.setTextSize(1);
@@ -508,6 +643,47 @@ public:
       return true;   // don't let stray keys navigate away mid-edit
     }
 
+    if (_mode == CH_NAME) {
+      if (c == KEY_ENTER) {
+        if (_edit.len == 0) { _task->showAlert("Name can't be empty", 1200); return true; }
+        StrHelper::strncpy(_ch_name, _edit.buf, sizeof(_ch_name));
+        _key_choice = 0;
+        _mode = CH_KEY_CHOICE;
+        return true;
+      }
+      if (_edit.handleKey(c)) return true;
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = MENU; return true; }
+      return true;
+    }
+
+    if (_mode == CH_KEY_CHOICE) {
+      if (c == KEY_UP) { _key_choice = (_key_choice + 2) % 3; return true; }
+      if (c == KEY_DOWN) { _key_choice = (_key_choice + 1) % 3; return true; }
+      if (c == KEY_ENTER) {
+        if (_key_choice == 2) {
+          _edit.begin("", 44);   // 44 base64 chars == 256-bit key
+          _mode = CH_KEY_ENTRY;
+        } else {
+          finishChannel(_key_choice);
+        }
+        return true;
+      }
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = CH_NAME; return true; }
+      return true;
+    }
+
+    if (_mode == CH_KEY_ENTRY) {
+      if (c == KEY_ENTER) { finishChannel(2); return true; }
+      if (_edit.handleKey(c)) return true;
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = CH_KEY_CHOICE; return true; }
+      return true;
+    }
+
+    if (_mode == CH_SHOW_KEY) {
+      if (c == KEY_ENTER || c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = MENU; return true; }
+      return true;   // keep the key on screen until acknowledged
+    }
+
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
     if (c == KEY_UP) { _sel = (_sel + IT_COUNT - 1) % IT_COUNT; return true; }
@@ -520,6 +696,7 @@ public:
 const char* RiftSystemScreen::ITEM_LABELS[RiftSystemScreen::IT_COUNT] = {
   "Send advert",
   "Edit node name",
+  "Add channel",
 };
 
 // CONSTELLATION: the mesh as observed topology rather than a node count.

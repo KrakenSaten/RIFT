@@ -109,6 +109,22 @@ public:
   // Returns MSG_SEND_FAILED / MSG_SEND_SENT_FLOOD / MSG_SEND_SENT_DIRECT.
   int  sendTextTo(ContactInfo* recipient, const char* text, uint32_t& expected_ack, uint32_t& est_timeout);
 
+  // Add a group channel from local UI code, and persist it.
+  //
+  // BaseChatMesh::addChannel() deliberately isn't used: it writes at
+  // num_channels, which only counts channels added through that method and
+  // stays 0 for channels restored from storage - so it would silently overwrite
+  // an existing channel. These find a genuinely free slot instead.
+  //
+  // Both return the slot index, or -1 on failure (bad key, or no free slot).
+  int  addGroupChannelFromBase64(const char* name, const char* psk_base64);
+  // hashtag channel: the key is derived from the name, so anyone who knows the
+  // name can read the traffic. Encrypted on air, but not secret.
+  int  addGroupChannelHashtag(const char* name);
+  // generates a fresh random key; psk_base64_out receives it so the UI can show
+  // the key for entering on other nodes
+  int  addGroupChannelRandom(const char* name, char* psk_base64_out, int out_len);
+
 protected:
   float getAirtimeBudgetFactor() const override;
   int getInterferenceThreshold() const override;
@@ -166,6 +182,9 @@ protected:
   bool getContactForSave(uint32_t idx, ContactInfo& contact) override { return getContactByIdx(idx, contact); }
   bool onChannelLoaded(uint8_t channel_idx, const ChannelDetails& ch) override { return setChannel(channel_idx, ch); }
   bool getChannelForSave(uint8_t channel_idx, ChannelDetails& ch) override { return getChannel(channel_idx, ch); }
+
+  int findFreeChannelSlot();
+  int installChannel(int idx, const char* name, const uint8_t* psk, int psk_len);
 
   void clearPendingReqs() {
     pending_login = pending_status = pending_telemetry = pending_discovery = pending_req = 0;

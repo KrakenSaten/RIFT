@@ -2,6 +2,11 @@
 
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
+// Channel PSKs are shared between nodes as base64. Declared rather than
+// included: base64.hpp defines these without `inline`, so including it here as
+// well as in BaseChatMesh.cpp gives duplicate definitions at link time.
+unsigned int encode_base64(const unsigned char input[], unsigned int input_length, unsigned char output[]);
+unsigned int decode_base64(const unsigned char input[], unsigned int input_length, unsigned char output[]);
 
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
@@ -427,6 +432,73 @@ int MyMesh::sendTextTo(ContactInfo* recipient, const char* text, uint32_t& expec
     next_ack_idx = (next_ack_idx + 1) % EXPECTED_ACK_TABLE_SIZE;
   }
   return result;
+}
+
+// find a slot with no channel in it, or -1 if all are taken
+int MyMesh::findFreeChannelSlot() {
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails existing;
+    if (!getChannel(i, existing) || existing.name[0] == 0) return i;
+  }
+  return -1;
+}
+
+int MyMesh::installChannel(int idx, const char* name, const uint8_t* psk, int psk_len) {
+  if (idx < 0 || (psk_len != 16 && psk_len != 32)) return -1;
+
+  ChannelDetails ch;
+  memset(&ch, 0, sizeof(ch));
+  StrHelper::strncpy(ch.name, name, sizeof(ch.name));
+  memcpy(ch.channel.secret, psk, psk_len);   // setChannel() derives the hash
+
+  if (!setChannel(idx, ch)) return -1;
+  saveChannels();
+  return idx;
+}
+
+int MyMesh::addGroupChannelFromBase64(const char* name, const char* psk_base64) {
+  uint8_t psk[32];
+  memset(psk, 0, sizeof(psk));
+  int len = decode_base64((unsigned char *) psk_base64, strlen(psk_base64), psk);
+  if (len != 16 && len != 32) return -1;   // MeshCore only accepts 128/256-bit
+
+  return installChannel(findFreeChannelSlot(), name, psk, len);
+}
+
+int MyMesh::addGroupChannelHashtag(const char* name) {
+  // Key is the first 16 bytes of sha256 over the channel name *including* the
+  // leading '#' - see docs/companion_protocol.md, which gives the test vector
+  // "#test" -> 9cd8fcf22a47333b591d96a2b848b73f (verified against this code).
+  // Same idea as TransportKeyStore::getAutoKeyFor() for hashtag regions.
+  char full[32];
+  if (name[0] == '#') {
+    StrHelper::strncpy(full, name, sizeof(full));
+  } else {
+    full[0] = '#';
+    StrHelper::strncpy(&full[1], name, sizeof(full) - 1);
+  }
+
+  uint8_t psk[16];
+  mesh::Utils::sha256(psk, sizeof(psk), (const uint8_t *) full, strlen(full));
+
+  return installChannel(findFreeChannelSlot(), full, psk, sizeof(psk));
+}
+
+int MyMesh::addGroupChannelRandom(const char* name, char* psk_base64_out, int out_len) {
+  uint8_t psk[16];   // 128-bit, matching what the companion app writes
+  getRNG()->random(psk, sizeof(psk));
+
+  int idx = installChannel(findFreeChannelSlot(), name, psk, sizeof(psk));
+  if (idx < 0) return -1;
+
+  if (psk_base64_out != NULL && out_len > 0) {
+    unsigned char enc[32];
+    int n = encode_base64(psk, sizeof(psk), enc);
+    if (n >= out_len) n = out_len - 1;
+    memcpy(psk_base64_out, enc, n);
+    psk_base64_out[n] = 0;
+  }
+  return idx;
 }
 
 ContactInfo*  MyMesh::processAck(const uint8_t *data) {
