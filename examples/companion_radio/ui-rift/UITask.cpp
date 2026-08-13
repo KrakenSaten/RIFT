@@ -26,6 +26,10 @@
   #endif
 #endif
 
+#ifndef RIFT_VERSION
+  #define RIFT_VERSION "0.0.0-dev"
+#endif
+
 #ifndef AUTO_OFF_MILLIS
   #define AUTO_OFF_MILLIS     15000   // 15 seconds
 #endif
@@ -325,8 +329,15 @@ public:
     display.drawTextCentered(display.width() / 2, display.height() / 2 + 4, "RADIO INTELLIGENCE");
     display.drawTextCentered(display.width() / 2, display.height() / 2 + 16, "& FIELD TERMINAL");
 
+    // our version, and the MeshCore it is built on - a fork should say both
+    display.setColor(UIColor::title_txt);
+    char line[40];
+    sprintf(line, "v%s", RIFT_VERSION);
+    display.drawTextCentered(display.width() / 2, display.height() - 34, line);
+
     display.setColor(UIColor::secondary_txt);
-    display.drawTextCentered(display.width() / 2, display.height() - 20, _version_info);
+    sprintf(line, "on MeshCore %s", _version_info);
+    display.drawTextCentered(display.width() / 2, display.height() - 20, line);
 
     return 200;
   }
@@ -709,6 +720,10 @@ public:
       default:               rr = "unknown"; break;
     }
     sprintf(tmp, "last reset: %s", rr);
+    display.drawTextLeftAlign(4, y, tmp);
+    y += RIFT_LINE_H;
+
+    sprintf(tmp, "RIFT v%s on MeshCore %s", RIFT_VERSION, FIRMWARE_VERSION);
     display.drawTextLeftAlign(4, y, tmp);
     y += RIFT_LINE_H;
 

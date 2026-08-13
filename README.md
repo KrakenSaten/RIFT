@@ -263,6 +263,13 @@ only adds a T-Deck UI and does not track their releases.
 
 ## Status
 
+**Current version: 0.1.0** — set by the `RIFT_VERSION` build flag and shown on
+the splash screen and SYSTEM, alongside the MeshCore version it is built on.
+Deliberately 0.x: it works and is verified on hardware, but it has had no
+external users and the limitations above are real. `FIRMWARE_VERSION` is left as
+upstream MeshCore's, since that string is reported over the companion protocol
+next to `FIRMWARE_VER_CODE`.
+
 Every screen from the original design concept is implemented and verified on
 physical hardware: MESH, CONSTELLATION (NODES), RADAR, RF WATERFALL, COMMS.
 
