@@ -47,8 +47,8 @@ char TDeckKeyboard::poll() {
   if (!_present) return 0;
 
   unsigned long now = millis();
-  if (now < _next_poll) return 0;
-  _next_poll = now + KEYBOARD_POLL_MILLIS;
+  if (now - _last_poll < KEYBOARD_POLL_MILLIS) return 0;
+  _last_poll = now;
 
   if (!i2c_probe(KEYBOARD_I2C_ADDR)) {
     if (++_failures >= KEYBOARD_MAX_FAILURES) _present = false;  // give up for good

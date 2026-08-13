@@ -1,0 +1,66 @@
+name: RIFT Build Check
+
+# Upstream's PR Build Check only triggers on main/dev and its matrix contains no
+# T-Deck environment at all, so nothing in CI was actually compiling RIFT. This
+# is a separate file rather than an edit to pr-build-check.yml so upstream's
+# workflows stay conflict-free when we merge from them.
+
+on:
+  push:
+    branches: [rift-tdeck]
+    paths:
+      - 'src/**'
+      - 'examples/**'
+      - 'variants/**'
+      - 'platformio.ini'
+      - '.github/workflows/rift-build-check.yml'
+  pull_request:
+    branches: [rift-tdeck]
+    paths:
+      - 'src/**'
+      - 'examples/**'
+      - 'variants/**'
+      - 'platformio.ini'
+      - '.github/workflows/rift-build-check.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment:
+          # the firmware this fork exists for
+          - LilyGo_TDeck_rift
+          # RIFT edits shared code (AbstractUITask, MyMesh, target.h/.cpp), so the
+          # stock T-Deck builds are the regression check that we have not broken
+          # anything for the ui-new/ui-orig users of the same variant
+          - LilyGo_TDeck_companion_radio_usb
+          - LilyGo_TDeck_companion_radio_ble
+          - LilyGo_TDeck_repeater
+          - LilyGo_TDeck_kiss_modem
+
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Build ${{ matrix.environment }}
+        run: pio run -e ${{ matrix.environment }}
+
+  test:
+    # upstream's unit-test workflow only runs on push to main/master, so pushes
+    # to rift-tdeck ran no tests at all
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Run Unit Tests
+        run: pio test -e native -e native_kiss_modem -vv

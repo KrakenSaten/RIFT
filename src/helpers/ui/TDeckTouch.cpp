@@ -33,8 +33,8 @@ bool TDeckTouch::poll(int& x, int& y) {
   if (!_present) return false;
 
   unsigned long now = millis();
-  if (now < _next_poll) return false;
-  _next_poll = now + TOUCH_POLL_MILLIS;
+  if (now - _last_poll < TOUCH_POLL_MILLIS) return false;
+  _last_poll = now;
 
   uint8_t status;
   if (!gt911_read(GT911_REG_STATUS, &status, 1)) return false;

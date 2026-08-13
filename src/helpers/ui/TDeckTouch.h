@@ -26,13 +26,13 @@
 // Reuses the Wire bus initialised elsewhere.
 class TDeckTouch {
   bool _present;
-  unsigned long _next_poll;
+  unsigned long _last_poll;   // see TDeckKeyboard re: millis() wrap
   bool _down;
   int _x, _y;          // mapped to display coordinates
   int _raw_x, _raw_y;  // as reported, for calibration/diagnostics
 
 public:
-  TDeckTouch() : _present(false), _next_poll(0), _down(false),
+  TDeckTouch() : _present(false), _last_poll(0), _down(false),
                  _x(0), _y(0), _raw_x(0), _raw_y(0) { memset(_raw, 0, sizeof(_raw)); }
 
   void begin();

@@ -74,7 +74,9 @@ struct RiftMsgLog {
   struct Entry {
     uint32_t timestamp;
     char origin[62];
-    char msg[78];
+    // MAX_TEXT_LEN, not a round number: 78 silently truncated anything longer,
+    // and MeshCore allows up to 160 characters
+    char msg[MAX_TEXT_LEN + 1];
     bool outgoing;
     // delivery tracking, only meaningful for outgoing direct messages.
     // expected_ack == 0 means "no ACK possible" (channel sends, incoming) and
@@ -849,7 +851,12 @@ class RiftConstellationScreen : public UIScreen {
   int _plot_y[RIFT_CONST_MAX];
   int _count;
   int _sel;
-  unsigned long _next_refresh;
+  // "elapsed since last" rather than "deadline in the future": millis() wraps
+  // after ~49 days, and a deadline computed just before the wrap compares as
+  // already-past, which would pin this to a redraw every single frame until the
+  // counter caught up. Unsigned subtraction wraps correctly.
+  unsigned long _last_refresh;
+  bool _refreshed_once;
 
   static const int CX_Y = 104;   // centre of the plot
 
@@ -867,12 +874,14 @@ class RiftConstellationScreen : public UIScreen {
   }
 
 public:
-  RiftConstellationScreen(UITask* task) : _task(task), _count(0), _sel(0), _next_refresh(0) { }
+  RiftConstellationScreen(UITask* task) : _task(task), _count(0), _sel(0), _last_refresh(0),
+                                          _refreshed_once(false) { }
 
   int render(DisplayDriver& display) override {
-    if (millis() >= _next_refresh) {
+    if (!_refreshed_once || millis() - _last_refresh >= 3000) {
       refresh();
-      _next_refresh = millis() + 3000;
+      _last_refresh = millis();
+      _refreshed_once = true;
     }
 
     char tmp[64];
@@ -1184,7 +1193,11 @@ class RiftRadarScreen : public UIScreen {
   // true after teardown (BLEDevice::deinit is avoided), so using it as the
   // "needs teardown" test would restart the cycle forever.
   bool _torn_down;
-  unsigned long _next_step;
+  // wrap-safe pacing: when the wait started, and how long to wait (0 = ready
+  // now). Same reason as _last_refresh - a future deadline breaks at the
+  // millis() wrap, and here it would leave the scan state machine spinning.
+  unsigned long _wait_since;
+  unsigned long _wait_ms;
   int _scroll;
   int _last_n;
 
@@ -1248,7 +1261,7 @@ public:
   RiftRadarScreen(UITask* task)
      : _task(task), _state(OFF), _view(VIEW_SCATTER), _want_active(false),
        _wifi_up(false), _ble_up(false), _torn_down(true),
-       _next_step(0), _scroll(0), _last_n(0) { }
+       _wait_since(0), _wait_ms(0), _scroll(0), _last_n(0) { }
 
   // Only records intent. Screen changes can originate from a mesh callback
   // (an incoming message switches to the preview screen), and tearing the BT
@@ -1265,7 +1278,8 @@ public:
       BLEDevice::getScan()->stop();
     }
     _state = STOPPING;
-    _next_step = millis() + RIFT_SCAN_STOP_GRACE_MILLIS;
+    _wait_since = millis();
+    _wait_ms = RIFT_SCAN_STOP_GRACE_MILLIS;
   }
 
   void finishTeardown() {
@@ -1293,7 +1307,7 @@ public:
   void service() {
     if (!_want_active) {
       if (_state == STOPPING) {
-        if (millis() >= _next_step) finishTeardown();
+        if (millis() - _wait_since >= _wait_ms) finishTeardown();
       } else if (!_torn_down) {
         beginTeardown();
       }
@@ -1301,11 +1315,14 @@ public:
     }
     if (_state == OFF || _state == STOPPING) {
       _state = START_WIFI;   // came back before teardown finished
-      _next_step = 0;
+      _wait_ms = 0;
       _torn_down = false;
     }
 
-    if (millis() < _next_step) return;
+    if (_wait_ms != 0) {
+      if (millis() - _wait_since < _wait_ms) return;
+      _wait_ms = 0;
+    }
 
     switch (_state) {
       case START_WIFI:
@@ -1334,7 +1351,8 @@ public:
           BLEDevice::getScan()->clearResults();   // keep the internal map bounded
           rfAgeOut();
           _state = START_WIFI;
-          _next_step = millis() + RIFT_SCAN_GAP_MILLIS;
+          _wait_since = millis();
+          _wait_ms = RIFT_SCAN_GAP_MILLIS;
         }
         break;
 
@@ -1588,7 +1606,10 @@ public:
 // Sends either to the Public channel (flooded, no ACK possible) or direct to a
 // chosen contact (ACKed, so delivery state is shown). ESC on an empty line
 // opens the target picker.
-#define RIFT_PICKER_MAX 24
+// Channels can occupy 40 slots and contacts up to MAX_CONTACTS, so this list
+// cannot hold everything. Channels are added first so they are never crowded
+// out, and the UI says when contacts were cut rather than silently hiding them.
+#define RIFT_PICKER_MAX 48
 
 class RiftCommsScreen : public UIScreen, ContactVisitor {
   UITask* _task;
@@ -1615,6 +1636,7 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
   };
   PickEntry _picks[RIFT_PICKER_MAX];
   int _pick_count;
+  bool _pick_truncated;
 
   static const int BODY_TOP = 20;      // picker list starts here
   static const int TABS_Y = 22;        // channel strip on the terminal view
@@ -1630,7 +1652,8 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
   int _tab_count;
   int _tab_scroll;
   int _tab_w;                 // recorded at render, so taps hit the same columns
-  unsigned long _tabs_refresh;
+  unsigned long _last_tabs_refresh;   // see _last_refresh above re: millis() wrap
+  bool _tabs_refreshed_once;
 
   void refreshTabs() {
     _tab_count = 0;
@@ -1657,9 +1680,10 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
   int tabWidth(DisplayDriver& display) const { return display.width() / TAB_VISIBLE; }
 
   void renderTabs(DisplayDriver& display) {
-    if (millis() >= _tabs_refresh) {
+    if (!_tabs_refreshed_once || millis() - _last_tabs_refresh >= 2000) {
       refreshTabs();
-      _tabs_refresh = millis() + 2000;
+      _last_tabs_refresh = millis();
+      _tabs_refreshed_once = true;
     }
 
     int tw = _tab_w = tabWidth(display);
@@ -1699,12 +1723,15 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
   // from ContactVisitor - called by scanRecentContacts(), already ordered by
   // last_advert_timestamp descending (most recently heard first)
   void onContactVisit(const ContactInfo& contact) override {
-    if (_pick_count >= RIFT_PICKER_MAX) return;
     if (contact.name[0] == 0) return;   // skip the reserved anon slots
 
     // only nodes that can actually receive a text message - repeaters and
     // sensors have no one reading them
     if (contact.type != ADV_TYPE_CHAT && contact.type != ADV_TYPE_ROOM) return;
+
+    // the list is finite; say so instead of dropping contacts silently. Only
+    // reachable contacts count, so the warning does not fire for repeaters.
+    if (_pick_count >= RIFT_PICKER_MAX) { _pick_truncated = true; return; }
 
     PickEntry* e = &_picks[_pick_count++];
     StrHelper::strncpy(e->name, contact.name, sizeof(e->name));
@@ -1715,6 +1742,7 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
 
   void openPicker() {
     _pick_count = 0;
+    _pick_truncated = false;
 
     // configured channels first. There is no getNumChannels() - num_channels is
     // protected and only tracks addChannel() - so probe the slots and skip the
@@ -1837,6 +1865,9 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
     if (_pick_count == 0) {
       display.setColor(UIColor::secondary_txt);
       display.drawTextLeftAlign(4, y + RIFT_LINE_H, "(no channels or contacts)");
+    } else if (_pick_truncated) {
+      display.setColor(UIColor::warning_txt);
+      display.drawTextLeftAlign(4, INPUT_Y - RIFT_LINE_H, "list full - some contacts not shown");
     }
 
     // scroll position indicator when the list doesn't fit
@@ -1903,9 +1934,10 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
 public:
   RiftCommsScreen(UITask* task)
      : _task(task), _len(0), _scroll(0),
-       _tab_count(0), _tab_scroll(0), _tab_w(0), _tabs_refresh(0),
+       _tab_count(0), _tab_scroll(0), _tab_w(0), _last_tabs_refresh(0), _tabs_refreshed_once(false),
        _target_is_channel(true), _target_channel_idx(RIFT_PUBLIC_CHANNEL_IDX),
-       _picking(false), _pick_idx(0), _pick_scroll(0), _pick_count(0) {
+       _picking(false), _pick_idx(0), _pick_scroll(0), _pick_count(0),
+       _pick_truncated(false) {
     _input[0] = 0;
     _target_name[0] = 0;
     memset(_target_key, 0, sizeof(_target_key));

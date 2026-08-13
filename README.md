@@ -117,6 +117,14 @@ are unchanged and still build; that is worth re-checking after any edit to
 shared code, since `MyMesh` and `AbstractUITask` are compiled into every
 companion-radio build on every board.
 
+`.github/workflows/rift-build-check.yml` does exactly that check in CI, on push
+and pull request against `rift-tdeck`: it builds `LilyGo_TDeck_rift` plus all
+four stock T-Deck environments, and runs the native unit tests. Upstream's own
+`pr-build-check.yml` triggers only on `main`/`dev` and its matrix contains no
+T-Deck environment at all, so before this file nothing in CI compiled RIFT.
+It is a separate workflow rather than an edit to upstream's, so merges from
+upstream stay conflict-free.
+
 ---
 
 ## Screens and controls
@@ -234,6 +242,21 @@ deauthenticate.
 
 ---
 
+## Private keys stay on the device
+
+Upstream enables `ENABLE_PRIVATE_KEY_IMPORT` and `ENABLE_PRIVATE_KEY_EXPORT`
+by default, with a comment in `platformio.ini` noting they should be off for more
+secure firmware. With them on, `CMD_EXPORT_PRIVATE_KEY` writes the 64-byte
+private identity straight out over serial and the matching import command
+replaces it. That is a reasonable default for a radio you configure from a phone
+app; it is not one for a standalone terminal that also enables
+`ENABLE_USB_INTERFACE`, where anything with USB access to the device could clone
+or hijack the node identity.
+
+The RIFT environment therefore strips both flags via `build_unflags`, and both
+commands answer with MeshCore's existing "disabled" response. Nothing else
+changes — the stock T-Deck environments keep upstream's behaviour.
+
 ## Known limitations and workarounds
 
 Honest list. Each of these is a deliberate trade-off, not an oversight.
@@ -248,7 +271,15 @@ standalone device with its own message log barely needs, and at 177 bytes per
 slot it was ~45 KB of static RAM doing very little.
 
 **Message history is RAM-only** and does not survive a reboot. MeshCore stores
-no messages itself, so this would mean new persistence code and flash wear.
+no messages itself, so this would mean new persistence code and flash wear. The
+log holds the 48 most recent messages, each up to the full MeshCore text length
+of 160 characters.
+
+**The COMMS target picker holds 48 entries.** Configured channels are listed
+first so they are never crowded out, then contacts most-recently-heard first. If
+contacts had to be cut the picker says so rather than hiding them silently — but
+a node that has heard from more than ~40 chat contacts cannot reach all of them
+from that list.
 
 **RADAR data is cleared when you leave the screen.** Stale channel occupancy
 presented as current would be actively misleading.
