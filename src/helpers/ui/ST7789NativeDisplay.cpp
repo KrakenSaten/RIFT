@@ -43,6 +43,21 @@ bool ST7789NativeDisplay::begin() {
     display.setTextSize(2);
     display.cp437(true); // Use full 256 char 'Code Page 437' font
 
+    if (_canvas == NULL) {
+      // 150KB - malloc routes anything over 4KB to PSRAM on this board. If it
+      // fails we fall back to drawing straight to the panel, which flickers but
+      // still works.
+      _canvas = new GFXcanvas16(width(), height());
+      if (_canvas != NULL && _canvas->getBuffer() != NULL) {
+        _target = _canvas;
+        _canvas->cp437(true);
+      } else {
+        delete _canvas;
+        _canvas = NULL;
+        _target = &display;
+      }
+    }
+
     _isOn = true;
   }
 
@@ -75,37 +90,37 @@ void ST7789NativeDisplay::clear() {
 }
 
 void ST7789NativeDisplay::startFrame(ColorVal bkg) {
-  display.fillScreen(bkg);
-  display.setTextColor(_color = UIColor::primary_txt);
-  display.setTextSize(1);
-  display.cp437(true);
+  _target->fillScreen(bkg);          // in RAM when buffered, so not visible
+  _target->setTextColor(_color = UIColor::primary_txt);
+  _target->setTextSize(1);
+  _target->cp437(true);
 }
 
 void ST7789NativeDisplay::setTextSize(int sz) {
   _textsize = sz < 1 ? 1 : sz;
-  display.setTextSize(sz);
+  _target->setTextSize(sz);
 }
 
 // RIFT_GLYPH_OSLASH / _UC are placeholders inserted by the UTF-8 translation
 // for characters the font cannot represent; see riftTranslateUTF8().
 void ST7789NativeDisplay::drawSlashedO(bool upper) {
-  int16_t x = display.getCursorX();
-  int16_t y = display.getCursorY();
+  int16_t x = _target->getCursorX();
+  int16_t y = _target->getCursorY();
   int sz = _textsize;
 
-  display.write(upper ? 'O' : 'o');   // advances the cursor for us
+  _target->write(upper ? 'O' : 'o');   // advances the cursor for us
 
   // stroke across the bowl: uppercase fills the cell, lowercase sits lower
   int top = upper ? 0 : 2 * sz;
-  display.drawLine(x, y + 7 * sz - 1, x + 5 * sz - 1, y + top, _color);
+  _target->drawLine(x, y + 7 * sz - 1, x + 5 * sz - 1, y + top, _color);
 }
 
 void ST7789NativeDisplay::setColor(ColorVal c) {
-  display.setTextColor(_color = c);
+  _target->setTextColor(_color = c);
 }
 
 void ST7789NativeDisplay::setCursor(int x, int y) {
-  display.setCursor(x, y);
+  _target->setCursor(x, y);
 }
 
 void ST7789NativeDisplay::print(const char* str) {
@@ -116,17 +131,17 @@ void ST7789NativeDisplay::print(const char* str) {
     if (c == RIFT_GLYPH_OSLASH || c == RIFT_GLYPH_OSLASH_UC) {
       drawSlashedO(c == RIFT_GLYPH_OSLASH_UC);
     } else {
-      display.write(c);
+      _target->write(c);
     }
   }
 }
 
 void ST7789NativeDisplay::fillRect(int x, int y, int w, int h) {
-  display.fillRect(x, y, w, h, _color);
+  _target->fillRect(x, y, w, h, _color);
 }
 
 void ST7789NativeDisplay::drawRect(int x, int y, int w, int h) {
-  display.drawRect(x, y, w, h, _color);
+  _target->drawRect(x, y, w, h, _color);
 }
 
 void ST7789NativeDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
@@ -138,7 +153,7 @@ void ST7789NativeDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int 
       bool pixelOn = byte & (0x80 >> (i & 7));
 
       if (pixelOn) {
-        display.drawPixel(x + i, y + j, _color);
+        _target->drawPixel(x + i, y + j, _color);
       }
     }
   }
@@ -147,11 +162,15 @@ void ST7789NativeDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int 
 uint16_t ST7789NativeDisplay::getTextWidth(const char* str) {
   int16_t x1, y1;
   uint16_t w, h;
-  display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
+  _target->getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
 
   return w;
 }
 
 void ST7789NativeDisplay::endFrame() {
-  // display.display();
+  // Single bulk transfer of the finished frame. drawRGBBitmap goes through
+  // writePixels(), so this is one SPI burst rather than per-pixel traffic.
+  if (_canvas != NULL) {
+    display.drawRGBBitmap(0, 0, _canvas->getBuffer(), width(), height());
+  }
 }

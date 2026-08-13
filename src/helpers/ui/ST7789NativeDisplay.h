@@ -18,6 +18,17 @@
 class ST7789NativeDisplay : public DisplayDriver {
   SPIClass displaySPI;
   Adafruit_ST7789 display;
+
+  // Off-screen buffer. Every draw call goes here and the panel is written once
+  // in endFrame(), so no intermediate state is ever visible - startFrame()
+  // clearing the screen used to show as a black flash on every repaint.
+  //
+  // Costs 320*240*2 = 150KB, which lands in PSRAM (allocations over 4KB do).
+  // Total SPI traffic actually drops: the old path wrote a full frame of
+  // background and then overwrote much of it with content.
+  GFXcanvas16* _canvas;
+  Adafruit_GFX* _target;   // _canvas when buffered, &display as fallback
+
   bool _isOn;
   uint16_t _color;
   int _textsize;
@@ -36,6 +47,8 @@ public:
   {
     _isOn = false;
     _textsize = 1;
+    _canvas = NULL;
+    _target = &display;
   }
 
   bool begin();

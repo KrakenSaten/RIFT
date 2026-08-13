@@ -182,6 +182,14 @@ multiplying every draw call by ~2.5×/3.75×. `ST7789NativeDisplay` reports the
 true 320×240 and draws 1:1. It is a separate driver because the original is
 shared with two other boards.
 
+It also double-buffers. Drawing straight to the panel meant every repaint cleared
+the screen and rebuilt it, which showed as a black flash — badly while typing,
+since each keystroke forces a redraw. Frames are now composed in a 150KB
+`GFXcanvas16` (which lands in PSRAM) and blitted once in `endFrame()`. This costs
+*less* SPI time than before, because the old path wrote a full frame of background
+and then overwrote most of it. If the buffer cannot be allocated the driver falls
+back to drawing directly, flicker and all.
+
 Two shared files were extended, both additively:
 
 - `AbstractUITask` gained `msgDelivered()` — **non-pure with an empty default**,
