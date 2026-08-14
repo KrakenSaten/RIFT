@@ -26,6 +26,12 @@ on:
 
 jobs:
   build:
+    # Gated on the tests. They take under a minute; the five firmware builds take
+    # fifteen minutes of runner time between them, and there is no point spending
+    # it on a commit whose logic is already known to be broken. It also puts the
+    # useful failure at the top of the run rather than underneath five green
+    # builds.
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
