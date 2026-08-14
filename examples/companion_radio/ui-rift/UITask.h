@@ -125,6 +125,8 @@ public:
 
   void gotoHomeScreen() { nav_idx = RIFT_NAV_MESH; setCurrScreen(nav_screens[RIFT_NAV_MESH]); }
   void cycleNavScreen(int dir);
+  // NODES offers ENTER: DM; this switches to COMMS with that node selected
+  void startDirectMessage(const uint8_t* key6);
   void showAlert(const char* text, int duration_millis);
   int  getMsgCount() const { return _msgcount; }
   bool hasDisplay() const { return _display != NULL; }

@@ -985,6 +985,16 @@ public:
 // strength, so brightness encodes recency (how long since we last heard the
 // node) rather than link quality.
 #define RIFT_CONST_MAX 16
+#define RIFT_HOP_COLS 4
+#define RIFT_HOP_ROWS 3
+#define RIFT_NODE_NAME_MAX 10
+
+// AdvertPath::path_len is Packet's raw encoding, not a hop count: bits 6-7 carry
+// the hash size minus one and bits 0-5 the number of hops (Mesh.cpp:449). Reading
+// it as a plain count worked only while path_hash_mode was 0 - at 2-byte hashes a
+// two-hop route reads as 66 hops.
+static inline uint8_t riftHopCount(uint8_t path_len) { return path_len & 63; }
+static inline uint8_t riftHashSize(uint8_t path_len) { return (path_len >> 6) + 1; }
 
 class RiftConstellationScreen : public UIScreen {
   UITask* _task;
@@ -1000,7 +1010,37 @@ class RiftConstellationScreen : public UIScreen {
   unsigned long _last_refresh;
   bool _refreshed_once;
 
-  static const int CX_Y = 104;   // centre of the plot
+  // 68px column pitch; markers on three rows with the name on the row below
+  static const int COL_X[RIFT_HOP_COLS];
+  static const int ROW_MARK_Y[RIFT_HOP_ROWS];
+
+  // A hop byte is a prefix of that repeater's public key (Identity::copyHashTo is
+  // a straight memcpy from pub_key), so it can be matched against any node we
+  // have heard an advert from. Returns -1 when the repeater is not one of them,
+  // which is normal - we may never have heard it directly.
+  int findPlottedByHash(const uint8_t* hash, uint8_t len) {
+    if (len > sizeof(AdvertPath::pubkey_prefix)) len = sizeof(AdvertPath::pubkey_prefix);
+    for (int i = 0; i < _count; i++) {
+      if (_plot_x[i] < 0) continue;
+      if (memcmp(hash, _paths[i].pubkey_prefix, len) == 0) return i;
+    }
+    return -1;
+  }
+
+  // DisplayDriver has no line primitive, but every segment here is axis-aligned,
+  // so a 1px fillRect is a line. The first leg leaves YOU along a short spine at
+  // x=40 before turning, which keeps it clear of the DIRECT column's rows.
+  void drawElbow(DisplayDriver& display, int x1, int y1, int x2, int y2, bool from_you) {
+    if (from_you) {
+      int spine = 40;
+      display.fillRect(min(x1, spine), y1, abs(spine - x1) + 1, 1);
+      display.fillRect(spine, min(y1, y2), 1, abs(y2 - y1) + 1);
+      display.fillRect(min(spine, x2), y2, abs(x2 - spine) + 1, 1);
+      return;
+    }
+    display.fillRect(min(x1, x2), y1, abs(x2 - x1) + 1, 1);
+    display.fillRect(x2, min(y1, y2), 1, abs(y2 - y1) + 1);
+  }
 
   void refresh() {
     int n = the_mesh.getRecentlyHeard(_paths, RIFT_CONST_MAX);
@@ -1030,92 +1070,144 @@ public:
     sprintf(tmp, "%d HEARD", _count);
     renderTitleBar(display, _task, tmp);
 
-    int cx = display.width() / 2;
-    int cy = CX_Y;
-
-    // hop rings
-    display.setColor(UIColor::secondary_txt);
-    for (int r = 1; r <= 3; r++) {
-      int rad = r * 26;
-      display.drawRect(cx - rad, cy - rad, rad * 2, rad * 2);
+    // Column headers. Distance is a column, not a ring: the old squares-as-rings
+    // could not say how far anything was without counting boxes outward.
+    display.setTextSize(1);
+    display.setColor(rift_pal.mid);
+    static const char* HEADS[RIFT_HOP_COLS] = { "DIRECT", "1 HOP", "2 HOPS", "3 HOPS" };
+    for (int c = 0; c < RIFT_HOP_COLS; c++) {
+      display.drawTextLeftAlign(COL_X[c], 20, HEADS[c]);
     }
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 31, display.width(), 1);
 
-    // us
-    display.setColor(UIColor::title_txt);
-    display.fillRect(cx - 2, cy - 2, 5, 5);
-    display.drawTextCentered(cx, cy + 8, "YOU");
+    display.setColor(rift_pal.accent);
+    display.fillRect(10, 90, 5, 5);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(4, 98, "YOU");
 
     uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
 
+    // Assign every node a column from its real hop count and a row within it.
+    int col_fill[RIFT_HOP_COLS] = { 0, 0, 0, 0 };
+    int overflow = 0;
     for (int i = 0; i < _count; i++) {
-      AdvertPath* p = &_paths[i];
-
-      int hops = p->path_len;         // 0 == heard directly
-      int ring = hops + 1;
-      if (ring > 3) ring = 3;
-      int rad = ring * 26;
-
-      // direction from the first hop, so nodes reached through the same
-      // repeater cluster together; direct nodes spread by their own key
-      uint8_t branch = (hops > 0) ? p->path[0] : p->pubkey_prefix[0];
-      int d = branch & 15;
-
-      int x = cx + (rad * RF_DIR_X[d]) / 100;
-      int y = cy + (rad * RF_DIR_Y[d]) / 100;
-      _plot_x[i] = x;
-      _plot_y[i] = y;
-
-      // recency: solid if heard in the last few minutes, dim if stale
-      uint32_t age = (now > p->recv_timestamp) ? (now - p->recv_timestamp) : 0;
-      bool fresh = age < 300;   // 5 minutes
-
-      bool sel = (i == _sel);
-      display.setColor(sel ? UIColor::warning_txt
-                           : (fresh ? UIColor::primary_txt : UIColor::secondary_txt));
-
-      // link line back toward centre, then the node itself
-      display.fillRect(cx + (x - cx) / 2, cy + (y - cy) / 2, 1, 1);
-      if (sel) {
-        display.fillRect(x - 3, y - 3, 7, 7);
-      } else {
-        display.fillRect(x - 2, y - 2, 4, 4);
-      }
+      int hops = riftHopCount(_paths[i].path_len);
+      int c = hops;
+      if (c > RIFT_HOP_COLS - 1) c = RIFT_HOP_COLS - 1;
+      if (col_fill[c] >= RIFT_HOP_ROWS) { _plot_x[i] = -1; _plot_y[i] = -1; overflow++; continue; }
+      int r = col_fill[c]++;
+      _plot_x[i] = COL_X[c];
+      _plot_y[i] = ROW_MARK_Y[r];
     }
 
+    // The selected node's route, drawn before the markers so the markers sit on
+    // top of it. Each hop byte is a prefix of that repeater's public key, so a
+    // hop can be resolved to a node we have actually heard - when it can, the
+    // line bends through its marker. When it cannot, the leg is drawn straight
+    // rather than inventing a waypoint.
+    if (_count > 0 && _plot_x[_sel] >= 0) {
+      AdvertPath* sp = &_paths[_sel];
+      int hops = riftHopCount(sp->path_len);
+      uint8_t hsz = riftHashSize(sp->path_len);
+
+      display.setColor(rift_pal.accent);
+      int px = 12, py = 92;          // centre of the YOU marker
+      bool first = true;
+      for (int k = 0; k < hops; k++) {
+        int via = findPlottedByHash(&sp->path[k * hsz], hsz);
+        if (via < 0) continue;
+        drawElbow(display, px, py, _plot_x[via] + 2, _plot_y[via] + 2, first);
+        px = _plot_x[via] + 2; py = _plot_y[via] + 2;
+        first = false;
+      }
+      drawElbow(display, px, py, _plot_x[_sel] + 2, _plot_y[_sel] + 2, first);
+    }
+
+    for (int i = 0; i < _count; i++) {
+      if (_plot_x[i] < 0) continue;
+      AdvertPath* p = &_paths[i];
+      int x = _plot_x[i], y = _plot_y[i];
+
+      // Freshness is shape, not brightness. Four grey levels collapse into each
+      // other outdoors once reflected light lays a veil over the panel; a filled
+      // versus hollow rect survives it, and both stay at full contrast.
+      uint32_t age = (now > p->recv_timestamp) ? (now - p->recv_timestamp) : 0;
+      display.setColor(rift_pal.fg);
+      if (age < 1800) display.fillRect(x, y, 5, 5);
+      else            display.drawRect(x, y, 5, 5);
+
+      if (i == _sel) {
+        // one pixel larger, so selection reads at both freshness states
+        display.setColor(rift_pal.accent);
+        display.drawRect(x - 1, y - 1, 7, 7);
+      }
+
+      char filtered[sizeof(p->name)];
+      riftTranslateUTF8(filtered, p->name, sizeof(filtered));
+      // 10 chars = 60px in a 68px column. At 11 the gap is 2px and two names
+      // read as one word.
+      if (strlen(filtered) > RIFT_NODE_NAME_MAX) filtered[RIFT_NODE_NAME_MAX] = 0;
+      display.setColor(rift_pal.fg);
+      display.drawTextLeftAlign(x, y + 8, filtered);
+    }
+
+    display.setColor(rift_pal.mid);
     if (_count == 0) {
-      display.setColor(UIColor::secondary_txt);
-      display.drawTextCentered(cx, cy + 40, "no adverts heard yet");
+      display.drawTextLeftAlign(2, 132, "no adverts heard yet");
+    } else {
+      display.drawTextLeftAlign(2, 132, "solid = heard under 30m");
+      display.drawTextLeftAlign(2, 144, "hollow = older");
+      if (overflow > 0) {
+        sprintf(tmp, "%d more not shown", overflow);
+        display.drawTextLeftAlign(2, 156, tmp);
+      }
     }
 
     // detail for the selected node
-    int y = 186;
-    display.setColor(UIColor::secondary_txt);
-    display.drawRect(0, y - 6, display.width(), 1);
+    display.setColor(rift_day_mode ? 0x2104 : rift_pal.accent);
+    display.fillRect(0, 176, display.width(), 1);
 
     if (_count > 0) {
       AdvertPath* p = &_paths[_sel];
+      int hops = riftHopCount(p->path_len);
+
       char filtered[sizeof(p->name)];
       riftTranslateUTF8(filtered, p->name, sizeof(filtered));
+      display.setColor(rift_pal.fg);
+      display.drawTextEllipsized(2, 182, 220, filtered);
 
-      display.setColor(UIColor::title_txt);
-      display.drawTextEllipsized(4, y, 180, filtered);
-
-      display.setColor(UIColor::secondary_txt);
-      if (p->path_len == 0) {
-        strcpy(tmp, "direct");
-      } else {
-        sprintf(tmp, "%d hop%s", p->path_len, p->path_len == 1 ? "" : "s");
-      }
-      display.drawTextRightAlign(display.width() - 4, y, tmp);
+      display.setColor(rift_pal.mid);
+      if (hops == 0) strcpy(tmp, "direct");
+      else sprintf(tmp, "%d hop%s", hops, hops == 1 ? "" : "s");
+      display.drawTextRightAlign(display.width() - 2, 182, tmp);
 
       uint32_t age = (now > p->recv_timestamp) ? (now - p->recv_timestamp) : 0;
-      if (age < 60) sprintf(tmp, "heard %lus ago", (unsigned long) age);
-      else if (age < 3600) sprintf(tmp, "heard %lum ago", (unsigned long) (age / 60));
-      else sprintf(tmp, "heard %luh ago", (unsigned long) (age / 3600));
-      display.drawTextLeftAlign(4, y + RIFT_LINE_H, tmp);
+      char when[24];
+      if (age < 60) sprintf(when, "%lus ago", (unsigned long) age);
+      else if (age < 3600) sprintf(when, "%lum ago", (unsigned long) (age / 60));
+      else sprintf(when, "%luh ago", (unsigned long) (age / 3600));
 
-      sprintf(tmp, "%d/%d", _sel + 1, _count);
-      display.drawTextRightAlign(display.width() - 4, y + RIFT_LINE_H, tmp);
+      uint8_t hsz = riftHashSize(p->path_len);
+      int via = (hops > 0) ? findPlottedByHash(p->path, hsz) : -1;
+      if (via >= 0) {
+        char vname[sizeof(p->name)];
+        riftTranslateUTF8(vname, _paths[via].name, sizeof(vname));
+        if (strlen(vname) > RIFT_NODE_NAME_MAX) vname[RIFT_NODE_NAME_MAX] = 0;
+        snprintf(tmp, sizeof(tmp), "via %s, heard %s", vname, when);
+      } else {
+        snprintf(tmp, sizeof(tmp), "heard %s", when);
+      }
+      display.drawTextLeftAlign(2, 194, tmp);
+
+      if (rift_day_mode) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(262, 193, 58, 10);
+        display.setColor(0xFFFF);
+      } else {
+        display.setColor(rift_pal.accent);
+      }
+      display.drawTextRightAlign(display.width() - 2, 194, "ENTER: DM");
     }
 
     renderNavBar(display, RIFT_NAV_NODES);
@@ -1127,6 +1219,7 @@ public:
     if (_count == 0 || y > 170) return false;
     int best = -1, best_d = 0;
     for (int i = 0; i < _count; i++) {
+      if (_plot_x[i] < 0) continue;   // not shown this frame
       int dx = x - _plot_x[i], dy = y - _plot_y[i];
       int d = dx * dx + dy * dy;
       if (best < 0 || d < best_d) { best = i; best_d = d; }
@@ -1146,9 +1239,25 @@ public:
       if (_count > 0) _sel = (_sel + 1) % _count;
       return true;
     }
+    if (c == KEY_ENTER) {
+      if (_count == 0) return true;
+      const uint8_t* key = _paths[_sel].pubkey_prefix;
+      // an advert can be heard from a node that is not in the contact book, and
+      // then there is nothing to send to - say so rather than opening a compose
+      // box whose message could never leave
+      if (the_mesh.lookupContactByPubKey((uint8_t*) key, 6) == NULL) {
+        _task->showAlert("Not a contact yet", 1400);
+        return true;
+      }
+      _task->startDirectMessage(key);
+      return true;
+    }
     return false;
   }
 };
+
+const int RiftConstellationScreen::COL_X[RIFT_HOP_COLS] = { 46, 114, 182, 250 };
+const int RiftConstellationScreen::ROW_MARK_Y[RIFT_HOP_ROWS] = { 36, 64, 92 };
 
 // Placeholder nav screen - visual only, real functionality lands in a later milestone.
 class RiftPlaceholderScreen : public UIScreen {
@@ -1763,6 +1872,18 @@ class RiftCommsScreen : public UIScreen, ContactVisitor {
   bool _target_is_channel;
   uint8_t _target_channel_idx;
   uint8_t _target_key[6];
+
+public:
+  // Used by NODES, whose detail bar offers ENTER: DM. Takes the 6-byte key
+  // prefix; the contact has to exist in MeshCore's book for a send to work, so
+  // the caller checks that first rather than leaving the user typing into a
+  // message that can never leave.
+  void setDirectTarget(const uint8_t* key6) {
+    _target_is_channel = false;
+    memcpy(_target_key, key6, 6);
+    _picking = false;
+  }
+private:
   char _target_name[32];
 
   // target picker sub-view. Channels and contacts share one list; each entry
@@ -2316,6 +2437,12 @@ switch(t){
     vibration.trigger();
   }
 #endif
+}
+
+void UITask::startDirectMessage(const uint8_t* key6) {
+  ((RiftCommsScreen *) nav_screens[RIFT_NAV_COMMS])->setDirectTarget(key6);
+  nav_idx = RIFT_NAV_COMMS;
+  setCurrScreen(nav_screens[RIFT_NAV_COMMS]);
 }
 
 void UITask::msgRead(int msgcount) {
