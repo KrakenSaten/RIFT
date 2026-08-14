@@ -31,36 +31,103 @@ second device is needed.
 </p>
 <p align="center">
 <sub>The boot screen. The status line appears only when SPIFFS actually needs
-formatting, which takes one to two minutes. The design's progress bar is not
-drawn — see below.</sub>
+formatting, which takes one to two minutes.</sub>
 </p>
 
 ---
 
-## How this was built
+## Contents
 
-The RIFT code in this fork was written by an AI assistant (Claude), directed and
-supervised by **mstr** ([KrakenSaten](https://github.com/KrakenSaten)), who
-specified the work, tested every change and is accountable for what ships here.
+- [Flashing a device](#flashing-a-device) — start here
+- [Hardware](#hardware)
+- [Screens and controls](#screens-and-controls)
+- [Sending your first direct message](#sending-your-first-direct-message)
+- [How this was built](#how-this-was-built)
+- [Known limitations](#known-limitations)
+- [Status](#status)
+- [Upstream MeshCore](#upstream-meshcore)
 
-That supervision is not a formality. The AI cannot flash a board or watch a
-radio, so nothing was accepted on the strength of "it compiles" — each change was
-flashed to physical hardware and verified before being committed. Several things
-the AI got wrong were caught exactly there:
+Other documents in this repository:
 
-- it used a USB API that only reports true once a host *opens* the serial port,
-  so "keep the display on while charging" silently never worked
-- it parsed the touch controller using the datasheet's byte layout instead of the
-  one the hardware actually returns, giving impossible coordinates
-- it assumed keyboard and trackball pin behaviour that the hardware contradicted,
-  three separate times
-- it wrote documentation stating as fact things this device disproves
+| File | What |
+|---|---|
+| [`BUILDING.md`](BUILDING.md) | Toolchain, environment traps, commands, CI, supply chain |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | How RIFT fits together, and why each awkward part is that way |
+| [`HANDOFF.md`](HANDOFF.md) | Working notes — hardware facts, protocol details, open items |
+| [`design/handoff.md`](design/handoff.md) | Screen design spec at 1:1 device coordinates |
 
-Where its assumptions and the hardware disagreed, the hardware won — and the
-diagnostics on the SYSTEM screen exist because of it.
+---
 
-**MeshCore itself is not AI-written.** The protocol, routing, encryption and radio
-drivers are the upstream project's work by human authors; see the credit above.
+## Flashing a device
+
+### → [**krakensaten.github.io/RIFT**](https://krakensaten.github.io/RIFT/) ←
+
+**The browser flasher. Nothing to install.** Plug the T-Deck in, press the button,
+done. **Chrome or Edge on desktop only** —
+it uses [ESP Web Tools](https://esphome.github.io/esp-web-tools/) over WebSerial,
+which Firefox and Safari do not implement.
+
+The page is built and published by `rift-release.yml` on every `v*` tag, from the
+same binary attached to the release, so it cannot drift out of step.
+
+### Or by hand
+
+With the `*-merged.bin` from the
+[releases page](https://github.com/KrakenSaten/RIFT/releases):
+
+```bash
+python -m esptool --chip esp32s3 --port COM5 write-flash 0x0 rift-merged.bin
+```
+
+Those are esptool 5 command names; esptool 4, which PlatformIO bundles, uses
+`write_flash`. Going through `python -m esptool` works on both.
+
+Building from source instead? See [`BUILDING.md`](BUILDING.md).
+
+### Before you flash — two things worth knowing
+
+<details>
+<summary><strong>Your identity survives an upgrade, but not a chip erase</strong></summary>
+
+The merged image spans offset 0 to roughly `0x19d000` — bootloader, partition
+table, boot selector, application. The SPIFFS partition holding the MeshCore
+private key sits at `0xc90000`, well past that, so flashing in place keeps your
+identity, contacts and channels. NVS at `0x9000` does fall inside the image and is
+erased, but that holds Arduino-side preferences rather than anything MeshCore
+needs.
+
+A **full chip erase is a different matter**: it takes SPIFFS with it, and since
+RIFT disables MeshCore's private-key export there is no way to back the key up
+first or recover it after. Only erase if you intend to become a new node.
+
+**The browser flasher asks before erasing, and it has to.** ESP Web Tools erases
+all data by default on what it considers a new install, and it decides that by
+asking the device to identify itself over Improv Serial. RIFT does not implement
+Improv, so it can never answer — meaning every install would be classed as new and
+would wipe the identity, every time. The manifest therefore sets
+`new_install_prompt_erase`, which turns that into a question rather than a default.
+**Answer no when upgrading a node you already use.**
+
+</details>
+
+<details>
+<summary><strong>A first boot on an unformatted partition takes one to two minutes</strong></summary>
+
+The boot screen says so in as many words, because an unexplained pause on a device
+with no obvious activity is indistinguishable from a brick — and resetting partway
+through leaves the filesystem needing another format anyway.
+
+The line only appears when a format is really about to happen. `SPIFFS.begin()`
+formats on mount failure, so RIFT probes first with `formatOnFail` off; a normal
+boot mounts immediately and shows nothing.
+
+**There is no progress bar**, despite the design: that format blocks the only
+running task for its full duration — `loop()` has not started and the UI task does
+not yet exist — and it reports no progress along the way. A bar would either sit
+frozen or animate against a guess, and both are worse than a sentence that tells
+the truth.
+
+</details>
 
 ---
 
@@ -79,164 +146,18 @@ Original LilyGO T-Deck — **not** T-Deck Pro:
 
 ---
 
-## Flashing a device
-
-Two routes, and one thing to know before either.
-
-**The browser flasher** at
-[krakensaten.github.io/RIFT](https://krakensaten.github.io/RIFT/) needs nothing
-installed: plug the T-Deck in, press the button, done. It uses
-[ESP Web Tools](https://esphome.github.io/esp-web-tools/) over WebSerial, so it
-works in Chrome and Edge on desktop only — Firefox and Safari have no WebSerial.
-The page is built and published by `rift-release.yml` on every `v*` tag, from the
-same binary attached to the release, so it cannot drift out of step.
-
-**Or by hand**, with the `*-merged.bin` from the
-[releases page](https://github.com/KrakenSaten/RIFT/releases):
-
-```bash
-python -m esptool --chip esp32s3 --port COM5 write-flash 0x0 rift-merged.bin
-```
-
-Those are esptool 5 command names; esptool 4, which PlatformIO bundles, uses
-`write_flash`. Going through `python -m esptool` works on both.
-
-**What survives an upgrade.** The merged image spans offset 0 to roughly
-`0x19d000` — bootloader, partition table, boot selector, application. The SPIFFS
-partition holding the MeshCore private key sits at `0xc90000`, well past that, so
-flashing in place keeps your identity, contacts and channels. NVS at `0x9000`
-does fall inside the image and is erased, but that holds Arduino-side preferences
-rather than anything MeshCore needs.
-
-A **full chip erase is a different matter**: it takes SPIFFS with it, and since
-RIFT disables MeshCore's private-key export there is no way to back the key up
-first or recover it after. Only erase if you intend to become a new node.
-
-**The browser flasher asks before erasing, and it has to.** ESP Web Tools erases
-all data by default on what it considers a new install, and it decides that by
-asking the device to identify itself over Improv Serial. RIFT does not implement
-Improv, so it can never answer — meaning every install would be classed as new
-and would wipe the identity, every time. The manifest therefore sets
-`new_install_prompt_erase`, which turns that into a question rather than a
-default. Answer no when upgrading a node you already use.
-
-And regardless of route, **a first boot on an unformatted partition spends one
-to two minutes formatting SPIFFS**. The boot screen says so in as many words,
-because an unexplained pause on a device with no obvious activity is
-indistinguishable from a brick — and resetting partway through leaves the
-filesystem needing another format anyway.
-
-The line only appears when a format is really about to happen. `SPIFFS.begin()`
-formats on mount failure, so RIFT probes first with `formatOnFail` off; a normal
-boot mounts immediately and shows nothing. **There is no progress bar**, despite
-the design: that format blocks the only running task for its full duration —
-`loop()` has not started and the UI task does not yet exist — and it reports no
-progress along the way. A bar would either sit frozen or animate against a guess,
-and both are worse than a sentence that tells the truth.
-
----
-
-## Building
-
-Two environment gotchas cost real time during development. Both are worth
-getting right before the first build.
-
-**1. PlatformIO must live in its own virtual environment.** Installing it into
-a shared/global Python can upgrade packages other tools depend on.
-
-```bash
-python -m venv C:/dev/RIFT/.venv
-C:/dev/RIFT/.venv/Scripts/python.exe -m pip install platformio
-```
-
-**2. `PLATFORMIO_CORE_DIR` must be an ASCII-only path.** The Windows toolchain
-fails to find headers if the core directory contains non-ASCII characters — for
-example a user profile like `C:\Users\AndréWågen\.platformio`. The failure looks
-like missing `Arduino.h`/`Stream.h`, which is misleading.
-
-```bash
-export PLATFORMIO_CORE_DIR="C:/dev/.platformio"
-```
-
-**3. Running the unit tests needs a host compiler**, which PlatformIO does not
-bring with it. Without one, `pio test -e native` fails with `'g++' is not
-recognized` and the suite can only be run in CI - which is how a missing `main()`
-once reached the branch. On Windows, MSYS2 is the shortest route: install it from
-[msys2.org](https://www.msys2.org), then from the UCRT64 shell
-
-```bash
-pacman -S --needed mingw-w64-ucrt-x86_64-gcc
-```
-
-and put `C:\msys64\ucrt64\bin` on PATH. Verified with GCC 16.1.0.
-
-```bash
-pio test -e native -e native_kiss_modem
-```
-
-Then build and flash:
-
-```bash
-pio run -e LilyGo_TDeck_rift
-```
-
-```bash
-pio run -e LilyGo_TDeck_rift -t upload --upload-port COM5
-```
-
-If upload reports *"Could not open COM5, the port doesn't exist"* while the port
-is clearly listed, a leftover `pio device monitor` process is holding it. Kill
-it before retrying.
-
-**First boot after switching firmware may reformat SPIFFS**, which takes one to
-two minutes. The boot screen says `Formatting SPIFFS` when that is happening.
-Wait it out rather than resetting. An ordinary boot takes about five seconds; if
-it takes materially longer, SYSTEM shows `boot:` and `slowest:` so the phase
-responsible can be named rather than guessed at.
-
-### Other environments
-
-`LilyGo_TDeck_rift` is additive. The four upstream T-Deck environments
-(`_companion_radio_usb`, `_companion_radio_ble`, `_repeater`, `_kiss_modem`)
-are unchanged and still build; that is worth re-checking after any edit to
-shared code, since `MyMesh` and `AbstractUITask` are compiled into every
-companion-radio build on every board.
-
-### Supply chain
-
-Third-party actions in RIFT's own workflows are pinned to commit SHAs, with the
-version noted beside each. A tag is a movable pointer, and these workflows are
-what produce the binaries people flash. Permissions are read-only by default;
-only the job that creates the release and pushes to `gh-pages` is granted write.
-
-Two gaps, stated rather than papered over. The shared
-`.github/actions/setup-build-environment` is upstream's and still refers to
-`actions/cache@v5` and `actions/setup-python@v6` by tag - pinning it there would
-diverge from upstream and change their workflows too. And the browser flasher
-loads ESP Web Tools 10.4.0 from unpkg: the version is pinned, but the `?module`
-form resolves that library's own dependencies from the CDN at load time using
-ranges. Removing that runtime dependency means bundling the library into this
-repository, which needs an npm build step that does not exist here.
-
-`.github/workflows/rift-build-check.yml` does exactly that check in CI, on push
-and pull request against `rift-tdeck`: it builds `LilyGo_TDeck_rift` plus all
-four stock T-Deck environments, and runs the native unit tests. Upstream's own
-`pr-build-check.yml` triggers only on `main`/`dev` and its matrix contains no
-T-Deck environment at all, so before this file nothing in CI compiled RIFT.
-It is a separate workflow rather than an edit to upstream's, so merges from
-upstream stay conflict-free.
-
----
-
 ## Screens and controls
+
+Five screens, reached from a nav bar along the bottom. The first is labelled
+**RIFT** and is the home screen; the wordmark doubles as the home tab.
 
 <table>
 <tr>
-<td width="50%"><img src="design/screens/mesh.png" alt="MESH: the link state CONNECTED set large on the left, a radar box with one blip on the right, node count and link RSSI/SNR beneath, and the radio configuration line" width="100%"></td>
+<td width="50%"><img src="design/screens/mesh.png" alt="The home screen: a state word set large on the left, a radar box with one blip on the right, node count and link RSSI/SNR beneath, and the radio configuration line" width="100%"></td>
 <td width="50%"><img src="design/screens/nodes.png" alt="NODES: four columns headed DIRECT, 1 HOP, 2 HOPS and 3 HOPS, with node markers and names, a route line drawn from YOU through two repeaters to the selected node, and a detail bar showing the selected node and ENTER: DM" width="100%"></td>
 </tr>
 <tr>
-<td><strong>MESH</strong> — am I on the network</td>
+<td><strong>RIFT</strong> — is the mesh alive around me</td>
 <td><strong>NODES</strong> — who I can reach, and how far away</td>
 </tr>
 <tr>
@@ -255,16 +176,19 @@ upstream stay conflict-free.
 <td width="50%"><img src="design/screens/nodes-day.png" alt="NODES in day mode: black text and markers on white, with the same orange accent used as a fill rather than as text" width="100%"></td>
 </tr>
 <tr>
-<td colspan="2"><strong>Night and day</strong> — the same geometry with a swapped colour table, toggled from SYSTEM. Note that the accent is the same value in both, but on white it becomes a fill with the text reversed out of it rather than text in its own right.</td>
+<td colspan="2"><strong>Night and day</strong> — the same geometry with a swapped colour table, toggled from SYSTEM. The accent is the same value in both, but on white it becomes a fill with the text reversed out of it rather than text in its own right.</td>
 </tr>
 </table>
 
-> These are the design renderings from `design/`, drawn at 1:1 device
-> resolution and shown at 2x — not photographs of the panel. The firmware follows
-> them closely but not pixel-for-pixel: the SYSTEM menu carries a sixth item for
-> day mode, the diagnostics column has two extra rows for boot timings, and the
-> proposed wordmark is still drawn as `setTextSize(3)` text because it would need
-> hand-pixelling as a 1-bit bitmap first.
+> These are design renderings from `design/`, drawn at 1:1 device resolution and
+> shown at 2x — not photographs of the panel. The firmware has since moved past
+> them in a few places, all deliberate: **there is no longer a title bar across
+> the top** — the wordmark and battery live in the nav bar and each screen carries
+> its own heading — the home screen headlines mesh receive activity rather than the
+> companion link, the SYSTEM menu carries a sixth item for day mode, the
+> diagnostics column has two extra rows for boot timings, and the wordmark is
+> drawn as `setTextSize(3)` text because a 1-bit bitmap would need hand-pixelling
+> first.
 
 **Trackball click is Enter** — it selects, activates and sends, the same as the
 keyboard's Enter. Screen changes are covered by **rolling the trackball
@@ -273,11 +197,16 @@ left/right**, **double-click** (previous screen), or **tapping a nav-bar tab**.
 
 | Screen | What it shows | Screen-specific controls |
 |---|---|---|
-| **MESH** | Link state large enough to read at a glance, plus node count, link RSSI/SNR, radio config and the ping animation | — |
+| **RIFT** | Whether the mesh is alive: `ACTIVE` / `IDLE` / `QUIET` / `NO SIGNAL` set large, with how long ago the radio last decoded anything and how many packets it has heard. Plus node count, link RSSI/SNR, radio config, and the USB/BLE companion link, labelled for what it actually measures | — |
 | **NODES** | Who you can reach and how far away, as four hop columns. Filled marker = heard in the last 30 minutes, hollow = older. The selected node's route is drawn through the repeaters it actually travelled | trackball up/down selects a node, or tap one; **Enter** starts a DM to it |
 | **RADAR** | Passive Wi-Fi + BLE. Device count, how many are new in the last 60s, three signal-strength bands with one cell per device, and the strongest-first list | **Enter** toggles the waterfall; up/down scrolls the list |
-| **COMMS** | MeshCore text terminal — channel tabs, message history, compose line with a character count | **tap a channel** to switch to it; **Enter** sends, or opens the target picker when the line is empty; **backspace** deletes; up/down scrolls history |
+| **COMMS** | MeshCore text terminal — channel strip, message history, compose line with a character count | **tap a channel** to switch to it; **Enter** sends, or opens the target picker when the line is empty; **backspace** deletes; up/down scrolls history |
 | **SYSTEM** | Actions left of the divider, read-only diagnostics right of it: node name, keyboard, last key, I²C bus, touch, GPS, free heap, external power, last reset, boot timings | up/down or tap selects; **Enter** activates. Actions: send advert (two kinds), edit node name, add channel, path hash size, day/night |
+
+**An incoming message raises a panel** over whatever you are doing, listing the six
+newest with sender and time. **Enter** opens COMMS for the full history;
+**backspace** dismisses it and hands back the screen you were on. It does not
+interrupt you mid-compose, or while a one-time channel key is on screen.
 
 **Long-press the trackball within 8 seconds of boot** to enter MeshCore's CLI
 rescue mode (upstream behaviour, preserved).
@@ -285,247 +214,171 @@ rescue mode (upstream behaviour, preserved).
 ### Sending your first direct message
 
 A recipient cannot decrypt a direct message from a node it has never heard an
-advert from — it looks the sender up in its contacts and silently drops the
-packet. So **send an advert from SYSTEM first**, and confirm the T-Deck appears
-in the other node's contact list. Public-channel messages work without this,
-because channels use a shared key.
+advert from — it looks the sender up in its contacts and silently drops the packet.
+So **send an advert from SYSTEM first**, and confirm the T-Deck appears in the other
+node's contact list. Public-channel messages work without this, because channels use
+a shared key.
 
 Configured channels appear as a strip across the top of COMMS — tap one to switch
-to it, with the active channel filled. Contacts are not in the strip (there can
-be many); press Enter on an empty line for the full picker, which lists every
-channel (marked `channel`) followed by contacts, most recently heard first
-(marked `direct`). Repeaters and sensors are filtered out — nobody is reading
-them. When a contact is the target, the strip shows `DM` rather than a
-misleading channel selection.
+to it, with the active channel filled. Contacts are not in the strip (there can be
+many); press Enter on an empty line for the full picker, which lists every channel
+(marked `channel`) followed by contacts, most recently heard first (marked
+`direct`). Repeaters and sensors are filtered out — nobody is reading them. When a
+contact is the target, the strip shows `DM` and the contact's name sits above it.
 
-Direct messages show delivery state (`...` → `ACK 1.2s`, or `no ack` on
-timeout). Channel messages show none: they are always flooded and carry no
-acknowledgement, so there is nothing truthful to display.
-
----
-
-## The screen design
-
-The five on-device screens follow a design handoff
-(`design/`, with the original archive kept alongside it), written against
-this repo's actual constraints:
-the 6x8 Adafruit GFX cell with only whole-integer scaling, `DisplayDriver`'s
-primitives, and the SPI bus shared with the SX1262. Every coordinate in it is a
-real device coordinate.
-
-It carries a night and a day palette — the same geometry with a swapped colour
-table, toggled from SYSTEM. Two rules run through both. **Nothing encodes data in
-brightness where shape can carry it**, because a grey ramp is the first thing to
-go once reflected light lifts black toward grey outdoors; freshness in NODES and
-the FAR band in RADAR are filled versus hollow instead. And **de-emphasis inverts
-with the field** — on white, dim has to be darker, not lighter. The accent
-`#FF4100` keeps its value in both modes but changes role: at 6.0:1 on black it may
-be text, at 3.5:1 on white it may only be a fill with white reversed out of it.
-
-The review also found three real bugs, all confirmed in the source before
-anything was changed: nodes placed by `branch & 15` so two nodes behind the same
-repeater landed on the same pixel; a "link line" that was `fillRect(cx, cy, 1, 1)`,
-a single pixel at the midpoint of the line it was meant to be; and radar blips
-placed by array index, which moved whenever an unrelated device aged out of the
-table. Implementing the spec precisely turned up a fourth: `AdvertPath::path_len`
-is Packet's raw encoding, where bits 6-7 hold the hash size and bits 0-5 the hop
-count, and reading it as a plain count made a two-hop route display as 66 hops at
-the 2-byte path hash setting.
-
-Two things in the spec could not be built as drawn. The splash progress bar has
-nothing to animate against — `SPIFFS.begin()` blocks the only running task and
-reports no progress — so the screen says what is happening instead. And day mode
-is a menu item rather than being bound to backlight level, because this panel's
-backlight is on or off with no level to read.
-
-## Architecture
-
-RIFT is a parallel UI implementation, selected entirely by build flags. It sits
-alongside upstream's `ui-new`, `ui-orig` and `ui-tiny` rather than replacing
-anything.
-
-```
-examples/companion_radio/ui-rift/     RIFT UI (all screens)
-src/helpers/ui/ST7789NativeDisplay.*  native 320x240 display driver
-src/helpers/ui/TDeckKeyboard.*        I2C keyboard driver
-src/helpers/ui/TDeckTrackball.*       trackball directional driver
-src/helpers/ui/TDeckTouch.*           GT911 touchscreen driver
-variants/lilygo_tdeck/                +RIFT_* build flags and globals
-```
-
-**The protocol and radio layers are untouched.** MeshCore's mesh protocol,
-RadioLib integration and SX1262 handling are used as-is.
-
-Upstream's `ST7789LCDDisplay` treats the colour LCD as a scaled-up 128×64 OLED,
-multiplying every draw call by ~2.5×/3.75×. `ST7789NativeDisplay` reports the
-true 320×240 and draws 1:1. It is a separate driver because the original is
-shared with two other boards.
-
-It also double-buffers. Drawing straight to the panel meant every repaint cleared
-the screen and rebuilt it, which showed as a black flash — badly while typing,
-since each keystroke forces a redraw. Frames are now composed in a 150KB
-`GFXcanvas16` (which lands in PSRAM) and blitted once in `endFrame()`. This costs
-*less* SPI time than before, because the old path wrote a full frame of background
-and then overwrote most of it. If the buffer cannot be allocated the driver falls
-back to drawing directly, flicker and all.
-
-Two shared files were extended, both additively:
-
-- `AbstractUITask` gained `msgDelivered()` — **non-pure with an empty default**,
-  so the other three UI implementations need no changes.
-- `MyMesh` gained `sendTextTo()`, which registers the expected ACK in a table
-  that is private to the class, and `processAck()` now notifies the UI as well
-  as the serial link. It also gained channel-creation methods, because
-  `saveChannels()` is private.
-- `UIScreen` gained `handleTouch()`, also non-pure with an empty default.
-
-`BaseChatMesh::addChannel()` is deliberately **not** used to add channels. It
-writes at `num_channels`, which only counts channels added through that method
-and stays 0 for channels restored from storage — so it would silently overwrite
-an existing channel, including Public. The RIFT methods find a genuinely free
-slot instead. This is a trap waiting for the next person.
-
-Feature flags: `RIFT_DISPLAY`, `RIFT_INPUT_KEYBOARD`, `RIFT_INPUT_TRACKBALL`,
-`RIFT_INPUT_TOUCH`, `RIFT_RADAR`. Each guards its own code, so features can be disabled
-independently when bisecting a problem.
-
-### Not blocking the radio
-
-There is **no watchdog on the main loop** (`loopTaskWDTEnabled` is false and the
-IDF task watchdog only monitors core 0 idle, while `loopTask` runs on core 1).
-A blocking call does not panic — it silently starves the LoRa radio. That makes
-this the most important constraint in the codebase.
-
-Both scan APIs have a blocking overload that is easy to reach by accident:
-
-- `WiFi.scanNetworks()` with default arguments blocks up to **10 seconds**.
-- `BLEScan::start(duration, bool)` blocks for the full duration —
-  `start(5, false)` silently resolves to it. The only non-blocking form takes a
-  function pointer.
-
-RADAR therefore runs as a non-blocking state machine, and Wi-Fi and BLE
-alternate rather than overlap: they share one 2.4 GHz PHY and antenna, and the
-coexistence arbiter halves both if run concurrently.
-
-Scanning is **passive** — `passive=true` for Wi-Fi and `setActiveScan(false)`
-for BLE, so nothing is transmitted. RIFT observes; it does not probe, inject or
-deauthenticate.
+Direct messages show delivery state (`...` → `ACK 1.2s`, or `no ack` on timeout).
+Channel messages show none: they are always flooded and carry no acknowledgement,
+so there is nothing truthful to display.
 
 ---
 
-## Private keys stay on the device
+## How this was built
 
-Upstream enables `ENABLE_PRIVATE_KEY_IMPORT` and `ENABLE_PRIVATE_KEY_EXPORT`
-by default, with a comment in `platformio.ini` noting they should be off for more
-secure firmware. With them on, `CMD_EXPORT_PRIVATE_KEY` writes the 64-byte
-private identity straight out over serial and the matching import command
-replaces it. That is a reasonable default for a radio you configure from a phone
-app; it is not one for a standalone terminal that also enables
-`ENABLE_USB_INTERFACE`, where anything with USB access to the device could clone
-or hijack the node identity.
+The RIFT code in this fork was written by an AI assistant (Claude), directed and
+supervised by **mstr** ([KrakenSaten](https://github.com/KrakenSaten)), who
+specified the work, tested every change and is accountable for what ships here.
 
-The RIFT environment therefore strips both flags via `build_unflags`, and both
-commands answer with MeshCore's existing "disabled" response. Nothing else
-changes — the stock T-Deck environments keep upstream's behaviour.
+That supervision is not a formality. The AI cannot flash a board or watch a radio,
+so nothing was accepted on the strength of "it compiles" — each change was flashed
+to physical hardware and verified before being committed. Several things the AI got
+wrong were caught exactly there:
 
-## Known limitations and workarounds
+- it used a USB API that only reports true once a host *opens* the serial port, so
+  "keep the display on while charging" silently never worked
+- it parsed the touch controller using the datasheet's byte layout instead of the
+  one the hardware actually returns, giving impossible coordinates
+- it assumed keyboard and trackball pin behaviour that the hardware contradicted,
+  three separate times
+- it assumed a key that emits nothing could host a feature, until the raw byte was
+  put on screen and disproved it
+- it wrote documentation stating as fact things this device disproves
+
+Where its assumptions and the hardware disagreed, the hardware won — and the
+diagnostics on the SYSTEM screen exist because of it.
+
+**MeshCore itself is not AI-written.** The protocol, routing, encryption and radio
+drivers are the upstream project's work by human authors; see the credit above.
+
+---
+
+## Known limitations
 
 Honest list. Each of these is a deliberate trade-off, not an oversight.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) has the reasoning behind the first two.
 
-**BLE is never de-initialised.** `BLEDevice::deinit()` panics in this ESP32
-Arduino core when a scan has recently been active, and no grace period made it
-reliable. After the first visit to RADAR the BLE stack stays initialised and
-idle until reboot, holding its heap. It transmits nothing in that state. To
-compensate, `OFFLINE_QUEUE_SIZE` is reduced from upstream's 256 to 32 — that
-queue exists to buffer messages for a disconnected companion app, which a
-standalone device with its own message log barely needs, and at 177 bytes per
-slot it was ~45 KB of static RAM doing very little.
+**BLE is never de-initialised.** `BLEDevice::deinit()` panics in this ESP32 Arduino
+core when a scan has recently been active. After the first visit to RADAR the BLE
+stack stays initialised and idle until reboot, holding its heap. It transmits
+nothing in that state.
 
-**Message history is RAM-only** and does not survive a reboot. MeshCore stores
-no messages itself, so this would mean new persistence code and flash wear. The
-log holds the 48 most recent messages, each up to the full MeshCore text length
-of 160 characters.
+**Message history is RAM-only** and does not survive a reboot. MeshCore stores no
+messages itself, so this would mean new persistence code and flash wear. The log
+holds the 48 most recent messages, each up to the full MeshCore text length of 160
+characters.
 
-**The COMMS target picker holds 48 entries.** Configured channels are listed
-first so they are never crowded out, then contacts most-recently-heard first. If
-contacts had to be cut the picker says so rather than hiding them silently — but
-a node that has heard from more than ~40 chat contacts cannot reach all of them
-from that list.
+**Nordic characters can be read but not typed.** Incoming UTF-8 is mapped to CP437,
+which carries æ Æ å Å ä Ä ö Ö; ø and Ø are absent from the font and are drawn as
+the base letter plus a stroke. Input is a different problem: the keyboard is a US
+QWERTY with no Nordic keys, and `SYM` is a working symbol layer rather than a spare
+key, so entering them needs a compose scheme. Not implemented — reading was the part
+that actually hurt.
+
+**Emoji are approximated or shown as a block.** Invisible code points are dropped
+and consecutive unmappable ones collapse to one block, so a heart with a variation
+selector is one glyph rather than two squares and a ZWJ family is one rather than
+five. Where a genuine equivalent exists it is used — hearts, notes, suits, arrows,
+and ASCII emoticons for the unambiguous faces. Everything else stays a block on
+purpose: CP437 has no emoji, and putting a smile where someone sent a sobbing face
+would be worse than admitting the glyph is missing.
+
+**The COMMS target picker holds 48 entries.** Configured channels are listed first
+so they are never crowded out, then contacts most-recently-heard first. If contacts
+had to be cut the picker says so rather than hiding them silently — but a node that
+has heard from more than ~40 chat contacts cannot reach all of them from that list.
 
 **RADAR data is cleared when you leave the screen.** Stale channel occupancy
 presented as current would be actively misleading.
 
-**The waterfall is not a spectrum analyser.** The ESP32 gives no access to raw
-RF. What is plotted is observed 802.11 activity — the strongest signal seen per
-channel, one row per sweep.
+**The waterfall is not a spectrum analyser.** The ESP32 gives no access to raw RF.
+What is plotted is observed 802.11 activity — the strongest signal seen per channel,
+one row per sweep.
 
-**No per-node signal strength in NODES.** Adverts are cached without RSSI, so
-the screen shows hop distance and recency — a filled marker for heard in the last
-30 minutes, hollow for older — rather than link quality. Freshness is deliberately
+**No per-node signal strength in NODES.** Adverts are cached without RSSI, so the
+screen shows hop distance and recency — a filled marker for heard in the last 30
+minutes, hollow for older — rather than link quality. Freshness is deliberately
 carried by shape rather than by a grey level: reflected light outdoors lays a veil
 over the panel and the darker steps of a grey ramp collapse into each other.
 
-**Nordic characters can be read but not typed.** Incoming UTF-8 is mapped to
-CP437, which carries æ Æ å Å ä Ä ö Ö; ø and Ø are absent from the font entirely
-and are drawn by the display driver as the base letter plus a stroke. Input is a
-different problem: the keyboard is a US QWERTY with no Nordic keys, and no
-alt/sym combination produces distinct codes for them, so entering them would
-need a software compose scheme (a dead key, or a cycle key). Not implemented —
-reading was the part that actually hurt.
+**Keyboard arrow keys are unreachable.** `TDeckKeyboard` discards bytes above 127,
+which is where the arrow codes live. The trackball provides directions instead, so
+this has not mattered in practice.
 
-**Keyboard arrow keys are unreachable.** `TDeckKeyboard` discards bytes above
-127, which is where the arrow codes live. The trackball provides directions
-instead, so this has not mattered in practice.
+**Uploading over USB may need two writes.** A single `pio run -t upload` fails
+reproducibly partway through on this device; see [`BUILDING.md`](BUILDING.md). The
+browser flasher is unaffected.
 
-### An upstream bug worked around here
+**An upstream bug is worked around here**, not fixed: the RTC probe leaves the I²C
+bus unusable, which cost 243 seconds of boot until the bus was restarted after it.
+Boot is now 5.1 seconds. Why the probe does that is still not established — see
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-**The I²C bus is left unusable by the RTC probe, and it cost four minutes of
-boot.** In `variants/lilygo_tdeck/target.cpp`, `rtc_clock.begin(Wire)` runs the
-RTC auto-discovery probe. Afterwards, a transaction to an address nothing answers
-on takes about **920 ms**, where a NACK should cost microseconds — measured on
-hardware, and eighteen times the Arduino default timeout of 50 ms, so it is not
-the timeout doing it.
+---
 
-Two callers walk all 112 addresses: `EnvironmentSensorManager::begin()` and
-`TDeckKeyboard::begin()`. That was 113 and 125 seconds. Boot took **243
-seconds**, and none of it was visible — `setup()` prints nothing to the display,
-so it simply looked like a hang.
+## Status
 
-Ending and restarting the bus restores normal timing, so `radio_init()` now does
-`Wire.end()` then `Wire.begin(18, 8, 100000)` immediately after the probe. Boot
-went from 243 seconds to **5.1 seconds**, of which 2.5 is the splash screen and
-1.0 is the GPS detection delay. `TDeckKeyboard::begin()` already did exactly this
-recovery to find its co-processor at all; doing it centrally means every user of
-the bus gets a working one. That code stays as a safety net.
+**Current release: 0.3.1** — set by the `RIFT_VERSION` build flag and shown on the
+boot screen and SYSTEM, alongside the MeshCore version it is built on. Deliberately
+0.x: it works and is verified on hardware, but it has had no external users and the
+limitations above are real.
 
-This is a workaround, not a diagnosis: **why** the probe leaves the peripheral in
-that state is not established, and the honest fix belongs upstream. All four
-stock T-Deck environments have the same bug and get the same benefit, since the
-variant file is shared. Boot-phase timings are on the SYSTEM screen — `boot:` and
-`slowest:` — so a regression here is visible rather than mysterious.
+`FIRMWARE_VERSION` is left as upstream MeshCore's, since that string is reported
+over the companion protocol next to `FIRMWARE_VER_CODE`.
 
-Similarly, `DisplayDriver::printWordWrap()` is only a default that forwards to
-`print()` and is not overridden by the native driver, so Adafruit GFX wraps to
-`x=0` rather than the left margin. RIFT does its own wrapping. `ui-new` on other
-colour-LCD boards likely has the same latent issue.
+Every screen from the original design concept is implemented and verified on
+physical hardware. Resource use: ~50 % of internal static RAM, ~25 % of the 6.5 MB
+app partition. 91 native tests.
+
+**Unreleased on `rift-tdeck`**, all verified on hardware: the home screen now
+headlines mesh receive activity instead of the USB/BLE link; screens gained a
+lifecycle so a popup no longer disturbs a RADAR scan or wipes a channel key being
+read; the message popup lists six rather than paging one at a time; incoming emoji
+no longer arrive as runs of blocks; and the title bar was removed, moving the
+wordmark and battery into the nav bar.
+
+Earlier: 0.3.1 closed a stack overflow in the channel-key decoder and seven places
+where the interface stated something it could not know. 0.3.0 rebuilt all five
+screens to the design in `design/` and fixed four real bugs found along the way.
+0.2.0 added the browser flasher and the boot screen, disabled MeshCore's private-key
+export, and took boot from 243 seconds to 5.1.
+
+Next, roughly by value:
+
+- A compose scheme for typing Nordic characters — long-pressing the base vowel,
+  which also needs the compose line to become UTF-8 aware
+- Persist message history across reboots
+- Report the `Wire.begin()` ordering bug upstream
+- Hand-drawn glyphs for the emoji that still show as a block
+- Per-contact detail view (paths, keys, last-heard history)
+
+[`HANDOFF.md`](HANDOFF.md) carries the full open-items list with the reasoning.
 
 ---
 
 ## Upstream MeshCore
 
-RIFT is a fork of [MeshCore](https://github.com/meshcore-dev/MeshCore), created
-by **Scott Powell** (rippleradios.com) and developed with contributions from well
-over a hundred people — see the
+RIFT is a fork of [MeshCore](https://github.com/meshcore-dev/MeshCore), created by
+**Scott Powell** (rippleradios.com) and developed with contributions from well over
+a hundred people — see the
 [contributor list](https://github.com/meshcore-dev/MeshCore/graphs/contributors).
 MIT licensed; `license.txt` is unchanged.
 
 To be clear about the split: MeshCore is the hard part. Multi-hop routing, the
 packet protocol, encryption, ACK handling, path discovery, the radio drivers and
-support for dozens of boards are all theirs, and RIFT changes none of it. What
-this fork adds is a T-Deck-specific user interface and its input drivers.
+support for dozens of boards are all theirs, and RIFT changes none of it. What this
+fork adds is a T-Deck-specific user interface and its input drivers.
 
-If you are looking for MeshCore itself, go upstream. It supports far more
-hardware, has prebuilt firmware and a web flasher, and actual releases:
+If you are looking for MeshCore itself, go upstream. It supports far more hardware,
+has prebuilt firmware and a web flasher, and actual releases:
 
 - Project: <https://github.com/meshcore-dev/MeshCore>
 - Documentation: <https://docs.meshcore.io>
@@ -538,42 +391,9 @@ room-server examples, the companion protocol, and so on. Useful references:
 
 - [`docs/MeshCore-README.md`](docs/MeshCore-README.md) — upstream's own README:
   prebuilt firmware, the flasher, client apps, and their roadmap
-- [`docs/companion_protocol.md`](docs/companion_protocol.md) — frame protocol,
-  and the channel key definitions RIFT follows
+- [`docs/companion_protocol.md`](docs/companion_protocol.md) — frame protocol, and
+  the channel key definitions RIFT follows
 - [`docs/faq.md`](docs/faq.md) — MeshCore questions unrelated to RIFT
 
-If you want plain MeshCore rather than RIFT, get it from upstream — this fork
-only adds a T-Deck UI and does not track their releases.
-
----
-
-## Status
-
-**Current version: 0.3.1** — set by the `RIFT_VERSION` build flag and shown on
-the boot screen and SYSTEM, alongside the MeshCore version it is built on.
-Deliberately 0.x: it works and is verified on hardware, but it has had no
-external users and the limitations above are real.
-
-0.3.1 closes a stack overflow in the channel-key decoder and seven places where
-the interface stated something it could not know. 0.3.0 rebuilt all five screens
-to the design in `design/`, and fixed four real bugs found along the way. 0.2.0 added the browser flasher and the boot screen,
-disabled MeshCore's private-key export, and took boot from 243 seconds to 5.1 by
-restoring the I²C bus after the RTC probe. Everything in both is verified on
-hardware. `FIRMWARE_VERSION` is left as
-upstream MeshCore's, since that string is reported over the companion protocol
-next to `FIRMWARE_VER_CODE`.
-
-Every screen from the original design concept is implemented and verified on
-physical hardware: MESH, CONSTELLATION (NODES), RADAR, RF WATERFALL, COMMS.
-
-Resource use: ~49 % of internal static RAM, ~24 % of the 6.5 MB app partition.
-
-Touch, channel creation, node renaming and Nordic character rendering were added
-afterwards from field use.
-
-Possible next steps, roughly by value:
-
-- Persist message history across reboots
-- A compose scheme for typing Nordic characters (see limitations)
-- Report the `Wire.begin()` ordering bug upstream
-- Per-contact detail view (paths, keys, last-heard history)
+If you want plain MeshCore rather than RIFT, get it from upstream — this fork only
+adds a T-Deck UI and does not track their releases.

@@ -324,10 +324,10 @@ to CP437 translation.
    antialiasing, so the list has to be chosen for shapes that survive that size.
    An unrecognisable custom glyph is worse than a block: a block admits it cannot
    draw the thing, a vague shape looks like it means something specific.
-10. **README is 580 lines doing four jobs**, and two of them duplicate this file
-    nearly word for word. That duplicate has already drifted twice in one session.
-    The browser flasher link is also buried mid-paragraph under four paragraphs of
-    caveats, and was missed by a real reader looking for it.
+10. **The design renderings in `design/screens/` show the old chrome.** They still
+    match `design/handoff.md` as originally written, which is why both are marked
+    superseded rather than rewritten, but the README now has to caveat them. Either
+    redraw them or accept the caveat permanently.
 
 ---
 
