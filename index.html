@@ -130,8 +130,10 @@ alone, use the plain <code>.bin</code> at the application offset instead:</p>
 bundles &mdash; spells them with underscores: <code>write_flash</code>. Invoking
 through <code>python -m esptool</code> rather than a bare <code>esptool</code>
 works on both, since the two versions install different console scripts.</p>
-<p>If esptool reports that the port does not exist while it is clearly listed, a
-serial monitor still has it open. Close it and retry.</p>
+<p>If esptool reports that the port does not exist while it is clearly listed,
+something else still has it open. <strong>Including this page:</strong> WebSerial
+holds the port until the tab is closed, so flashing here and then reaching for
+esptool fails until you close the tab. A serial monitor does the same.</p>
 
 <h2>Building it yourself</h2>
 <p>Everything here is produced from source by CI; the
