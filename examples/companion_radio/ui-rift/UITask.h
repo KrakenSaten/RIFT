@@ -22,6 +22,22 @@
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 
+// Design palette. The shared UIColor class has no slot for the roles this design
+// needs - dim, rule, a status green, and an accent that means something different
+// on a light field - so RIFT carries its own table. riftApplyPalette() also
+// assigns the UIColor statics, so screens not yet migrated stay coherent in both
+// modes instead of half-changing.
+struct RiftPalette {
+  ColorVal bg, bar, fg, mid, dim, rule, accent, accent_txt, ok;
+};
+extern RiftPalette rift_pal;
+extern bool rift_day_mode;
+void riftApplyPalette(bool day);
+
+// Unread count mirrored out of UITask so the nav bar - a free function called
+// from thirteen places - can draw its dot without changing every signature.
+extern int rift_nav_unread;
+
 // Boot phase timing. setup() runs with no watchdog and several of its steps can
 // block for a long time - the filesystem mount most of all - so a slow boot gives
 // no clue which step is responsible. These marks record when each phase finished

@@ -259,30 +259,54 @@ struct RiftTextInput {
 };
 
 // Bottom navigation hint row shared by every RIFT nav screen.
-static void renderNavBar(DisplayDriver& display, int curr_idx) {
-  int y = display.height() - 12;
-  display.setColor(UIColor::secondary_txt);
-  display.drawRect(0, y - 2, display.width(), 1);   // separator line
+// Nav bar - y 226..239, per the design handoff. Label centres are given rather
+// than computed: 64px columns would centre SYSTEM at 288, which clips against the
+// right edge, so the spec nudges the outer two inward.
+static const int NAV_CENTRE_X[RIFT_NAV_COUNT] = { 20, 81, 145, 209, 270 };
 
-  int col_w = display.width() / RIFT_NAV_COUNT;
+static void renderNavBar(DisplayDriver& display, int curr_idx) {
+  const int y_rule = 226;
+
+  display.setColor(rift_pal.rule);
+  display.fillRect(0, y_rule, display.width(), 1);
+
+  // Active tab carried by colour alone before this; in sunlight the grey step
+  // between active and inactive disappears. The underline is the second cue.
+  display.setColor(rift_pal.accent);
+  display.fillRect(curr_idx * 64, y_rule, 64, 2);
+
   display.setTextSize(1);
   for (int i = 0; i < RIFT_NAV_COUNT; i++) {
-    display.setColor(i == curr_idx ? UIColor::title_txt : UIColor::secondary_txt);
-    display.drawTextCentered(col_w * i + col_w / 2, y, NAV_LABELS[i]);
+    display.setColor(i == curr_idx ? rift_pal.fg : rift_pal.dim);
+    display.drawTextCentered(NAV_CENTRE_X[i], 228, NAV_LABELS[i]);
+  }
+
+  // unread was not surfaced in the nav at all - you had to open COMMS to find out
+  if (rift_nav_unread > 0) {
+    display.setColor(rift_pal.accent);
+    display.fillRect(246, 227, 3, 3);
   }
 }
 
 // Compact top status bar shared by every RIFT nav screen: title + battery %.
 static void renderTitleBar(DisplayDriver& display, UITask* task, const char* subtitle) {
-  display.setColor(UIColor::title_bkg);
+  display.setColor(rift_pal.bar);
   display.fillRect(0, 0, display.width(), 16);
 
-  display.setColor(UIColor::title_txt);
   display.setTextSize(1);
+  if (rift_day_mode) {
+    // the accent is only 3.5:1 on white, below the readable floor, so on the
+    // light field it becomes a fill with the wordmark reversed out of it
+    display.setColor(rift_pal.accent);
+    display.fillRect(0, 0, 30, 16);
+    display.setColor(0xFFFF);
+  } else {
+    display.setColor(rift_pal.accent);
+  }
   display.setCursor(2, 4);
   display.print("RIFT");
 
-  display.setColor(UIColor::secondary_txt);
+  display.setColor(rift_pal.mid);
   display.setCursor(40, 4);
   display.print(subtitle);
 
@@ -299,8 +323,53 @@ static void renderTitleBar(DisplayDriver& display, UITask* task, const char* sub
   if (pct > 100) pct = 100;
   char batt[8];
   sprintf(batt, "%d%%", pct);
-  display.setColor(pct <= 15 ? UIColor::warning_txt : UIColor::title_txt);
+  display.setColor(pct <= 15 ? rift_pal.accent : rift_pal.fg);
   display.drawTextRightAlign(display.width() - 2, 4, batt);
+}
+
+// RGB565 straight from the design handoff. Night and day are the same geometry
+// with a swapped colour table.
+//
+// Two rules from the spec that the values encode: nothing darker than #6E6E6E on
+// black survives 6x8 with no antialiasing, and de-emphasis inverts with the field
+// - on white, dim has to be *darker*, not lighter. The accent is one value in
+// both modes but changes role: on black it is legible as text at 6.0:1, on white
+// it is 3.5:1 and may only be a fill with white reversed out of it.
+static const RiftPalette RIFT_NIGHT = {
+  /* bg     */ 0x0000,   // #000000
+  /* bar    */ 0x18C3,   // #1A1A1A
+  /* fg     */ 0xFFFF,   // #FFFFFF
+  /* mid    */ 0x9CD3,   // #9A9A9A
+  /* dim    */ 0x8C51,   // #8A8A8A
+  /* rule   */ 0x738E,   // #707070
+  /* accent */ 0xFA00,   // #FF4100
+  /* acc_tx */ 0xFA00,   // legible as text on black
+  /* ok     */ 0x3E40    // #39C800
+};
+static const RiftPalette RIFT_DAY = {
+  0xFFFF, 0xEF5D, 0x0000, 0x5ACB, 0x6B4D, 0x8C51, 0xFA00,
+  /* acc_tx */ 0x2104,   // #202020 - the accent itself is unreadable as text here
+  /* ok     */ 0x3E40
+};
+
+RiftPalette rift_pal = RIFT_NIGHT;
+bool rift_day_mode = false;
+int rift_nav_unread = 0;
+
+void riftApplyPalette(bool day) {
+  rift_day_mode = day;
+  rift_pal = day ? RIFT_DAY : RIFT_NIGHT;
+
+  // keep the shared roles pointing at the same table
+  UIColor::window_bkg    = rift_pal.bg;
+  UIColor::title_bkg     = rift_pal.bar;
+  UIColor::title_txt     = rift_pal.fg;
+  UIColor::primary_txt   = rift_pal.fg;
+  UIColor::secondary_txt = rift_pal.mid;
+  UIColor::warning_txt   = rift_pal.accent;
+  UIColor::corp_blue     = rift_pal.accent;
+  UIColor::popup_bkg     = rift_pal.bar;
+  UIColor::popup_txt     = rift_pal.fg;
 }
 
 RiftBootMark rift_boot_marks[RIFT_BOOT_MARKS];
@@ -449,7 +518,7 @@ class RiftSystemScreen : public UIScreen {
   // A small action menu rather than hidden letter shortcuts - discoverable, and
   // it leaves the printable keys free for the text fields.
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY };
-  enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_PATHMODE, IT_COUNT };
+  enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_PATHMODE, IT_DAYMODE, IT_COUNT };
 
   // most labels are fixed; the path-mode row shows its current value
   void itemLabel(int i, char* buf, size_t len) {
@@ -459,7 +528,11 @@ class RiftSystemScreen : public UIScreen {
       "Edit node name",
       "Add channel",
     };
-    if (i == IT_PATHMODE) {
+    if (i == IT_DAYMODE) {
+      // the design binds this to backlight level; this panel's backlight is on or
+      // off with no level to read, so it is an explicit choice instead
+      snprintf(buf, len, "Display: %s", rift_day_mode ? "day" : "night");
+    } else if (i == IT_PATHMODE) {
       uint8_t mode = the_mesh.getNodePrefs()->path_hash_mode;
       snprintf(buf, len, "Path hash size: %d byte%s", mode + 1, mode == 0 ? "" : "s");
     } else {
@@ -505,6 +578,11 @@ class RiftSystemScreen : public UIScreen {
         _task->showAlert(msg, 1400);
         break;
       }
+
+      case IT_DAYMODE:
+        riftApplyPalette(!rift_day_mode);
+        _task->showAlert(rift_day_mode ? "Day mode" : "Night mode", 1200);
+        break;
 
       case IT_NAME:
         _edit.begin(the_mesh.getNodeName(), sizeof(((NodePrefs*)0)->node_name) - 1);
@@ -2242,6 +2320,7 @@ switch(t){
 
 void UITask::msgRead(int msgcount) {
   _msgcount = msgcount;
+  rift_nav_unread = msgcount;
   if (msgcount == 0) {
     gotoHomeScreen();
   }
@@ -2249,6 +2328,7 @@ void UITask::msgRead(int msgcount) {
 
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
   _msgcount = msgcount;
+  rift_nav_unread = msgcount;
 
   char origin[62];
   if (path_len == 0xFF) {
