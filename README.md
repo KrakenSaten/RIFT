@@ -112,6 +112,14 @@ A **full chip erase is a different matter**: it takes SPIFFS with it, and since
 RIFT disables MeshCore's private-key export there is no way to back the key up
 first or recover it after. Only erase if you intend to become a new node.
 
+**The browser flasher asks before erasing, and it has to.** ESP Web Tools erases
+all data by default on what it considers a new install, and it decides that by
+asking the device to identify itself over Improv Serial. RIFT does not implement
+Improv, so it can never answer — meaning every install would be classed as new
+and would wipe the identity, every time. The manifest therefore sets
+`new_install_prompt_erase`, which turns that into a question rather than a
+default. Answer no when upgrading a node you already use.
+
 And regardless of route, **a first boot on an unformatted partition spends one
 to two minutes formatting SPIFFS**. The boot screen says so in as many words,
 because an unexplained pause on a device with no obvious activity is
