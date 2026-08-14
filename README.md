@@ -338,7 +338,8 @@ Every screen from the original design concept is implemented and verified on
 physical hardware. Resource use: ~50 % of internal static RAM, ~25 % of the 6.5 MB
 app partition. 91 native tests.
 
-**Unreleased on `rift-tdeck`**, all verified on hardware: the home screen now
+**Unreleased, on the `rift-mesh-activity` branch** pending review and merge — so
+this is not in 0.3.1 and not yet on `rift-tdeck`. All verified on hardware: the home screen now
 headlines mesh receive activity instead of the USB/BLE link; screens gained a
 lifecycle so a popup no longer disturbs a RADAR scan or wipes a channel key being
 read; the message popup lists six rather than paging one at a time; incoming emoji
