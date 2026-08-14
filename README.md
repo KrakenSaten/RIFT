@@ -326,7 +326,7 @@ Boot is now 5.1 seconds. Why the probe does that is still not established — se
 
 ## Status
 
-**Current release: 0.3.1** — set by the `RIFT_VERSION` build flag and shown on the
+**Current release: 0.4.0** — set by the `RIFT_VERSION` build flag and shown on the
 boot screen and SYSTEM, alongside the MeshCore version it is built on. Deliberately
 0.x: it works and is verified on hardware, but it has had no external users and the
 limitations above are real.
@@ -338,13 +338,16 @@ Every screen from the original design concept is implemented and verified on
 physical hardware. Resource use: ~50 % of internal static RAM, ~25 % of the 6.5 MB
 app partition. 91 native tests.
 
-**Unreleased, on the `rift-mesh-activity` branch** pending review and merge — so
-this is not in 0.3.1 and not yet on `rift-tdeck`. All verified on hardware: the home screen now
-headlines mesh receive activity instead of the USB/BLE link; screens gained a
-lifecycle so a popup no longer disturbs a RADAR scan or wipes a channel key being
-read; the message popup lists six rather than paging one at a time; incoming emoji
-no longer arrive as runs of blocks; and the title bar was removed, moving the
-wordmark and battery into the nav bar.
+**0.4.0** answers a different question on the home screen and reworks the chrome.
+It headlines mesh receive activity — whether this radio is somewhere with a live
+network — instead of the USB/BLE companion link, which a standalone node read as
+`STANDBY` forever. Screens gained a lifecycle, so an arriving message no longer
+disturbs a RADAR scan or wipes a channel key being read, and dismissing the popup
+hands back the screen you were on rather than dropping you home. The popup lists
+six messages instead of paging one at a time. Incoming emoji no longer arrive as
+runs of blocks. The title bar is gone: the wordmark and battery moved into the nav
+bar, and each screen carries its own heading, which gives COMMS one more message
+of history.
 
 Earlier: 0.3.1 closed a stack overflow in the channel-key decoder and seven places
 where the interface stated something it could not know. 0.3.0 rebuilt all five
