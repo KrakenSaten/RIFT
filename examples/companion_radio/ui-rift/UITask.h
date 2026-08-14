@@ -77,6 +77,9 @@ class UITask : public AbstractUITask {
   char _alert[80];
   unsigned long _alert_expiry;
   int _msgcount;
+  // how far behind a connected companion app is. Not the device's unread count -
+  // see msgRead().
+  int _companion_backlog = 0;
   int _last_key = 0;
   unsigned long ui_started_at, next_batt_chck;
   int next_backlight_btn_check = 0;

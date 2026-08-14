@@ -76,6 +76,50 @@ TEST(Base64Key, DecodingStopsAtTheFirstInvalidCharacter) {
     EXPECT_LT(decoded_size(std::string(10, 'A') + "!" + std::string(40, 'A')), 16u);
 }
 
+// Bounding the write is not the same as accepting only well-formed input. The
+// decoder stops at the first character outside the alphabet, so a key with junk
+// after a valid prefix decodes to a plausible length. The installer therefore
+// re-encodes what it decoded and compares; these pin that this actually
+// distinguishes the two cases.
+
+static bool round_trips(const std::string& in) {
+    unsigned char psk[32];
+    unsigned int want = decoded_size(in);
+    if (want != 16 && want != 32) return false;
+    unsigned int len = decode_base64((const unsigned char*) in.c_str(),
+                                     (unsigned int) in.size(), psk);
+    if (len != want) return false;
+
+    unsigned char canonical[64];
+    unsigned int canon = encode_base64(psk, len, canonical);
+    std::string c((char*) canonical, canon);
+    std::string unpadded = c;
+    while (!unpadded.empty() && unpadded.back() == '=') unpadded.pop_back();
+    return in == c || in == unpadded;
+}
+
+TEST(Base64Key, CanonicalKeysRoundTrip) {
+    EXPECT_TRUE(round_trips(std::string(22, 'A')));            // unpadded 128-bit
+    EXPECT_TRUE(round_trips(std::string(22, 'A') + "=="));     // padded, as we emit
+    EXPECT_TRUE(round_trips(std::string(43, 'A')));            // unpadded 256-bit
+    EXPECT_TRUE(round_trips(std::string(43, 'A') + "="));      // padded
+}
+
+// The case the length check alone let through: valid prefix, junk after it. The
+// old code installed a 16-byte key the user never typed.
+TEST(Base64Key, JunkAfterAValidPrefixIsRejected) {
+    EXPECT_EQ(16u, decoded_size(std::string(22, 'A') + "!!!!!!"));
+    EXPECT_FALSE(round_trips(std::string(22, 'A') + "!!!!!!"));
+    EXPECT_FALSE(round_trips(std::string(22, 'A') + " hello"));
+    EXPECT_FALSE(round_trips(std::string(43, 'A') + "?"));
+}
+
+TEST(Base64Key, MisplacedPaddingIsRejected) {
+    EXPECT_FALSE(round_trips(std::string(22, 'A') + "="));     // one pad short
+    EXPECT_FALSE(round_trips(std::string(22, 'A') + "==="));   // one too many
+    EXPECT_FALSE(round_trips("=" + std::string(21, 'A')));     // padding first
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

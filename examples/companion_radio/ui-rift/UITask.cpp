@@ -563,6 +563,12 @@ class RiftSystemScreen : public UIScreen {
 
   static const int MENU_TOP = 34;   // shared by render() and handleTouch()
 
+public:
+  // True while a text field is open or a generated key is on screen. A message
+  // popup over either of those loses half-typed input or a secret being read.
+  bool isModal() const { return _mode != MENU; }
+private:
+
   Mode _mode;
   int _sel;
   RiftTextInput _edit;
@@ -625,7 +631,10 @@ private:
         break;
 
       case IT_CHANNEL:
-        _edit.begin("", sizeof(_ch_name) - 1);
+        // one shorter than the buffer allows: addGroupChannelHashtag() prepends
+        // '#', and the normalised string is what the key is derived from, so a
+        // name that only fits without the hash would key a different channel
+        _edit.begin("", sizeof(_ch_name) - 2);
         _mode = CH_NAME;
         break;
     }
@@ -1048,7 +1057,11 @@ public:
     }
 
     if (_mode == CH_SHOW_KEY) {
-      if (c == KEY_ENTER || c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = MENU; return true; }
+      if (c == KEY_ENTER || c == RIFT_KEY_BACK || c == KEY_CANCEL) {
+        memset(_ch_key, 0, sizeof(_ch_key));   // acknowledged: gone now, not on leave
+        _mode = MENU;
+        return true;
+      }
       return true;   // keep the key on screen until acknowledged
     }
 
@@ -1107,17 +1120,20 @@ class RiftConstellationScreen : public UIScreen {
   // a straight memcpy from pub_key), so it can be matched against any node we
   // have heard an advert from. Returns -1 when the repeater is not one of them,
   // which is normal - we may never have heard it directly.
+  // Resolved against every node we have heard from, not only the ones drawn.
+  // Excluding the hidden ones did not make the answer safer - it made a hash
+  // shared with an overflowed node look unique, so the route was confidently
+  // labelled with the wrong repeater. Whether the answer can be *drawn* is a
+  // separate question, asked at the call site.
+  //
   // The resolution itself lives in RiftLogic.h so it can be tested; see
-  // test/test_rift_logic. Nodes not drawn this frame are passed as NULL rather
-  // than skipped here, so the caller's notion of "visible" stays in one place.
-  int findPlottedByHash(const uint8_t* hash, uint8_t len) {
+  // test/test_rift_logic.
+  int resolveHash(const uint8_t* hash, uint8_t len) {
     if (len > sizeof(AdvertPath::pubkey_prefix)) len = sizeof(AdvertPath::pubkey_prefix);
 
     const uint8_t* candidates[RIFT_CONST_MAX];
-    for (int i = 0; i < _count && i < RIFT_CONST_MAX; i++) {
-      candidates[i] = (_plot_x[i] < 0) ? NULL : _paths[i].pubkey_prefix;
-    }
     int n = (_count < RIFT_CONST_MAX) ? _count : RIFT_CONST_MAX;
+    for (int i = 0; i < n; i++) candidates[i] = _paths[i].pubkey_prefix;
     return riftResolveHash(hash, len, candidates, n);
   }
 
@@ -1168,7 +1184,9 @@ public:
     // could not say how far anything was without counting boxes outward.
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
-    static const char* HEADS[RIFT_HOP_COLS] = { "DIRECT", "1 HOP", "2 HOPS", "3 HOPS" };
+    // the last column is a catch-all: anything further than three hops is
+    // clamped into it, so it must not claim to be exactly three
+    static const char* HEADS[RIFT_HOP_COLS] = { "DIRECT", "1 HOP", "2 HOPS", "3+ HOPS" };
     for (int c = 0; c < RIFT_HOP_COLS; c++) {
       display.drawTextLeftAlign(COL_X[c], 20, HEADS[c]);
     }
@@ -1209,8 +1227,10 @@ public:
       int px = 12, py = 92;          // centre of the YOU marker
       bool first = true;
       for (int k = 0; k < hops; k++) {
-        int via = findPlottedByHash(&sp->path[k * hsz], hsz);
-        if (via < 0) continue;   // unknown or ambiguous: draw the leg straight
+        int via = resolveHash(&sp->path[k * hsz], hsz);
+        // unknown, ambiguous, or known but not on screen: draw the leg straight
+        // rather than bending it through a node that is not there
+        if (via < 0 || _plot_x[via] < 0) continue;
         drawElbow(display, px, py, _plot_x[via] + 2, _plot_y[via] + 2, first);
         px = _plot_x[via] + 2; py = _plot_y[via] + 2;
         first = false;
@@ -1283,7 +1303,7 @@ public:
       else sprintf(when, "%luh ago", (unsigned long) (age / 3600));
 
       uint8_t hsz = riftHashSize(p->path_len);
-      int via = (hops > 0) ? findPlottedByHash(p->path, hsz) : -1;
+      int via = (hops > 0) ? resolveHash(p->path, hsz) : RIFT_HASH_NONE;
       if (via == RIFT_HASH_AMBIGUOUS) {
         snprintf(tmp, sizeof(tmp), "via ?, heard %s", when);
       } else if (via >= 0) {
@@ -2003,6 +2023,7 @@ public:
 
   void onNewMsg() {
     if (num_unread < RIFT_MSG_LOG_SIZE) num_unread++;
+    rift_nav_unread = num_unread;   // what the nav dot means: unread *here*
     _back = 0;
   }
 
@@ -2039,8 +2060,9 @@ public:
     if (c == KEY_NEXT || c == KEY_RIGHT || c == KEY_ENTER) {
       if (_back + 1 < msg_log.count) _back++;
       num_unread--;
-      if (num_unread <= 0) {
-        num_unread = 0;
+      if (num_unread <= 0) num_unread = 0;
+      rift_nav_unread = num_unread;   // the nav dot follows what is unread here
+      if (num_unread == 0) {
         _task->gotoHomeScreen();
       }
       return true;
@@ -2048,6 +2070,7 @@ public:
     // the preview is an overlay on whatever you were doing - back dismisses it
     if (c == RIFT_KEY_BACK) {
       num_unread = 0;
+      rift_nav_unread = 0;
       _task->gotoHomeScreen();
       return true;
     }
@@ -2664,7 +2687,7 @@ void UITask::cycleNavScreen(int dir) {
 }
 
 void UITask::showAlert(const char* text, int duration_millis) {
-  strcpy(_alert, text);
+  StrHelper::strncpy(_alert, text, sizeof(_alert));
   _alert_expiry = millis() + duration_millis;
 }
 
@@ -2701,17 +2724,17 @@ void UITask::startDirectMessage(const uint8_t* key6) {
   setCurrScreen(nav_screens[RIFT_NAV_COMMS]);
 }
 
+// Called when the companion app drains its queue. The count is
+// offline_queue_len - how far behind a connected phone is - which says nothing
+// about what has been read on the device. Driving the nav dot from it lit the
+// indicator for messages already read here, and gotoHomeScreen() let a phone
+// syncing in the background navigate the terminal out from under its user.
 void UITask::msgRead(int msgcount) {
-  _msgcount = msgcount;
-  rift_nav_unread = msgcount;
-  if (msgcount == 0) {
-    gotoHomeScreen();
-  }
+  _companion_backlog = msgcount;
 }
 
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
-  _msgcount = msgcount;
-  rift_nav_unread = msgcount;
+  _companion_backlog = msgcount;
 
   char origin[62];
   if (path_len == 0xFF) {
@@ -2727,7 +2750,12 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   // Don't yank the user out of the COMMS terminal - the message is already
   // visible in its history there, and stealing focus would drop a half-typed
   // line. Everywhere else keeps the popup behaviour.
-  if (curr != nav_screens[RIFT_NAV_COMMS]) {
+  // Nor over a text field or a displayed key: a popup would take the screen away
+  // from someone halfway through typing a channel name, and the message is in
+  // the COMMS history either way.
+  bool busy = (curr == nav_screens[RIFT_NAV_SYSTEM]
+               && ((RiftSystemScreen *) nav_screens[RIFT_NAV_SYSTEM])->isModal());
+  if (curr != nav_screens[RIFT_NAV_COMMS] && !busy) {
     setCurrScreen(msg_preview);
   }
 
@@ -2789,7 +2817,17 @@ void UITask::setCurrScreen(UIScreen* c) {
   // A secret shown on SYSTEM must not survive being navigated away from. The
   // screen's own key handling cleared it, but a nav-bar tap changes screens from
   // here without consulting it.
-  if (curr != c && curr == nav_screens[RIFT_NAV_SYSTEM] && nav_screens[RIFT_NAV_SYSTEM] != NULL) {
+  //
+  // Only real navigation counts. The message preview is a popup that replaces
+  // the current screen and then hands it back - treating that as leaving wiped
+  // the one-time channel key the moment any message arrived, mid-read. Same
+  // distinction the RADAR teardown above makes, for the same reason.
+  bool leaving_for_nav = false;
+  for (int i = 0; i < RIFT_NAV_COUNT; i++) {
+    if (c == nav_screens[i]) { leaving_for_nav = true; break; }
+  }
+  if (leaving_for_nav && curr != c
+      && curr == nav_screens[RIFT_NAV_SYSTEM] && nav_screens[RIFT_NAV_SYSTEM] != NULL) {
     ((RiftSystemScreen *) nav_screens[RIFT_NAV_SYSTEM])->onLeave();
   }
 
@@ -2805,7 +2843,7 @@ void UITask::shutdown(bool restart){
   #ifdef PIN_BUZZER
   buzzer.shutdown();
   uint32_t buzzer_timer = millis();
-  while (buzzer.isPlaying() && (millis() - 2500) < buzzer_timer)
+  while (buzzer.isPlaying() && (uint32_t) (millis() - buzzer_timer) < 2500)
     buzzer.loop();
 
   #endif // PIN_BUZZER

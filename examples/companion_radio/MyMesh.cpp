@@ -472,6 +472,27 @@ int MyMesh::addGroupChannelFromBase64(const char* name, const char* psk_base64) 
   unsigned int len = decode_base64((const unsigned char *) psk_base64, in_len, psk);
   if (len != want) return -1;   // the two disagreeing means malformed input
 
+  // Bounding the write is not the same as accepting only well-formed input. The
+  // decoder stops at the first character outside the alphabet, so "<22 good
+  // chars>garbage" decoded to a valid-looking 16 bytes and installed a key the
+  // user never typed - silently, and with no way to notice until messages failed
+  // to decrypt. Re-encoding and comparing rejects anything that is not the
+  // canonical spelling of the bytes we just produced.
+  unsigned char canonical[64];
+  unsigned int canon_len = encode_base64(psk, len, canonical);
+  if (canon_len >= sizeof(canonical)) return -1;
+
+  bool exact = (in_len == canon_len)
+               && memcmp(canonical, psk_base64, in_len) == 0;
+
+  // also accept the unpadded spelling, which other tools produce
+  unsigned int unpadded = canon_len;
+  while (unpadded > 0 && canonical[unpadded - 1] == '=') unpadded--;
+  bool without_padding = (in_len == unpadded)
+                         && memcmp(canonical, psk_base64, in_len) == 0;
+
+  if (!exact && !without_padding) return -1;
+
   return installChannel(findFreeChannelSlot(), name, psk, (int) len);
 }
 
@@ -480,7 +501,13 @@ int MyMesh::addGroupChannelHashtag(const char* name) {
   // leading '#' - see docs/companion_protocol.md, which gives the test vector
   // "#test" -> 9cd8fcf22a47333b591d96a2b848b73f (verified against this code).
   // Same idea as TransportKeyStore::getAutoKeyFor() for hashtag regions.
+  // The key is sha256 over the normalised name, and ChannelDetails::name is the
+  // same 32 bytes this buffer is, so a name that only fits without the '#' would
+  // silently key a different channel from the one that was typed. Refuse it.
   char full[32];
+  size_t needed = strlen(name) + (name[0] == '#' ? 0 : 1);
+  if (needed >= sizeof(full)) return -1;
+
   if (name[0] == '#') {
     StrHelper::strncpy(full, name, sizeof(full));
   } else {
