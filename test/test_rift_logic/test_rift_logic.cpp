@@ -86,6 +86,173 @@ TEST(ChannelCapacity, MissingNameCostsOnlyTheSeparator) {
     EXPECT_EQ(158, riftChannelCapacity(160, NULL));
 }
 
+// ------------------------------------------------------------ UTF-8 translation
+
+static const char* xl(const char* src) {
+    static char buf[256];
+    riftTranslateUTF8(buf, src, sizeof(buf));
+    return buf;
+}
+
+#define BLOCK  "\xDB"
+
+TEST(TranslateUTF8, AsciiPassesThrough) {
+    EXPECT_STREQ("Hello, world! 123", xl("Hello, world! 123"));
+    EXPECT_STREQ("", xl(""));
+}
+
+TEST(TranslateUTF8, NordicCharactersMapToCP437) {
+    // ae, a-ring, a-umlaut, o-umlaut all exist in the font
+    EXPECT_STREQ("\x91\x86\x84\x94", xl("æåäö"));
+    EXPECT_STREQ("\x92\x8F\x8E\x99", xl("ÆÅÄÖ"));
+}
+
+TEST(TranslateUTF8, SlashedOUsesTheSynthesisedGlyphs) {
+    // absent from CP437; the display driver draws these from the base letter
+    EXPECT_STREQ("\x01\x02", xl("øØ"));
+}
+
+// The case that made ordinary traffic look far worse than its emoji count: a
+// variation selector is invisible in Unicode but used to become a second block.
+TEST(TranslateUTF8, VariationSelectorDoesNotBecomeAGlyph) {
+    EXPECT_STREQ("\x03", xl("\xE2\x9D\xA4\xEF\xB8\x8F"));   // U+2764 U+FE0F
+}
+
+TEST(TranslateUTF8, SkinToneModifierIsDropped) {
+    // thumbs up carries its own equivalent; the modifier must add nothing to it
+    EXPECT_STREQ("+1", xl("\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBD"));
+
+    // and on an emoji with no equivalent, the pair is still a single block rather
+    // than two - U+1F64F folded hands, deliberately not in the table
+    EXPECT_STREQ(BLOCK, xl("\xF0\x9F\x99\x8F\xF0\x9F\x8F\xBD"));
+}
+
+// A ZWJ family is five code points and used to draw five squares in a row.
+TEST(TranslateUTF8, ZwjSequenceCollapsesToOneBlock) {
+    const char* family = "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x91\xA7";
+    EXPECT_STREQ(BLOCK, xl(family));
+}
+
+TEST(TranslateUTF8, ConsecutiveUnmappableCollapse) {
+    // deliberate: three unrelated unmappable emoji also become one block, since
+    // three blocks say nothing more than one
+    EXPECT_STREQ(BLOCK, xl("\xF0\x9F\x94\xB4\xF0\x9F\x94\xB5\xF0\x9F\x9F\xA2"));
+}
+
+TEST(TranslateUTF8, BlocksSeparatedByTextDoNotCollapse) {
+    EXPECT_STREQ(BLOCK "a" BLOCK, xl("\xF0\x9F\x94\xB4" "a" "\xF0\x9F\x94\xB5"));
+}
+
+TEST(TranslateUTF8, MappedEmojiBecomeReadableEquivalents) {
+    EXPECT_STREQ(":)", xl("\xF0\x9F\x99\x82"));            // U+1F642 slightly smiling
+    EXPECT_STREQ(":D", xl("\xF0\x9F\x98\x82"));            // U+1F602 tears of joy
+    EXPECT_STREQ(";)", xl("\xF0\x9F\x98\x89"));            // U+1F609 winking
+    EXPECT_STREQ(":(", xl("\xF0\x9F\x98\xAD"));            // U+1F62D loudly crying
+    EXPECT_STREQ("\x0E", xl("\xF0\x9F\x8E\xB5"));          // U+1F3B5 musical note
+    EXPECT_STREQ("+1", xl("\xF0\x9F\x91\x8D"));            // U+1F44D thumbs up
+    EXPECT_STREQ("\xFB", xl("\xE2\x9C\x85"));              // U+2705 check mark
+    EXPECT_STREQ("\x0F", xl("\xE2\x98\x80"));              // U+2600 sun
+    EXPECT_STREQ("\x1A", xl("\xE2\x9E\xA1"));              // U+27A1 right arrow
+}
+
+// Adafruit_GFX::write() swallows 0x0A as a newline and 0x0D as a carriage return
+// before drawChar ever sees them, so a glyph mapped to either renders as nothing.
+// 0x0D is CP437's eighth note and that is exactly the mistake this caught.
+// Every replacement string in the table has to survive this.
+TEST(TranslateUTF8, NoReplacementUsesAByteTheFontNeverDraws) {
+    // walk every code point the table could plausibly cover, plus the Nordic set
+    for (uint32_t cp = 0x20; cp < 0x2C00; cp++) {
+        const char* out = riftEmojiToText(cp);
+        if (out == NULL) continue;
+        for (const char* p = out; *p; p++) {
+            EXPECT_FALSE(riftNoGlyphAt(*p)) << "code point " << cp << " maps to an undrawable byte";
+        }
+    }
+    for (uint32_t cp = 0x1F300; cp < 0x1FA00; cp++) {
+        const char* out = riftEmojiToText(cp);
+        if (out == NULL) continue;
+        for (const char* p = out; *p; p++) {
+            EXPECT_FALSE(riftNoGlyphAt(*p)) << "code point " << cp << " maps to an undrawable byte";
+        }
+    }
+    // and the Nordic mappings, for the same reason
+    static const uint32_t NORDIC[] = { 0xE6, 0xC6, 0xE5, 0xC5, 0xE4, 0xC4, 0xF6, 0xD6, 0xF8, 0xD8 };
+    for (size_t i = 0; i < sizeof(NORDIC) / sizeof(NORDIC[0]); i++) {
+        EXPECT_FALSE(riftNoGlyphAt(riftNordicToCP437(NORDIC[i])));
+    }
+    // the fallback block itself must be drawable
+    EXPECT_FALSE(riftNoGlyphAt((char) RIFT_GLYPH_BLOCK));
+}
+
+// The reason the table is conservative: a sobbing face must not resolve to a
+// smile. Anything uncertain stays a block, which is honest about what is missing.
+TEST(TranslateUTF8, SadFacesNeverBecomeSmiles) {
+    EXPECT_STREQ(":(", xl("\xF0\x9F\x98\xA2"));            // U+1F622 crying
+    EXPECT_STRNE(":)", xl("\xF0\x9F\x98\xA2"));
+    EXPECT_STREQ(":(", xl("\xF0\x9F\x99\x81"));            // U+1F641 frowning
+}
+
+TEST(TranslateUTF8, MixedRealMessage) {
+    // what an ordinary incoming message looks like
+    // ae -> 0x91, o-slash -> the synthesised 0x01, heart+VS16 -> one 0x03, U+1F642 -> ":)"
+    EXPECT_STREQ("H\x91r er n\x01kkelen \x03 ok:)",
+                 xl("Hær er nøkkelen \xE2\x9D\xA4\xEF\xB8\x8F ok\xF0\x9F\x99\x82"));
+}
+
+TEST(TranslateUTF8, MalformedSequencesBecomeOneBlockAndDoNotStall) {
+    const char stray_continuation[] = { 'a', (char) 0x80, 'b', 0 };
+    EXPECT_STREQ("a" BLOCK "b", xl(stray_continuation));
+
+    const char truncated[] = { 'a', (char) 0xF0, (char) 0x9F, 0 };
+    EXPECT_STREQ("a" BLOCK, xl(truncated));
+
+    const char bad_lead[] = { 'a', (char) 0xFF, 'b', 0 };
+    EXPECT_STREQ("a" BLOCK "b", xl(bad_lead));
+}
+
+TEST(TranslateUTF8, ControlCharactersAreDroppedNotBlocked) {
+    const char with_ctrl[] = { 'a', 0x07, 'b', 0 };
+    EXPECT_STREQ("ab", xl(with_ctrl));
+}
+
+TEST(TranslateUTF8, RespectsDestSize) {
+    char buf[4];
+    riftTranslateUTF8(buf, "abcdefgh", sizeof(buf));
+    EXPECT_STREQ("abc", buf);
+
+    // a two-character replacement must not be written half-way
+    char tight[3];
+    riftTranslateUTF8(tight, "a\xF0\x9F\x99\x82", sizeof(tight));
+    EXPECT_STREQ("a", tight);
+
+    // never writes past a one-byte buffer
+    char one[1];
+    riftTranslateUTF8(one, "abc", sizeof(one));
+    EXPECT_STREQ("", one);
+}
+
+TEST(TranslateUTF8, DegenerateInputs) {
+    char buf[8] = "keep";
+    riftTranslateUTF8(buf, "x", 0);
+    EXPECT_STREQ("keep", buf);      // dest_size 0 must not be written at all
+    riftTranslateUTF8(buf, NULL, sizeof(buf));
+    EXPECT_STREQ("", buf);
+    riftTranslateUTF8(NULL, "x", 8);   // must not crash
+}
+
+TEST(Utf8Decode, ReportsLengthAndRejectsMalformed) {
+    uint32_t cp = 0;
+    EXPECT_EQ(1, riftUtf8Decode("A", &cp));               EXPECT_EQ(0x41u, cp);
+    EXPECT_EQ(2, riftUtf8Decode("\xC3\xA6", &cp));        EXPECT_EQ(0xE6u, cp);
+    EXPECT_EQ(3, riftUtf8Decode("\xE2\x9D\xA4", &cp));    EXPECT_EQ(0x2764u, cp);
+    EXPECT_EQ(4, riftUtf8Decode("\xF0\x9F\x99\x82", &cp)); EXPECT_EQ(0x1F642u, cp);
+
+    EXPECT_EQ(0, riftUtf8Decode("\x80", &cp));            // stray continuation
+    EXPECT_EQ(0, riftUtf8Decode("\xFF", &cp));            // invalid lead
+    EXPECT_EQ(0, riftUtf8Decode("\xF0\x9F", &cp));        // truncated at terminator
+    EXPECT_EQ(0, riftUtf8Decode("\xC3\x41", &cp));        // bad continuation
+}
+
 // ------------------------------------------------------------ screen transitions
 
 // Arguments are (same_screen, from_overlay, to_overlay).

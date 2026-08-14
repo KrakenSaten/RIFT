@@ -5,8 +5,8 @@
 #include <string.h>
 
 // Decisions that were buried inside screen classes, where nothing could reach
-// them. Both of these have been wrong in shipped firmware; both are pure
-// functions of their arguments, so both can be tested without a T-Deck.
+// them. Every one of these has been wrong in shipped firmware; all are pure
+// functions of their arguments, so all can be tested without a T-Deck.
 
 // A path hash is only the first byte or three of a public key, so more than one
 // node we know can legitimately match it - a 1-byte hash collides once in 256.
@@ -41,6 +41,240 @@ static inline int riftChannelCapacity(int max_text_len, const char* sender_name)
   int prefix = (sender_name != NULL ? (int) strlen(sender_name) : 0) + 2;  // ": "
   int cap = max_text_len - prefix;
   return (cap < 0) ? 0 : cap;
+}
+
+// ------------------------------------------------------- UTF-8 to the display
+
+// The panel draws CP437 through a 6x8 bitmap font, so incoming UTF-8 has to be
+// reduced to single bytes the font can actually show. This lived as a static
+// function inside UITask.cpp, where nothing could test it, and it had already
+// shipped wrong once: the fallback block was written as a character literal,
+// became a two-byte multi-character constant in a UTF-8 source file, narrowed to
+// 0x9B, and drew every unmappable character as a cent sign.
+//
+// Note that test_utf8_helpers covers upstream's mesh::validUtf8PrefixLength,
+// which is a different function on a different problem.
+
+// CP437 full block: the honest "something was here that cannot be drawn".
+#define RIFT_GLYPH_BLOCK  0xDB
+
+// o-slash and O-slash are absent from CP437 entirely. The display driver
+// synthesises them from the base letter plus a stroke, keyed on these two
+// values. They MUST agree with ST7789NativeDisplay.h, which defines the same
+// names; the guard lets that header win when both are included, and lets this
+// header stand alone in the native tests.
+//
+// Consequence worth knowing: 0x01 and 0x02 are CP437's two smiley faces, and
+// they are spent on this. An incoming smiley cannot be mapped to them - it would
+// draw an o-slash.
+#ifndef RIFT_GLYPH_OSLASH
+#define RIFT_GLYPH_OSLASH     0x01
+#endif
+#ifndef RIFT_GLYPH_OSLASH_UC
+#define RIFT_GLYPH_OSLASH_UC  0x02
+#endif
+
+// Decodes one UTF-8 code point. Returns the number of bytes consumed and writes
+// the code point to *cp, or returns 0 for anything malformed - a bad lead byte,
+// a missing or invalid continuation byte, or a sequence that would run past the
+// terminator. Callers advance one byte on 0 so a corrupt stream cannot stall.
+static inline int riftUtf8Decode(const char* s, uint32_t* cp) {
+  unsigned char c = (unsigned char) s[0];
+  int len;
+  uint32_t v;
+
+  if (c < 0x80)        { *cp = c; return 1; }
+  else if (c < 0xC0)   return 0;                 // stray continuation byte
+  else if (c < 0xE0)   { len = 2; v = c & 0x1F; }
+  else if (c < 0xF0)   { len = 3; v = c & 0x0F; }
+  else if (c < 0xF8)   { len = 4; v = c & 0x07; }
+  else                 return 0;
+
+  for (int i = 1; i < len; i++) {
+    unsigned char n = (unsigned char) s[i];
+    if ((n & 0xC0) != 0x80) return 0;            // also catches the terminator
+    v = (v << 6) | (n & 0x3F);
+  }
+
+  *cp = v;
+  return len;
+}
+
+// Code points that render as nothing in Unicode and so must not become a
+// visible block. These are the reason a single emoji used to produce two or five
+// squares: a heart with U+FE0F is two code points, a ZWJ family is five.
+static inline bool riftIsInvisibleCodePoint(uint32_t cp) {
+  if (cp >= 0x200B && cp <= 0x200F) return true;    // ZWSP, ZWNJ, ZWJ, LRM, RLM
+  if (cp >= 0xFE00 && cp <= 0xFE0F) return true;    // variation selectors
+  if (cp >= 0x1F3FB && cp <= 0x1F3FF) return true;  // skin tone modifiers
+  if (cp >= 0xE0020 && cp <= 0xE007F) return true;  // tag characters (flags)
+  return false;
+}
+
+// Two-byte Latin-1 supplement characters the font does carry. Returns 0 if this
+// is not one of them.
+static inline char riftNordicToCP437(uint32_t cp) {
+  switch (cp) {
+    case 0x00E6: return (char) 0x91;                  // ae
+    case 0x00C6: return (char) 0x92;                  // AE
+    case 0x00E5: return (char) 0x86;                  // a-ring
+    case 0x00C5: return (char) 0x8F;                  // A-ring
+    case 0x00E4: return (char) 0x84;                  // a-umlaut
+    case 0x00C4: return (char) 0x8E;                  // A-umlaut
+    case 0x00F6: return (char) 0x94;                  // o-umlaut
+    case 0x00D6: return (char) 0x99;                  // O-umlaut
+    case 0x00F8: return (char) RIFT_GLYPH_OSLASH;     // o-slash: synthesised
+    case 0x00D8: return (char) RIFT_GLYPH_OSLASH_UC;  // O-slash: synthesised
+  }
+  return 0;
+}
+
+// Emoji with a genuine equivalent the panel can show. Returns NULL when there
+// is none, and the caller falls back to a block.
+//
+// Every entry has to be a real synonym, not an approximation. Mapping the whole
+// U+1F600 block to ":)" would put a smile where someone sent a sobbing face,
+// which is a statement the device cannot support - worse than admitting the
+// glyph is missing. Faces resolve to ASCII emoticons because CP437's two smiley
+// slots are spent on o-slash; hearts, suits, notes, the sun and the arrows
+// resolve to real glyphs.
+//
+// TWO CP437 SLOTS ARE UNUSABLE. Adafruit_GFX::write() special-cases 0x0A as a
+// newline and 0x0D as a carriage return before it ever reaches drawChar, so
+// neither is drawn. 0x0D is CP437's eighth note, and mapping notes there made
+// them vanish rather than render - caught only because the heart at 0x03 worked
+// on hardware and proved the low range is otherwise fine. Use 0x0E for notes.
+// riftNoGlyphAt() below states the rule; there is a test that enforces it.
+//
+// Extending the table is safe. Guessing in it is not.
+static inline bool riftNoGlyphAt(char c) {
+  return c == 0x0A || c == 0x0D;
+}
+
+static inline const char* riftEmojiToText(uint32_t cp) {
+  struct Entry { uint32_t lo, hi; const char* out; };
+  static const Entry MAP[] = {
+    { 0x00263A, 0x00263B, ":)"   },   // white/black smiling face
+    { 0x01F600, 0x01F601, ":)"   },   // grinning, beaming
+    { 0x01F602, 0x01F602, ":D"   },   // tears of joy
+    { 0x01F603, 0x01F606, ":D"   },   // grinning variants, laughing, sweat
+    { 0x01F609, 0x01F609, ";)"   },   // winking
+    { 0x01F60A, 0x01F60B, ":)"   },   // smiling eyes, savouring
+    { 0x01F60D, 0x01F60E, ":)"   },   // heart eyes, sunglasses
+    { 0x01F641, 0x01F641, ":("   },   // slightly frowning
+    { 0x01F642, 0x01F643, ":)"   },   // slightly smiling, upside-down
+    { 0x01F61E, 0x01F61F, ":("   },   // disappointed, worried
+    { 0x01F622, 0x01F622, ":("   },   // crying
+    { 0x01F62D, 0x01F62D, ":("   },   // loudly crying
+    { 0x01F923, 0x01F923, ":D"   },   // rolling on the floor
+
+    { 0x002665, 0x002665, "\x03" },   // heart suit
+    { 0x002764, 0x002764, "\x03" },   // heavy black heart
+    { 0x01F493, 0x01F49F, "\x03" },   // beating/sparkling/coloured hearts
+    { 0x002666, 0x002666, "\x04" },   // diamond suit
+    { 0x002663, 0x002663, "\x05" },   // club suit
+    { 0x002660, 0x002660, "\x06" },   // spade suit
+    { 0x00266A, 0x00266B, "\x0E" },   // eighth note, beamed notes - NOT 0x0D
+    { 0x01F3B5, 0x01F3B6, "\x0E" },   // musical note, notes
+
+    // Agreement and its opposite. "+1" is the chat convention for exactly what a
+    // thumbs up means, so it is a synonym rather than a description.
+    { 0x01F44D, 0x01F44D, "+1"   },   // thumbs up
+    { 0x01F44E, 0x01F44E, "-1"   },   // thumbs down
+
+    { 0x002705, 0x002705, "\xFB" },   // white heavy check mark -> CP437 radical
+    { 0x002714, 0x002714, "\xFB" },   // heavy check mark
+    { 0x00274C, 0x00274C, "x"    },   // cross mark
+    { 0x002716, 0x002716, "x"    },   // heavy multiplication x
+    { 0x0026A0, 0x0026A0, "!"    },   // warning sign
+    { 0x002757, 0x002757, "!"    },   // heavy exclamation mark
+    { 0x002753, 0x002753, "?"    },   // question mark ornament
+
+    { 0x002600, 0x002600, "\x0F" },   // black sun with rays -> CP437 sun
+    { 0x01F31E, 0x01F31E, "\x0F" },   // sun with face
+
+    { 0x002605, 0x002606, "*"    },   // black/white star
+    { 0x01F31F, 0x01F31F, "*"    },   // glowing star
+
+    { 0x0027A1, 0x0027A1, "\x1A" },   // right arrow -> CP437 arrows
+    { 0x002B05, 0x002B05, "\x1B" },   // left arrow
+    { 0x002B06, 0x002B06, "\x18" },   // up arrow
+    { 0x002B07, 0x002B07, "\x19" },   // down arrow
+  };
+
+  for (size_t i = 0; i < sizeof(MAP) / sizeof(MAP[0]); i++) {
+    if (cp >= MAP[i].lo && cp <= MAP[i].hi) return MAP[i].out;
+  }
+  return NULL;
+}
+
+// UTF-8 in, CP437 out. dest_size includes the terminator.
+//
+// Consecutive unmappable code points collapse to a single block. A ZWJ family is
+// five code points and would otherwise be five squares; three unrelated emoji in
+// a row also collapse to one, which is the deliberate half of the trade - three
+// blocks carry no more information than one and are far noisier to read.
+static inline void riftTranslateUTF8(char* dest, const char* src, size_t dest_size) {
+  if (dest == NULL || dest_size == 0) return;
+  if (src == NULL) { dest[0] = 0; return; }
+
+  size_t j = 0;
+  bool last_was_block = false;
+
+  // room() keeps every branch below from having to repeat the bounds check
+  #define RIFT_XL_ROOM(n)  (j + (size_t)(n) <= dest_size - 1)
+
+  for (size_t i = 0; src[i] != 0; ) {
+    unsigned char c = (unsigned char) src[i];
+
+    if (c >= 32 && c <= 126) {                      // ASCII, by far the common case
+      if (!RIFT_XL_ROOM(1)) break;
+      dest[j++] = (char) c;
+      last_was_block = false;
+      i++;
+      continue;
+    }
+
+    uint32_t cp;
+    int used = riftUtf8Decode(&src[i], &cp);
+    if (used == 0) {                                // malformed: one block, one byte
+      if (!RIFT_XL_ROOM(1)) break;
+      if (!last_was_block) { dest[j++] = (char) RIFT_GLYPH_BLOCK; last_was_block = true; }
+      i++;
+      continue;
+    }
+    i += used;
+
+    // control characters carry nothing drawable and are not worth a block
+    if (cp < 32 || cp == 127) continue;
+
+    if (riftIsInvisibleCodePoint(cp)) continue;     // emits nothing, and does not
+                                                    // break a collapsing run
+
+    char nordic = riftNordicToCP437(cp);
+    if (nordic != 0) {
+      if (!RIFT_XL_ROOM(1)) break;
+      dest[j++] = nordic;
+      last_was_block = false;
+      continue;
+    }
+
+    const char* text = riftEmojiToText(cp);
+    if (text != NULL) {
+      size_t n = strlen(text);
+      if (!RIFT_XL_ROOM(n)) break;
+      memcpy(&dest[j], text, n);
+      j += n;
+      last_was_block = false;
+      continue;
+    }
+
+    if (!RIFT_XL_ROOM(1)) break;
+    if (!last_was_block) { dest[j++] = (char) RIFT_GLYPH_BLOCK; last_was_block = true; }
+  }
+
+  #undef RIFT_XL_ROOM
+  dest[j] = 0;
 }
 
 // -------------------------------------------------------- screen transitions

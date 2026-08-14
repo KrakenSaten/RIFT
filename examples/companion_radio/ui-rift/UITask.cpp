@@ -180,43 +180,9 @@ static int wrapText(const char* text, int max_px, int y, DisplayDriver* display,
 // solid block, so Nordic text arriving from other MeshCore clients rendered as
 // gibberish. The Adafruit classic font is CP437, which does carry most of the
 // letters we need - and the two it lacks are synthesized by the display driver.
-static void riftTranslateUTF8(char* dest, const char* src, size_t dest_size) {
-  size_t j = 0;
-  for (size_t i = 0; src[i] != 0 && j < dest_size - 1; i++) {
-    unsigned char c = (unsigned char) src[i];
-
-    if (c >= 32 && c <= 126) { dest[j++] = c; continue; }   // ASCII
-
-    // every character we care about is a two-byte sequence starting 0xC3
-    if (c == 0xC3 && src[i + 1] != 0) {
-      unsigned char n = (unsigned char) src[i + 1];
-      char out = 0;
-      switch (n) {
-        case 0xA6: out = (char) 0x91; break;   // ae
-        case 0x86: out = (char) 0x92; break;   // AE
-        case 0xA5: out = (char) 0x86; break;   // a-ring
-        case 0x85: out = (char) 0x8F; break;   // A-ring
-        case 0xA4: out = (char) 0x84; break;   // a-umlaut
-        case 0x84: out = (char) 0x8E; break;   // A-umlaut
-        case 0xB6: out = (char) 0x94; break;   // o-umlaut
-        case 0x96: out = (char) 0x99; break;   // O-umlaut
-        case 0xB8: out = (char) RIFT_GLYPH_OSLASH; break;      // o-slash: drawn
-        case 0x98: out = (char) RIFT_GLYPH_OSLASH_UC; break;   // O-slash: drawn
-      }
-      if (out != 0) { dest[j++] = out; i++; continue; }
-    }
-
-    if (c >= 0x80) {   // anything else non-ASCII: block, as before
-      // 0xDB is the CP437 full block. Writing it as a character literal made it
-      // a two-byte multi-character constant - this file is UTF-8 - which
-      // narrowed to 0x9B, a cent sign in CP437. Every unmappable character was
-      // drawn as the wrong glyph.
-      dest[j++] = (char) 0xDB;
-      while (src[i + 1] && (src[i + 1] & 0xC0) == 0x80) i++;
-    }
-  }
-  dest[j] = 0;
-}
+// riftTranslateUTF8 now lives in RiftLogic.h so it can be tested; it was static
+// here, and had already shipped drawing every unmappable character as a cent
+// sign. The comment on it there records why.
 
 // Single-line text editor for the settings fields. Deliberately not shared with
 // the COMMS compose line: that one works, is tested, and has its own 160-char
@@ -909,10 +875,16 @@ public:
                                rift_keyboard.isPresent() ? "ok" : "not found");
     y += RIFT_LINE_H;
 
+    // Two values, because they can differ and the difference is the interesting
+    // part. lastKeyCode() is what the UI received, i.e. after TDeckKeyboard::poll()
+    // discards everything above 127; lastSeen() is the raw byte the co-processor
+    // sent, recorded before that filter. A key that reports "0 / 180" is being
+    // thrown away rather than not existing - which is the case for the arrow keys,
+    // and is how to find out whether SYM emits anything at all.
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(LX, y, "LAST KEY");
     display.setColor(rift_pal.fg);
-    sprintf(tmp, "%d", _task->lastKeyCode());
+    sprintf(tmp, "%d / %d", _task->lastKeyCode(), (int) rift_keyboard.lastSeen());
     display.drawTextRightAlign(display.width() - 2, y, tmp);
     y += RIFT_LINE_H;
 
