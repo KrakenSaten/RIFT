@@ -77,6 +77,7 @@ class UITask : public AbstractUITask {
   char _alert[80];
   unsigned long _alert_expiry;
   int _msgcount;
+  int _last_key = 0;
   unsigned long ui_started_at, next_batt_chck;
   int next_backlight_btn_check = 0;
 #ifdef PIN_STATUS_LED
@@ -125,6 +126,9 @@ public:
 
   void gotoHomeScreen() { nav_idx = RIFT_NAV_MESH; setCurrScreen(nav_screens[RIFT_NAV_MESH]); }
   void cycleNavScreen(int dir);
+  // last key code the UI saw - reading this on screen is what identified the
+  // keyboard co-processor repeating held keys
+  int lastKeyCode() const { return _last_key; }
   // NODES offers ENTER: DM; this switches to COMMS with that node selected
   void startDirectMessage(const uint8_t* key6);
   void showAlert(const char* text, int duration_millis);

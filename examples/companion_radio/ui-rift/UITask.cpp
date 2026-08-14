@@ -463,42 +463,55 @@ public:
      : _task(task), _node_prefs(node_prefs), _tick(0) { }
 
   int render(DisplayDriver& display) override {
-    renderTitleBar(display, _task,
-        _task->hasConnection() ? "CONNECTED" : (the_mesh.getBLEPin() != 0 ? "PAIRING" : "STANDBY"));
+    const char* link = _task->hasConnection() ? "CONNECTED"
+                     : (the_mesh.getBLEPin() != 0 ? "PAIRING" : "STANDBY");
+    renderTitleBar(display, _task, link);
 
-    // radar box, center
-    int cx = display.width() / 2;
-    int cy = 74;
-    display.setColor(UIColor::primary_txt);
+    // The link state moves out of the title bar subtitle and into the body at
+    // size 3. It is the question this screen exists to answer, and it was set in
+    // the same 6x8 grey as everything else. All three states are <= 9 chars,
+    // which is 162px, so none of them clip.
+    display.setTextSize(1);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 18, "LINK");
+    display.setTextSize(3);
+    display.setColor(rift_pal.fg);
+    display.drawTextLeftAlign(2, 30, link);
+
+    // radar box, right of the state. Same mechanism as before - three nested
+    // rects and one blip at eight discrete positions - just moved off centre.
+    int cx = 210, cy = 120;
+    display.setColor(rift_pal.rule);
     display.drawRect(cx - 50, cy - 40, 100, 80);
+    display.setColor(rift_pal.mid);
     display.drawRect(cx - 33, cy - 27, 66, 54);
     display.drawRect(cx - 16, cy - 13, 32, 26);
 
-    // rotating "blip" around the outer ring (8 discrete positions, non-blocking timer-driven)
     static const int8_t dx[8] = { 0, 35, 50, 35, 0, -35, -50, -35 };
     static const int8_t dy[8] = { -40, -28, 0, 28, 40, 28, 0, -28 };
     int pos = _tick % 8;
-    display.setColor(UIColor::corp_blue);
+    display.setColor(rift_pal.accent);
     display.fillRect(cx + dx[pos] - 2, cy + dy[pos] - 2, 4, 4);
     _tick++;
 
-    // node count + link stats
-    char tmp[32];
+    char tmp[40];
     display.setTextSize(1);
-    display.setColor(UIColor::primary_txt);
+    display.setColor(rift_pal.fg);
     sprintf(tmp, "NODES %d", the_mesh.getNumContacts());
-    display.drawTextLeftAlign(4, 130, tmp);
+    display.drawTextLeftAlign(2, 170, tmp);
 
     sprintf(tmp, "LINK %.0f / %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
-    display.drawTextRightAlign(display.width() - 4, 130, tmp);
+    display.drawTextRightAlign(display.width() - 2, 170, tmp);
 
-    // radio config line
-    display.setColor(UIColor::secondary_txt);
+    display.setColor(rift_pal.mid);
     sprintf(tmp, "%.3fMHz  SF%d  %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
-    display.drawTextCentered(cx, 144, tmp);
+    display.drawTextCentered(display.width() / 2, 182, tmp);
+
+    display.setColor(rift_pal.dim);
+    display.drawTextCentered(display.width() / 2, 202, "roll trackball L/R to change screen");
 
     renderNavBar(display, RIFT_NAV_MESH);
-    return 700;   // non-blocking periodic refresh, drives the radar animation (slow enough to avoid visible flicker from the full-screen redraw)
+    return 700;   // drives the blip; slow enough that the full redraw does not flicker
   }
 
   bool handleInput(char c) override {
@@ -537,6 +550,8 @@ class RiftSystemScreen : public UIScreen {
       StrHelper::strncpy(buf, FIXED[i], len);
     }
   }
+
+  static const int MENU_TOP = 34;   // shared by render() and handleTouch()
 
   Mode _mode;
   int _sel;
@@ -763,147 +778,198 @@ public:
 
     char tmp[72];
 
-    // who we are, since it is now editable from here
-    display.setColor(UIColor::title_txt);
-    sprintf(tmp, "node: %s", the_mesh.getNodeName());
-    display.drawTextLeftAlign(4, 24, tmp);
+    // Two columns: things you can do on the left, things you can only read on
+    // the right. As one mixed list the actions scrolled away underneath the
+    // diagnostics as the latter grew.
+    //
+    // The divider is at 160 rather than the midpoint because the longest action
+    // is "Send advert (neighbours)" - 24 chars, 144px.
+    display.setColor(rift_pal.rule);
+    display.fillRect(160, 16, 1, 210);
 
-    // action menu
-    int y = 46;
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 18, "ACTIONS");
+
+    int y = MENU_TOP;
     for (int i = 0; i < IT_COUNT; i++, y += RIFT_LINE_H) {
-      bool sel = (i == _sel);
-      display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
-      display.setCursor(4, y);
-      display.print(sel ? "> " : "  ");
-      char label[40];
-      itemLabel(i, label, sizeof(label));
-      display.print(label);
+      itemLabel(i, tmp, sizeof(tmp));
+      if (i == _sel) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y - 2, 158, 12);
+        display.setColor(0xFFFF);
+      } else {
+        display.setColor(rift_pal.fg);
+      }
+      display.drawTextLeftAlign(4, y, tmp);
     }
 
-    display.setColor(UIColor::secondary_txt);
-    display.drawTextLeftAlign(4, y + 4, "up/down select   ENTER activate");
+    // The one thing a user has to understand before messaging a stranger, put
+    // next to the action rather than left in the README.
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 108, 158, 1);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 116, "neighbours reaches direct");
+    display.drawTextLeftAlign(2, 128, "RF only. whole mesh floods");
+    display.drawTextLeftAlign(2, 140, "further, through repeaters.");
+    display.drawTextLeftAlign(2, 152, "use it before a first DM");
+    display.drawTextLeftAlign(2, 164, "to a distant node.");
 
-    // diagnostics footer
-    y = 128;
-    display.setColor(UIColor::secondary_txt);
-    display.drawRect(0, y - 6, display.width(), 1);
+    // ---- right column: read-only ----
+    const int LX = 166;
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, 18, "DIAGNOSTICS");
+
+    y = 34;
+    display.drawTextLeftAlign(LX, y, "NODE");
+    display.setColor(rift_pal.fg);
+    display.drawTextRightAlign(display.width() - 2, y, the_mesh.getNodeName());
+    y += RIFT_LINE_H;
 
 #ifdef RIFT_INPUT_KEYBOARD
-    sprintf(tmp, "keyboard: %s   last code: %02X",
-            rift_keyboard.isPresent() ? "ok" : "not found", rift_keyboard.lastSeen());
-    display.drawTextLeftAlign(4, y, tmp);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "KEYBOARD");
+    // status is the only thing colour carries here, and only pass or fail
+    display.setColor(rift_keyboard.isPresent() ? rift_pal.ok : rift_pal.accent);
+    display.drawTextRightAlign(display.width() - 2, y,
+                               rift_keyboard.isPresent() ? "ok" : "not found");
     y += RIFT_LINE_H;
 
-    strcpy(tmp, "I2C:");
-    for (uint8_t i = 0; i < rift_keyboard.seenCount(); i++) {
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "LAST KEY");
+    display.setColor(rift_pal.fg);
+    sprintf(tmp, "%d", _task->lastKeyCode());
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
+
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "I2C BUS");
+    display.setColor(rift_pal.fg);
+    tmp[0] = 0;
+    for (int i = 0; i < rift_keyboard.seenCount() && i < 4; i++) {
       char hex[6];
-      sprintf(hex, " %02X", rift_keyboard.seenAddr(i));
+      sprintf(hex, "%s%02X", i ? " " : "", rift_keyboard.seenAddr(i));
       strcat(tmp, hex);
     }
-    if (rift_keyboard.seenCount() == 0) strcat(tmp, " (empty)");
-    display.drawTextLeftAlign(4, y, tmp);
+    if (rift_keyboard.seenCount() == 0) strcpy(tmp, "empty");
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
     y += RIFT_LINE_H;
-#endif
-
-    // free heap matters here: bringing up the Wi-Fi/BLE stacks for RADAR is by
-    // far the largest allocation this firmware makes
-    sprintf(tmp, "free heap: %u KB", (unsigned) (ESP.getFreeHeap() / 1024));
-    display.drawTextLeftAlign(4, y, tmp);
-    y += RIFT_LINE_H;
-
-    sprintf(tmp, "power: %s  (%u mV)", board.isExternalPowered() ? "external" : "battery",
-            (unsigned) _task->getBattMilliVolts());
-    display.drawTextLeftAlign(4, y, tmp);
-    y += RIFT_LINE_H;
-
-    // why we last restarted - distinguishes a software crash (PANIC) from a
-    // power problem (BROWNOUT), which look identical from the outside
-    const char* rr;
-    switch (esp_reset_reason()) {
-      case ESP_RST_POWERON:  rr = "power on"; break;
-      case ESP_RST_SW:       rr = "sw restart"; break;
-      case ESP_RST_PANIC:    rr = "PANIC (crash)"; break;
-      case ESP_RST_INT_WDT:  rr = "int watchdog"; break;
-      case ESP_RST_TASK_WDT: rr = "task watchdog"; break;
-      case ESP_RST_WDT:      rr = "watchdog"; break;
-      case ESP_RST_BROWNOUT: rr = "BROWNOUT (power)"; break;
-      case ESP_RST_DEEPSLEEP: rr = "deep sleep"; break;
-      case ESP_RST_EXT:      rr = "ext reset"; break;
-      default:               rr = "unknown"; break;
-    }
-    sprintf(tmp, "last reset: %s", rr);
-    display.drawTextLeftAlign(4, y, tmp);
-    y += RIFT_LINE_H;
-
-    // How long boot took, and which two phases cost the most. Dumping all the
-    // marks ran off the bottom of the screen and answered the question less
-    // directly than naming the culprit does.
-    if (rift_boot_mark_count > 0) {
-      sprintf(tmp, "boot: %u ms", (unsigned) rift_boot_marks[rift_boot_mark_count - 1].at_ms);
-      display.drawTextLeftAlign(4, y, tmp);
-      y += RIFT_LINE_H;
-
-      int worst = -1, second = -1;
-      uint32_t worst_ms = 0, second_ms = 0;
-      for (int i = 0; i < rift_boot_mark_count; i++) {
-        uint32_t prev = (i == 0) ? 0 : rift_boot_marks[i - 1].at_ms;
-        uint32_t gap = rift_boot_marks[i].at_ms - prev;
-        if (gap > worst_ms) {
-          second = worst; second_ms = worst_ms;
-          worst = i; worst_ms = gap;
-        } else if (gap > second_ms) {
-          second = i; second_ms = gap;
-        }
-      }
-      sprintf(tmp, "slowest: %s +%u", rift_boot_marks[worst].name, (unsigned) worst_ms);
-      if (second >= 0) {
-        char part[24];
-        sprintf(part, "  %s +%u", rift_boot_marks[second].name, (unsigned) second_ms);
-        strcat(tmp, part);
-      }
-      display.drawTextLeftAlign(4, y, tmp);
-      y += RIFT_LINE_H;
-    }
-
-    sprintf(tmp, "RIFT v%s on MeshCore %s", RIFT_VERSION, FIRMWARE_VERSION);
-    display.drawTextLeftAlign(4, y, tmp);
-    y += RIFT_LINE_H;
-
-#if ENV_INCLUDE_GPS == 1
-    // whether this unit actually has a receiver fitted is answerable here rather
-    // than from a spec sheet: the sensor manager probes the UART at boot
-    if (_task->hasGPSHardware()) {
-      LocationProvider* nmea = sensors.getLocationProvider();
-      if (nmea != NULL && nmea->isValid()) {
-        sprintf(tmp, "GPS: %s, fix, %d sat", _task->getGPSState() ? "on" : "off",
-                nmea->satellitesCount());
-      } else {
-        sprintf(tmp, "GPS: %s, no fix", _task->getGPSState() ? "on" : "off");
-      }
-    } else {
-      strcpy(tmp, "GPS: none detected");
-    }
-    display.drawTextLeftAlign(4, y, tmp);
 #endif
 
 #ifdef RIFT_INPUT_TOUCH
-    // shown while confirming the raw->display axis mapping is right
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "TOUCH");
     if (rift_touch.isPresent()) {
-      sprintf(tmp, "touch: %d,%d", _task->lastTouchX(), _task->lastTouchY());
+      display.setColor(rift_pal.fg);
+      sprintf(tmp, "%d,%d", _task->lastTouchX(), _task->lastTouchY());
     } else {
-      strcpy(tmp, "touch: not found");
+      display.setColor(rift_pal.accent);
+      strcpy(tmp, "not found");
     }
-    display.drawTextLeftAlign(4, y, tmp);
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
 #endif
+
+#if ENV_INCLUDE_GPS == 1
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "GPS");
+    // accent because GPS varies between units and people ask about it, not
+    // because anything is wrong
+    if (_task->hasGPSHardware()) {
+      LocationProvider* nmea = sensors.getLocationProvider();
+      display.setColor(rift_pal.fg);
+      if (nmea != NULL && nmea->isValid()) {
+        sprintf(tmp, "%s, %d sat", _task->getGPSState() ? "on" : "off",
+                nmea->satellitesCount());
+      } else {
+        sprintf(tmp, "%s, no fix", _task->getGPSState() ? "on" : "off");
+      }
+    } else {
+      display.setColor(rift_pal.accent);
+      strcpy(tmp, "not found");
+    }
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
+#endif
+
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "FREE HEAP");
+    display.setColor(rift_pal.fg);
+    sprintf(tmp, "%uK", (unsigned) (ESP.getFreeHeap() / 1024));
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
+
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "EXT POWER");
+    display.setColor(rift_pal.fg);
+    sprintf(tmp, "%s %umV", board.isExternalPowered() ? "yes" : "no",
+            (unsigned) _task->getBattMilliVolts());
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
+
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "LAST RESET");
+    esp_reset_reason_t reason = esp_reset_reason();
+    const char* rr;
+    switch (reason) {
+      case ESP_RST_POWERON:   rr = "power on"; break;
+      case ESP_RST_SW:        rr = "sw restart"; break;
+      case ESP_RST_PANIC:     rr = "PANIC"; break;
+      case ESP_RST_INT_WDT:   rr = "int wdt"; break;
+      case ESP_RST_TASK_WDT:  rr = "task wdt"; break;
+      case ESP_RST_WDT:       rr = "wdt"; break;
+      case ESP_RST_DEEPSLEEP: rr = "deep sleep"; break;
+      case ESP_RST_EXT:       rr = "ext reset"; break;
+      default:                rr = "unknown"; break;
+    }
+    display.setColor((reason == ESP_RST_PANIC || reason == ESP_RST_BROWNOUT)
+                     ? rift_pal.accent : rift_pal.fg);
+    display.drawTextRightAlign(display.width() - 2, y, rr);
+    y += RIFT_LINE_H;
+
+    if (rift_boot_mark_count > 0) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(LX, y, "BOOT");
+      display.setColor(rift_pal.fg);
+      sprintf(tmp, "%ums", (unsigned) rift_boot_marks[rift_boot_mark_count - 1].at_ms);
+      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      y += RIFT_LINE_H;
+
+      int worst = 0;
+      uint32_t worst_ms = 0;
+      for (int i = 0; i < rift_boot_mark_count; i++) {
+        uint32_t prev = (i == 0) ? 0 : rift_boot_marks[i - 1].at_ms;
+        uint32_t gap = rift_boot_marks[i].at_ms - prev;
+        if (gap > worst_ms) { worst = i; worst_ms = gap; }
+      }
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(LX, y, "SLOWEST");
+      display.setColor(rift_pal.fg);
+      sprintf(tmp, "%s %u", rift_boot_marks[worst].name, (unsigned) worst_ms);
+      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      y += RIFT_LINE_H;
+    }
+
+    // ---- footer ----
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 178, display.width(), 1);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 184, "PRIVATE KEY EXPORT");
+    display.setColor(rift_pal.ok);
+    display.drawTextRightAlign(display.width() - 2, 184, "DISABLED");
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(2, 196, "up/down select, ENTER activates");
+    display.setColor(rift_pal.mid);
+    sprintf(tmp, "v%s", RIFT_VERSION);
+    display.drawTextRightAlign(display.width() - 2, 196, tmp);
 
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
   }
 
-  // menu rows start at y=46 with RIFT_LINE_H pitch (see render)
   bool handleTouch(int x, int y) override {
     if (_mode != MENU) return false;
-    int row = (y - 46) / RIFT_LINE_H;
+    if (x > 158) return false;   // the right column is read-only
+    int row = (y - MENU_TOP) / RIFT_LINE_H;
     if (row >= 0 && row < IT_COUNT) {
       _sel = row;
       activate();
@@ -2722,6 +2788,7 @@ void UITask::loop() {
   }
 #endif
 
+  if (c != 0) _last_key = (int) (unsigned char) c;
   if (c != 0 && curr) {
     curr->handleInput(c);
     _auto_off = millis() + AUTO_OFF_MILLIS;
