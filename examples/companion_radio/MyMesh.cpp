@@ -7,6 +7,7 @@
 // well as in BaseChatMesh.cpp gives duplicate definitions at link time.
 unsigned int encode_base64(const unsigned char input[], unsigned int input_length, unsigned char output[]);
 unsigned int decode_base64(const unsigned char input[], unsigned int input_length, unsigned char output[]);
+unsigned int decode_base64_length(const unsigned char input[], unsigned int input_length);
 
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
@@ -459,10 +460,19 @@ int MyMesh::installChannel(int idx, const char* name, const uint8_t* psk, int ps
 int MyMesh::addGroupChannelFromBase64(const char* name, const char* psk_base64) {
   uint8_t psk[32];
   memset(psk, 0, sizeof(psk));
-  int len = decode_base64((unsigned char *) psk_base64, strlen(psk_base64), psk);
-  if (len != 16 && len != 32) return -1;   // MeshCore only accepts 128/256-bit
 
-  return installChannel(findFreeChannelSlot(), name, psk, len);
+  // decode_base64() is not given an output length, so it cannot bound its own
+  // writes - checking the result afterwards is checking after the damage. The
+  // key field accepts up to 67 characters, which decodes to 50 bytes and runs 18
+  // bytes past psk[]. Size it first; the library provides exactly that call.
+  unsigned int in_len = strlen(psk_base64);
+  unsigned int want = decode_base64_length((const unsigned char *) psk_base64, in_len);
+  if (want != 16 && want != 32) return -1;   // MeshCore only accepts 128/256-bit
+
+  unsigned int len = decode_base64((const unsigned char *) psk_base64, in_len, psk);
+  if (len != want) return -1;   // the two disagreeing means malformed input
+
+  return installChannel(findFreeChannelSlot(), name, psk, (int) len);
 }
 
 int MyMesh::addGroupChannelHashtag(const char* name) {

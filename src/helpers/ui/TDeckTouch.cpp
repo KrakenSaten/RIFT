@@ -62,8 +62,11 @@ bool TDeckTouch::poll(int& x, int& y) {
       // two calibration points above.
       _x = _raw_y;
       _y = (TOUCH_RAW_W - 1) - _raw_x;
+      // only a successful read counts as a touch. Setting this regardless meant
+      // a failed point read still produced a release event, carrying whatever
+      // coordinates the previous touch had left behind.
+      _down = true;
     }
-    _down = true;
   }
 
   // the status register must be cleared or the controller stops reporting

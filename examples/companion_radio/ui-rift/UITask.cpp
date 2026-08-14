@@ -463,6 +463,11 @@ public:
      : _task(task), _node_prefs(node_prefs), _tick(0) { }
 
   int render(DisplayDriver& display) override {
+    // This is the USB/BLE companion link, not the mesh. hasConnection() returns
+    // AbstractUITask::_connected, which only the serial interface sets - a
+    // standalone RIFT with a perfectly healthy mesh reads STANDBY forever. It is
+    // labelled for what it actually measures rather than being left to imply
+    // network membership.
     const char* link = _task->hasConnection() ? "CONNECTED"
                      : (the_mesh.getBLEPin() != 0 ? "PAIRING" : "STANDBY");
     renderTitleBar(display, _task, link);
@@ -473,7 +478,7 @@ public:
     // which is 162px, so none of them clip.
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 18, "LINK");
+    display.drawTextLeftAlign(2, 18, "COMPANION");
     display.setTextSize(3);
     display.setColor(rift_pal.fg);
     display.drawTextLeftAlign(2, 30, link);
@@ -969,6 +974,9 @@ public:
   bool handleTouch(int x, int y) override {
     if (_mode != MENU) return false;
     if (x > 158) return false;   // the right column is read-only
+    // integer division truncates toward zero, so without this a tap just above
+    // the first row lands on row 0 and activates it
+    if (y < MENU_TOP) return false;
     int row = (y - MENU_TOP) / RIFT_LINE_H;
     if (row >= 0 && row < IT_COUNT) {
       _sel = row;
@@ -2660,7 +2668,9 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   if (path_len == 0xFF) {
     sprintf(origin, "(D) %s:", from_name);
   } else {
-    sprintf(origin, "(%d) %s:", (uint32_t) path_len, from_name);
+    // path_len is Packet's encoding, not a count - see riftHopCount(). Printed
+    // raw, a two-hop route at the 2-byte hash setting showed as "(66)".
+    sprintf(origin, "(%d) %s:", (uint32_t) riftHopCount(path_len), from_name);
   }
   msg_log.add(rtc_clock.getCurrentTime(), origin, text, false);
   ((RiftMsgPreviewScreen *) msg_preview)->onNewMsg();
