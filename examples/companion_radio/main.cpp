@@ -126,10 +126,16 @@ void setup() {
   if (display.begin()) {
     disp = &display;
     disp->startFrame();
-  #ifdef ST7789
-    disp->setTextSize(2);
-  #endif
+  #ifdef RIFT_DISPLAY
+    // RIFT has its own boot screen. No status line yet - whether SPIFFS is about
+    // to be formatted is not known until the mount is attempted, below.
+    riftDrawBootScreen(*disp, NULL);
+  #else
+    #ifdef ST7789
+      disp->setTextSize(2);
+    #endif
     disp->drawTextCentered(disp->width() / 2, 28, "Loading...");
+  #endif
     disp->endFrame();
   }
 #endif
@@ -171,7 +177,24 @@ void setup() {
     #endif
   );
 #elif defined(ESP32)
+  #if defined(RIFT_DISPLAY) && defined(DISPLAY_CLASS)
+  // SPIFFS.begin(true) formats the partition when the mount fails, and that
+  // format blocks for one to two minutes with nothing else running - loop() has
+  // not started and the UI task does not exist yet, so the screen is frozen on
+  // whatever was drawn above. Probing with formatOnFail=false first tells us
+  // that is about to happen, so the boot screen can say so rather than looking
+  // like a hang. An ordinary boot mounts immediately and never shows it.
+  if (!SPIFFS.begin(false)) {
+    if (disp != NULL) {
+      disp->startFrame();
+      riftDrawBootScreen(*disp, "Formatting SPIFFS");
+      disp->endFrame();
+    }
+    SPIFFS.begin(true);
+  }
+  #else
   SPIFFS.begin(true);
+  #endif
   store.begin();
   the_mesh.begin(
     #ifdef DISPLAY_CLASS

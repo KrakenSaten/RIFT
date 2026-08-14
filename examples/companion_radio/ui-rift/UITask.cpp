@@ -303,44 +303,67 @@ static void renderTitleBar(DisplayDriver& display, UITask* task, const char* sub
   display.drawTextRightAlign(display.width() - 2, 4, batt);
 }
 
+// MeshCore's version string carries a build suffix; the boot screen only wants
+// the part before the dash.
+static void riftShortMeshCoreVersion(char* out, size_t out_sz) {
+  const char* ver = FIRMWARE_VERSION;
+  const char* dash = strchr(ver, '-');
+  size_t len = dash ? (size_t)(dash - ver) : strlen(ver);
+  if (len >= out_sz) len = out_sz - 1;
+  memcpy(out, ver, len);
+  out[len] = 0;
+}
+
+void riftDrawBootScreen(DisplayDriver& display, const char* status) {
+  const int x = 32;                  // left margin, matching the design
+  const ColorVal white = 0xFFFF;     // RGB565; the shared palette has no white
+
+  display.setColor(white);
+  display.setTextSize(3);
+  display.drawTextLeftAlign(x, 78, "RIFT");
+
+  // the accent rule cuts through the wordmark and runs past it. The design has
+  // it slightly sloped; DisplayDriver exposes no line primitive, only rects, so
+  // this is the horizontal equivalent.
+  display.setColor(UIColor::corp_blue);
+  display.fillRect(x - 4, 92, 140, 2);
+
+  // wide tracking, as drawn - Adafruit GFX has no letter-spacing control
+  display.setColor(UIColor::secondary_txt);
+  display.setTextSize(1);
+  display.drawTextLeftAlign(x, 118, "R A D I O  I N T E L L I G E N C E");
+  display.drawTextLeftAlign(x, 132, "$  F I E L D  T E R M I N A L");
+
+  if (status != NULL) {
+    display.setColor(white);
+    display.drawTextLeftAlign(x, 188, status);
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextRightAlign(display.width() - x, 188, "1-2 min - not a hang");
+  }
+
+  // our version, and the MeshCore it is built on - a fork should say both
+  char mc[12];
+  riftShortMeshCoreVersion(mc, sizeof(mc));
+  char line[48];
+  sprintf(line, "RIFT %s - MeshCore %s", RIFT_VERSION, mc);
+  display.setColor(UIColor::secondary_txt);
+  display.drawTextLeftAlign(x, 212, line);
+}
+
 class RiftSplashScreen : public UIScreen {
   UITask* _task;
   unsigned long dismiss_after;
-  char _version_info[12];
 
 public:
   RiftSplashScreen(UITask* task) : _task(task) {
-    const char *ver = FIRMWARE_VERSION;
-    const char *dash = strchr(ver, '-');
-
-    int len = dash ? dash - ver : strlen(ver);
-    if (len >= sizeof(_version_info)) len = sizeof(_version_info) - 1;
-    memcpy(_version_info, ver, len);
-    _version_info[len] = 0;
-
+    // millis() is near zero here, so this deadline cannot straddle the wrap
     dismiss_after = millis() + BOOT_SCREEN_MILLIS;
   }
 
   int render(DisplayDriver& display) override {
-    display.setColor(UIColor::title_txt);
-    display.setTextSize(3);
-    display.drawTextCentered(display.width() / 2, display.height() / 2 - 30, "RIFT");
-
-    display.setColor(UIColor::secondary_txt);
-    display.setTextSize(1);
-    display.drawTextCentered(display.width() / 2, display.height() / 2 + 4, "RADIO INTELLIGENCE");
-    display.drawTextCentered(display.width() / 2, display.height() / 2 + 16, "& FIELD TERMINAL");
-
-    // our version, and the MeshCore it is built on - a fork should say both
-    display.setColor(UIColor::title_txt);
-    char line[40];
-    sprintf(line, "v%s", RIFT_VERSION);
-    display.drawTextCentered(display.width() / 2, display.height() - 34, line);
-
-    display.setColor(UIColor::secondary_txt);
-    sprintf(line, "on MeshCore %s", _version_info);
-    display.drawTextCentered(display.width() / 2, display.height() - 20, line);
-
+    // identical to what main.cpp drew during setup(), so the boot sequence does
+    // not visibly change shape once the UI task takes over
+    riftDrawBootScreen(display, NULL);
     return 200;
   }
 

@@ -30,7 +30,9 @@ second device is needed.
 <img src="logo/bootscreen.png" alt="RIFT boot screen: the RIFT wordmark, RADIO INTELLIGENCE / FIELD TERMINAL, and a progress bar reading Formatting SPIFFS — 1-2 min, not a hang" width="520">
 </p>
 <p align="center">
-<sub>First boot. The progress bar is real — SPIFFS formatting takes one to two minutes.</sub>
+<sub>The boot screen. The status line appears only when SPIFFS actually needs
+formatting, which takes one to two minutes. The design's progress bar is not
+drawn — see below.</sub>
 </p>
 
 ---
@@ -110,11 +112,19 @@ A **full chip erase is a different matter**: it takes SPIFFS with it, and since
 RIFT disables MeshCore's private-key export there is no way to back the key up
 first or recover it after. Only erase if you intend to become a new node.
 
-And regardless of route, **the first boot spends one to two minutes formatting
-SPIFFS**. The boot screen shows a progress bar and says so explicitly, because an
-unexplained pause on a device with no obvious activity is indistinguishable from
-a brick — and resetting partway through leaves the filesystem needing another
-format anyway.
+And regardless of route, **a first boot on an unformatted partition spends one
+to two minutes formatting SPIFFS**. The boot screen says so in as many words,
+because an unexplained pause on a device with no obvious activity is
+indistinguishable from a brick — and resetting partway through leaves the
+filesystem needing another format anyway.
+
+The line only appears when a format is really about to happen. `SPIFFS.begin()`
+formats on mount failure, so RIFT probes first with `formatOnFail` off; a normal
+boot mounts immediately and shows nothing. **There is no progress bar**, despite
+the design: that format blocks the only running task for its full duration —
+`loop()` has not started and the UI task does not yet exist — and it reports no
+progress along the way. A bar would either sit frozen or animate against a guess,
+and both are worse than a sentence that tells the truth.
 
 ---
 
@@ -154,9 +164,9 @@ If upload reports *"Could not open COM5, the port doesn't exist"* while the port
 is clearly listed, a leftover `pio device monitor` process is holding it. Kill
 it before retrying.
 
-**First boot after switching firmware reformats SPIFFS**, which takes one to two
-minutes. The boot screen tracks it with a progress bar — wait for the bar rather
-than resetting.
+**First boot after switching firmware may reformat SPIFFS**, which takes one to
+two minutes. The boot screen says `Formatting SPIFFS` when that is happening.
+Wait it out rather than resetting.
 
 ### Other environments
 

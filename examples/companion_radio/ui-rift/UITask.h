@@ -22,6 +22,11 @@
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 
+// Draws the RIFT boot screen. Lives outside UITask because main.cpp has to draw
+// it during setup(), before the UI task exists - see the SPIFFS format probe
+// there. Pass a status line, or NULL for none. Caller owns startFrame/endFrame.
+void riftDrawBootScreen(DisplayDriver& display, const char* status);
+
 // nav slot indices - named, because several call sites reach into
 // nav_screens[] directly and silent index drift is easy otherwise
 #define RIFT_NAV_MESH    0

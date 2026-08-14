@@ -76,10 +76,11 @@ Version <strong id="ver">(loading)</strong>.</p>
 </div>
 
 <div class="note">
-  <strong>After flashing, the screen sits on <code>Loading...</code> for one to
-  two minutes.</strong> This is SPIFFS being formatted on first boot, not a hang.
-  Leave it alone and wait it out — we assumed the device was dead the first time
-  we saw it.
+  <strong>The first boot can take one to two minutes.</strong> If the boot screen
+  reads <code>Formatting SPIFFS</code>, the filesystem is being created and the
+  device is working — it just cannot show progress, because the format blocks
+  everything else while it runs. Leave it alone and wait it out. We assumed the
+  device was dead the first time we saw it.
 </div>
 
 <h2>What this does to the device</h2>
