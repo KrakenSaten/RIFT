@@ -24,6 +24,10 @@ on:
       - '.github/workflows/rift-build-check.yml'
   workflow_dispatch:
 
+# nothing here writes to the repository
+permissions:
+  contents: read
+
 jobs:
   build:
     # Gated on the tests. They take under a minute; the five firmware builds take
@@ -49,7 +53,7 @@ jobs:
 
     steps:
       - name: Clone Repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
 
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
@@ -63,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clone Repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
 
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment

@@ -202,6 +202,22 @@ are unchanged and still build; that is worth re-checking after any edit to
 shared code, since `MyMesh` and `AbstractUITask` are compiled into every
 companion-radio build on every board.
 
+### Supply chain
+
+Third-party actions in RIFT's own workflows are pinned to commit SHAs, with the
+version noted beside each. A tag is a movable pointer, and these workflows are
+what produce the binaries people flash. Permissions are read-only by default;
+only the job that creates the release and pushes to `gh-pages` is granted write.
+
+Two gaps, stated rather than papered over. The shared
+`.github/actions/setup-build-environment` is upstream's and still refers to
+`actions/cache@v5` and `actions/setup-python@v6` by tag - pinning it there would
+diverge from upstream and change their workflows too. And the browser flasher
+loads ESP Web Tools 10.4.0 from unpkg: the version is pinned, but the `?module`
+form resolves that library's own dependencies from the CDN at load time using
+ranges. Removing that runtime dependency means bundling the library into this
+repository, which needs an npm build step that does not exist here.
+
 `.github/workflows/rift-build-check.yml` does exactly that check in CI, on push
 and pull request against `rift-tdeck`: it builds `LilyGo_TDeck_rift` plus all
 four stock T-Deck environments, and runs the native unit tests. Upstream's own

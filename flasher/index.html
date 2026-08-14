@@ -145,13 +145,24 @@ environment gotchas that cost real time, and the full build instructions.</p>
 RIFT is an independent fork of <a href="https://github.com/meshcore-dev/MeshCore">MeshCore</a>
 by Scott Powell and contributors, MIT licensed. The mesh stack, LoRa drivers and
 protocol are theirs; RIFT adds a keyboard-driven terminal UI on top.
-The install button is <a href="https://esphome.github.io/esp-web-tools/">ESP Web Tools</a>,
-loaded from unpkg.
+The install button is <a href="https://esphome.github.io/esp-web-tools/">ESP Web Tools</a>
+10.4.0, loaded from unpkg.
 </footer>
 
 </main>
 
-<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<!--
+  Pinned to an exact version rather than the @10 major, so a new release cannot
+  arrive here without someone choosing it.
+
+  This is partial, and worth being clear about: the ?module form rewrites the
+  library's bare imports to further unpkg URLs, and those carry ranges rather
+  than exact versions - lit, esptool-js, @material/web, improv-wifi-serial-sdk
+  and tslib are still resolved by the CDN at load time. Genuinely removing the
+  runtime dependency means bundling the library into this repository, which needs
+  an npm build step that does not exist here yet.
+-->
+<script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
 <script>
   // show the version straight from the manifest the installer will use, so the
   // page can never advertise a different build than it flashes
