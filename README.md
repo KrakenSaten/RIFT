@@ -517,13 +517,14 @@ only adds a T-Deck UI and does not track their releases.
 
 ## Status
 
-**Current version: 0.3.0** — set by the `RIFT_VERSION` build flag and shown on
+**Current version: 0.3.1** — set by the `RIFT_VERSION` build flag and shown on
 the boot screen and SYSTEM, alongside the MeshCore version it is built on.
 Deliberately 0.x: it works and is verified on hardware, but it has had no
 external users and the limitations above are real.
 
-0.3.0 rebuilds all five screens to the design in `design/`, and fixes four real
-bugs found along the way. 0.2.0 added the browser flasher and the boot screen,
+0.3.1 closes a stack overflow in the channel-key decoder and seven places where
+the interface stated something it could not know. 0.3.0 rebuilt all five screens
+to the design in `design/`, and fixed four real bugs found along the way. 0.2.0 added the browser flasher and the boot screen,
 disabled MeshCore's private-key export, and took boot from 243 seconds to 5.1 by
 restoring the I²C bus after the RTC probe. Everything in both is verified on
 hardware. `FIRMWARE_VERSION` is left as
