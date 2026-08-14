@@ -290,6 +290,14 @@ uint8_t MyMesh::getExtraAckTransmitCount() const {
 }
 
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+  // Recorded before the companion-link check below, and deliberately outside it:
+  // this is the device's own record of mesh activity, and gating it on a
+  // connected app would make it read as silence exactly when the node is
+  // standalone. See hasHeardMesh() in the header for what "heard" covers.
+  _last_rx_millis = millis();
+  _rx_ever = true;
+  _rx_count++;
+
   if (_serial->isConnected() && len + 3 <= MAX_FRAME_SIZE) {
     int i = 0;
     out_frame[i++] = PUSH_CODE_LOG_RX_DATA;
@@ -1005,6 +1013,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   sign_data = NULL;
   dirty_contacts_expiry = 0;
   memset(advert_paths, 0, sizeof(advert_paths));
+  _rx_ever = false;
+  _last_rx_millis = 0;
+  _rx_count = 0;
   memset(send_scope.key, 0, sizeof(send_scope.key));
   send_unscoped = false;
 

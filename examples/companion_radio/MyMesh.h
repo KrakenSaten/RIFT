@@ -108,6 +108,21 @@ public:
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
 
+  // Mesh receive activity. Nothing tracked this before, so the only "is the
+  // network there" signal any UI could reach was the USB/BLE companion link -
+  // a different question entirely.
+  //
+  // Fed from logRxRaw(), which Dispatcher calls for every raw radio reception
+  // before parsing, so this counts packets addressed to other nodes and
+  // packets that fail to decrypt. Not a contact or message count.
+  //
+  // hasHeardMesh() is false until the first reception; the caller needs it
+  // because millis() 0 is a legitimate timestamp. Ages are computed as
+  // millis() - getLastRxMillis() in unsigned arithmetic, which is wrap-safe.
+  bool          hasHeardMesh() const { return _rx_ever; }
+  unsigned long getLastRxMillis() const { return _last_rx_millis; }
+  uint32_t      getRxCount() const { return _rx_count; }
+
   // Send a text message to a contact from local UI code. Mirrors the companion
   // app's CMD_SEND_TXT_MSG path, including registering the expected ACK, which
   // callers outside this class cannot do (expected_ack_table is private).
@@ -263,6 +278,10 @@ private:
   unsigned long dirty_contacts_expiry;
 
   TransportKey send_scope;
+
+  bool _rx_ever;
+  unsigned long _last_rx_millis;
+  uint32_t _rx_count;
 
   uint8_t cmd_frame[MAX_FRAME_SIZE + 1];
   uint8_t out_frame[MAX_FRAME_SIZE + 1];

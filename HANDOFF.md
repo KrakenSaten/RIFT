@@ -43,7 +43,7 @@ MSYS2: install from msys2.org, then in the UCRT64 shell
 pacman -S --needed mingw-w64-ucrt-x86_64-gcc
 ```
 
-and put `C:\msys64\ucrt64\bin` on PATH. Verified with GCC 16.1.0.
+and put `C:\msys64\ucrt64\bin` on PATH. Verified with GCC 16.1.0 and 16.2.0.
 
 ### Commands
 
@@ -180,7 +180,9 @@ bound to backlight level, because this panel's backlight is on or off.
 RADAR with waterfall; COMMS with channel tabs, DMs and delivery status; NODES as
 hop columns with real route drawing; SYSTEM in two columns with diagnostics;
 touch, trackball-as-Enter, node renaming, channel creation, Nordic character
-rendering; browser flasher; boot in 5.1 s.
+rendering; browser flasher; boot in 5.1 s. MESH now headlines mesh receive
+activity — `NO SIGNAL` at boot and `IDLE` after a minute both seen on hardware,
+with the age and packet count ticking alongside.
 
 **CI** (`.github/workflows/rift-build-check.yml`, `rift-release.yml`): tests gate
 the builds, all five environments build, third-party actions pinned to SHAs,
@@ -191,31 +193,31 @@ if the tag and `RIFT_VERSION` disagree.
 compiles clean. `-Werror` is off while ~210 warnings in shared MeshCore code are
 not ours to fix.
 
-**60 native tests**, all runnable locally. They cover the three places that have
-actually been wrong: base64 key validation, `path_len` decoding, and hash
-collision resolution.
+**68 native tests**, all runnable locally. They cover the four places that have
+actually been wrong: base64 key validation, `path_len` decoding, hash collision
+resolution, and the mesh-activity thresholds.
 
 ### Open items
 
-1. **MESH headline should show real mesh activity.** It currently says
-   `COMPANION` and reports the USB/BLE link, which is honest but not the useful
-   thing. Needs a last-received timestamp nothing tracks yet.
-2. **`UIScreen` lifecycle / overlay refactor.** `onEnter`/`onLeave`/`isModal` as
+1. **`UIScreen` lifecycle / overlay refactor.** `onEnter`/`onLeave`/`isModal` as
    real concepts, with the message preview as an overlay rather than a screen
    replacement. Two bugs have already come from its absence. The reviews
    recommend doing it gradually, not as a rewrite.
-3. **Message history does not survive reboot.** RAM-only by design; persisting it
+2. **Message history does not survive reboot.** RAM-only by design; persisting it
    means new code and flash wear.
-4. **Nordic character input.** Reading works; the keyboard has no Nordic keys and
+3. **Nordic character input.** Reading works; the keyboard has no Nordic keys and
    no alt/sym combination produces distinct codes, so entering them needs a
    software compose scheme.
-5. **Report the I²C bus issue upstream.** It costs every T-Deck user four minutes
+4. **Report the I²C bus issue upstream.** It costs every T-Deck user four minutes
    of boot. Measurements are in commit `3528d80a`.
-6. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning the version
+5. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning the version
    is only partial — the `?module` form resolves its dependencies from the CDN at
    load time. Real self-hosting needs an npm build step.
-7. **`.github/actions/setup-build-environment`** is upstream's and still refers to
+6. **`.github/actions/setup-build-environment`** is upstream's and still refers to
    two actions by tag. Pinning there would change their workflows too.
+7. **`QUIET` has never been seen on hardware.** It needs a quarter of an hour of
+   silence, so only the threshold is covered, by native test. `NO SIGNAL` and
+   `IDLE` were both confirmed on device.
 
 ---
 

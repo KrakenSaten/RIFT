@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 // Decisions that were buried inside screen classes, where nothing could reach
@@ -40,4 +41,61 @@ static inline int riftChannelCapacity(int max_text_len, const char* sender_name)
   int prefix = (sender_name != NULL ? (int) strlen(sender_name) : 0) + 2;  // ": "
   int cap = max_text_len - prefix;
   return (cap < 0) ? 0 : cap;
+}
+
+// ------------------------------------------------------------- mesh activity
+
+// How the MESH headline decides what to say. The screen used to report the
+// USB/BLE companion link, which is a different question: a standalone node with
+// a busy mesh around it read STANDBY forever.
+//
+// "Heard" means the radio decoded bytes off the air - see MyMesh::logRxRaw(),
+// which Dispatcher calls for every raw reception before any parsing. Traffic
+// addressed to other nodes, and traffic that does not decrypt, both count.
+// That is deliberate: the question is whether this radio is somewhere with a
+// live mesh, not whether anyone is talking to us.
+//
+// NEVER is kept distinct from a very old QUIET because they mean different
+// things in the field - nothing at all since boot points at frequency, SF or
+// antenna, not at a quiet network.
+#define RIFT_MESH_NEVER    0
+#define RIFT_MESH_ACTIVE   1
+#define RIFT_MESH_IDLE     2
+#define RIFT_MESH_QUIET    3
+
+// Thresholds. Adverts default to a few times an hour, so a minute of silence is
+// normal and only a quarter of an hour starts to mean something.
+#define RIFT_MESH_ACTIVE_MILLIS  (60UL * 1000)
+#define RIFT_MESH_IDLE_MILLIS    (15UL * 60 * 1000)
+
+static inline int riftMeshActivity(bool ever_heard, uint32_t millis_since) {
+  if (!ever_heard) return RIFT_MESH_NEVER;
+  if (millis_since < RIFT_MESH_ACTIVE_MILLIS) return RIFT_MESH_ACTIVE;
+  if (millis_since < RIFT_MESH_IDLE_MILLIS) return RIFT_MESH_IDLE;
+  return RIFT_MESH_QUIET;
+}
+
+// Age as a short human string: "9s", "12m", "3h", "5d". One unit only - this
+// goes in a 6x8 field next to a size-3 headline, and a second unit would cost
+// more width than it adds meaning. Truncates rather than rounds, so the number
+// never runs ahead of the elapsed time.
+//
+// Needs 6 bytes. Callers pass millis() - last_rx as unsigned, which is correct
+// across the millis() wrap; a gap longer than the 49.7-day wrap period would
+// read as a small age instead, which is not worth code to handle.
+#define RIFT_AGE_BUF_LEN  6
+
+static inline void riftFormatAge(uint32_t millis_since, char* buf, size_t len) {
+  if (buf == NULL || len == 0) return;
+
+  uint32_t secs = millis_since / 1000;
+  if (secs < 60)          snprintf(buf, len, "%us", (unsigned) secs);
+  else if (secs < 3600)   snprintf(buf, len, "%um", (unsigned) (secs / 60));
+  else if (secs < 86400)  snprintf(buf, len, "%uh", (unsigned) (secs / 3600));
+  else {
+    uint32_t days = secs / 86400;
+    // the field is four characters wide; past 99 days the exact count is noise
+    if (days > 99) snprintf(buf, len, ">99d");
+    else           snprintf(buf, len, "%ud", (unsigned) days);
+  }
 }

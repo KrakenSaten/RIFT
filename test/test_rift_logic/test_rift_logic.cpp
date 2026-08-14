@@ -86,6 +86,75 @@ TEST(ChannelCapacity, MissingNameCostsOnlyTheSeparator) {
     EXPECT_EQ(158, riftChannelCapacity(160, NULL));
 }
 
+// ---------------------------------------------------------------- mesh activity
+
+TEST(MeshActivity, NothingHeardIsNotJustVeryOld) {
+    // NEVER and a long-stale QUIET mean different things in the field: one points
+    // at frequency/SF/antenna, the other at a quiet network. The elapsed value is
+    // meaningless when nothing has been heard, so it must not decide the state.
+    EXPECT_EQ(RIFT_MESH_NEVER, riftMeshActivity(false, 0));
+    EXPECT_EQ(RIFT_MESH_NEVER, riftMeshActivity(false, 500));
+    EXPECT_EQ(RIFT_MESH_NEVER, riftMeshActivity(false, 6UL * 3600 * 1000));
+}
+
+TEST(MeshActivity, FreshTrafficIsActive) {
+    EXPECT_EQ(RIFT_MESH_ACTIVE, riftMeshActivity(true, 0));
+    EXPECT_EQ(RIFT_MESH_ACTIVE, riftMeshActivity(true, 59999));
+}
+
+TEST(MeshActivity, BoundariesBelongToTheQuieterState) {
+    // exactly at a threshold counts as the older band - the comparison is <, so
+    // a state cannot appear to hold one millisecond longer than its label claims
+    EXPECT_EQ(RIFT_MESH_IDLE,  riftMeshActivity(true, RIFT_MESH_ACTIVE_MILLIS));
+    EXPECT_EQ(RIFT_MESH_IDLE,  riftMeshActivity(true, RIFT_MESH_IDLE_MILLIS - 1));
+    EXPECT_EQ(RIFT_MESH_QUIET, riftMeshActivity(true, RIFT_MESH_IDLE_MILLIS));
+}
+
+TEST(MeshActivity, StaysQuietNoMatterHowOld) {
+    EXPECT_EQ(RIFT_MESH_QUIET, riftMeshActivity(true, 0xFFFFFFFFUL));
+}
+
+// ---------------------------------------------------------------- age formatting
+
+static const char* age_of(uint32_t millis_since) {
+    static char buf[RIFT_AGE_BUF_LEN];
+    riftFormatAge(millis_since, buf, sizeof(buf));
+    return buf;
+}
+
+TEST(FormatAge, PicksOneUnit) {
+    EXPECT_STREQ("0s",  age_of(0));
+    EXPECT_STREQ("9s",  age_of(9500));
+    EXPECT_STREQ("59s", age_of(59999));
+    EXPECT_STREQ("1m",  age_of(60000));
+    EXPECT_STREQ("59m", age_of(3599999));
+    EXPECT_STREQ("1h",  age_of(3600000));
+    EXPECT_STREQ("23h", age_of(86399999));
+    EXPECT_STREQ("1d",  age_of(86400000));
+}
+
+TEST(FormatAge, TruncatesRatherThanRounding) {
+    // 119 seconds is not "2m" - the number must never run ahead of the elapsed time
+    EXPECT_STREQ("1m", age_of(119999));
+    EXPECT_STREQ("1h", age_of(7199999));
+}
+
+TEST(FormatAge, NeverExceedsTheFieldWidth) {
+    // the widest output has to fit RIFT_AGE_BUF_LEN, including the terminator;
+    // 0xFFFFFFFF ms is 49.7 days, so walk past it in seconds to reach the cap
+    EXPECT_LE(strlen(age_of(0xFFFFFFFFUL)), (size_t) RIFT_AGE_BUF_LEN - 1);
+    for (uint32_t ms = 0; ms < 0xFFFFFFFFUL - 5000000UL; ms += 5000000UL) {
+        EXPECT_LE(strlen(age_of(ms)), (size_t) RIFT_AGE_BUF_LEN - 1);
+    }
+}
+
+TEST(FormatAge, DegenerateBufferIsNotWritten) {
+    char buf[RIFT_AGE_BUF_LEN] = "keep";
+    riftFormatAge(1000, buf, 0);
+    EXPECT_STREQ("keep", buf);
+    riftFormatAge(1000, NULL, sizeof(buf));   // must not crash
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

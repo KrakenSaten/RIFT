@@ -468,25 +468,65 @@ public:
      : _task(task), _node_prefs(node_prefs), _tick(0) { }
 
   int render(DisplayDriver& display) override {
-    // This is the USB/BLE companion link, not the mesh. hasConnection() returns
-    // AbstractUITask::_connected, which only the serial interface sets - a
-    // standalone RIFT with a perfectly healthy mesh reads STANDBY forever. It is
-    // labelled for what it actually measures rather than being left to imply
-    // network membership.
-    const char* link = _task->hasConnection() ? "CONNECTED"
-                     : (the_mesh.getBLEPin() != 0 ? "PAIRING" : "STANDBY");
-    renderTitleBar(display, _task, link);
+    renderTitleBar(display, _task, NAV_LABELS[RIFT_NAV_MESH]);
 
-    // The link state moves out of the title bar subtitle and into the body at
-    // size 3. It is the question this screen exists to answer, and it was set in
-    // the same 6x8 grey as everything else. All three states are <= 9 chars,
-    // which is 162px, so none of them clip.
+    // The headline is mesh receive activity, which is the question this screen
+    // exists to answer. It used to be the USB/BLE companion link - honest about
+    // what it measured, but a standalone node with a busy mesh around it read
+    // STANDBY forever, and that is the case RIFT is built for.
+    //
+    // The link has not been dropped, only demoted to a labelled row below.
+    //
+    // Longest state is "NO SIGNAL": 9 chars at size 3 is 162px from x=2, which
+    // clears both the screen edge and the radar box (x >= 160, but y >= 80).
+    unsigned long since = millis() - the_mesh.getLastRxMillis();
+    int activity = riftMeshActivity(the_mesh.hasHeardMesh(), (uint32_t) since);
+
+    const char* state;
+    ColorVal state_col;
+    switch (activity) {
+      case RIFT_MESH_ACTIVE: state = "ACTIVE";    state_col = rift_pal.ok;     break;
+      case RIFT_MESH_IDLE:   state = "IDLE";      state_col = rift_pal.fg;     break;
+      case RIFT_MESH_QUIET:  state = "QUIET";     state_col = rift_pal.mid;    break;
+      default:               state = "NO SIGNAL"; state_col = rift_pal.accent; break;
+    }
+
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 18, "COMPANION");
+    display.drawTextLeftAlign(2, 18, "MESH");
     display.setTextSize(3);
+    display.setColor(state_col);
+    display.drawTextLeftAlign(2, 30, state);
+
+    // Show the age and the count, not just the verdict. Every hardware problem
+    // on this project was settled by putting the real value on screen, and a
+    // threshold is exactly the kind of judgement that is worth being able to
+    // check against the number it was derived from.
+    char row[40];
+    display.setTextSize(1);
     display.setColor(rift_pal.fg);
-    display.drawTextLeftAlign(2, 30, link);
+    if (the_mesh.hasHeardMesh()) {
+      char age[RIFT_AGE_BUF_LEN];
+      riftFormatAge((uint32_t) since, age, sizeof(age));
+      sprintf(row, "LAST RX %s AGO", age);
+    } else {
+      // nothing since boot points at frequency, SF or antenna - not at a quiet
+      // network - so it is worth saying which of the two this is
+      strcpy(row, "NOTHING HEARD SINCE BOOT");
+    }
+    display.drawTextLeftAlign(2, 62, row);
+
+    display.setColor(rift_pal.mid);
+    sprintf(row, "RX %u PACKETS", (unsigned) the_mesh.getRxCount());
+    display.drawTextLeftAlign(2, 74, row);
+
+    // The companion link, still reported, now labelled for what it measures.
+    // hasConnection() returns AbstractUITask::_connected, which only the serial
+    // interface sets.
+    const char* link = _task->hasConnection() ? "CONNECTED"
+                     : (the_mesh.getBLEPin() != 0 ? "PAIRING" : "STANDBY");
+    sprintf(row, "USB/BLE %s", link);
+    display.drawTextLeftAlign(2, 90, row);
 
     // radar box, right of the state. Same mechanism as before - three nested
     // rects and one blip at eight discrete positions - just moved off centre.
