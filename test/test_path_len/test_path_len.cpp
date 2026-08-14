@@ -63,3 +63,10 @@ TEST(PathLen, InstanceAccessorsAgreeWithStatics) {
 TEST(PathLen, DirectSentinelIsNotAPath) {
     EXPECT_FALSE(Packet::isValidPathLen(0xFF));
 }
+
+// The googletest package here is built without gtest_main, so every test file
+// provides its own entry point - the same four lines as the other suites.
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}
