@@ -71,6 +71,33 @@ pio run -e LilyGo_TDeck_rift -e LilyGo_TDeck_companion_radio_usb -e LilyGo_TDeck
 clearly listed?** Something holds it. Usually a serial monitor — or the browser
 tab with the web flasher, since WebSerial keeps the port until the tab closes.
 
+**Upload dies partway through with the USB device dropping off the bus?**
+`pio run -t upload` cannot always write the whole app partition in one
+operation. Seen failing reproducibly after roughly 1.2 MB, with
+`Cannot configure port` or `The chip stopped responding` — and the failure point
+moves with the transfer, not with the address, so it is the transport rather than
+the image.
+
+What does not help: a different cable, and `upload_speed`. Baud is a no-op here;
+this is native USB CDC, so lowering it changes nothing and the run takes exactly
+as long. `--no-stub` only moved the failure earlier.
+
+What works is splitting the write. The app is one image at `0x10000`, so cut
+`firmware.bin` at a sector-aligned offset and write the halves separately —
+786432 (`0xC0000`) has been used, giving `0x10000` and `0xD0000`. Each half
+completes in under five seconds with its hash verified, and esptool verifies per
+chunk, so the two together cover the whole image.
+
+Use `--after no_reset` on the first half only if the second can reconnect
+without a reset — it could not, so `--before default_reset` on both is what
+actually worked. The chip is never at risk: the ROM bootloader is in ROM and
+still enumerates after a failed write, so a half-written app is always
+recoverable.
+
+Cause not established. The first upload of that session went through in 8.9 s,
+which argues for something state-dependent rather than a hard size limit. The
+firmware is 1.61 MB and growing, so expect to need this every time.
+
 ---
 
 ## 2. Where things are
@@ -184,6 +211,13 @@ rendering; browser flasher; boot in 5.1 s. MESH now headlines mesh receive
 activity — `NO SIGNAL` at boot and `IDLE` after a minute both seen on hardware,
 with the age and packet count ticking alongside.
 
+Screens now have a lifecycle. `RiftScreen` adds `onEnter`/`onLeave`/`isModal`/
+`isOverlay`, the message preview is a real overlay drawn over the screen the user
+is on, and dismissing it hands that screen back instead of dropping them on MESH.
+Checked on device against both bugs the old arrangement caused: a message
+arriving mid-scan no longer disturbs RADAR, and no longer wipes a channel key
+being read on SYSTEM.
+
 **CI** (`.github/workflows/rift-build-check.yml`, `rift-release.yml`): tests gate
 the builds, all five environments build, third-party actions pinned to SHAs,
 read-only by default with write only on the publish job, and a release is refused
@@ -193,31 +227,35 @@ if the tag and `RIFT_VERSION` disagree.
 compiles clean. `-Werror` is off while ~210 warnings in shared MeshCore code are
 not ours to fix.
 
-**68 native tests**, all runnable locally. They cover the four places that have
+**74 native tests**, all runnable locally. They cover the five places that have
 actually been wrong: base64 key validation, `path_len` decoding, hash collision
-resolution, and the mesh-activity thresholds.
+resolution, the mesh-activity thresholds, and screen-transition hooks.
 
 ### Open items
 
-1. **`UIScreen` lifecycle / overlay refactor.** `onEnter`/`onLeave`/`isModal` as
-   real concepts, with the message preview as an overlay rather than a screen
-   replacement. Two bugs have already come from its absence. The reviews
-   recommend doing it gradually, not as a rewrite.
-2. **Message history does not survive reboot.** RAM-only by design; persisting it
+1. **Message history does not survive reboot.** RAM-only by design; persisting it
    means new code and flash wear.
-3. **Nordic character input.** Reading works; the keyboard has no Nordic keys and
+2. **Nordic character input.** Reading works; the keyboard has no Nordic keys and
    no alt/sym combination produces distinct codes, so entering them needs a
    software compose scheme.
-4. **Report the I²C bus issue upstream.** It costs every T-Deck user four minutes
+3. **Report the I²C bus issue upstream.** It costs every T-Deck user four minutes
    of boot. Measurements are in commit `3528d80a`.
-5. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning the version
+4. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning the version
    is only partial — the `?module` form resolves its dependencies from the CDN at
    load time. Real self-hosting needs an npm build step.
-6. **`.github/actions/setup-build-environment`** is upstream's and still refers to
+5. **`.github/actions/setup-build-environment`** is upstream's and still refers to
    two actions by tag. Pinning there would change their workflows too.
-7. **`QUIET` has never been seen on hardware.** It needs a quarter of an hour of
+6. **`QUIET` has never been seen on hardware.** It needs a quarter of an hour of
    silence, so only the threshold is covered, by native test. `NO SIGNAL` and
    `IDLE` were both confirmed on device.
+7. **Should an idle COMMS accept message popups?** `RiftCommsScreen::isModal()`
+   returns true unconditionally, which preserves the behaviour that predates the
+   lifecycle work: COMMS was exempt from popups outright, because the message is
+   already in the history there and a popup would drop a half-typed line. The
+   honest answer is `_picking || _len > 0`. Changing it is a design decision, and
+   was deliberately kept out of the refactor.
+8. **Why a single flash write over ~1.2 MB fails.** Section 1 has a working split
+   write and what was ruled out, but not a cause.
 
 ---
 

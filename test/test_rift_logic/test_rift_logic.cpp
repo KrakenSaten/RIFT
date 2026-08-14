@@ -86,6 +86,49 @@ TEST(ChannelCapacity, MissingNameCostsOnlyTheSeparator) {
     EXPECT_EQ(158, riftChannelCapacity(160, NULL));
 }
 
+// ------------------------------------------------------------ screen transitions
+
+// Arguments are (same_screen, from_overlay, to_overlay).
+
+TEST(ScreenTransition, RealNavigationFiresBoth) {
+    EXPECT_EQ(RIFT_XN_LEAVE | RIFT_XN_ENTER, riftScreenTransition(false, false, false));
+}
+
+// The bug that panicked the device: an incoming message raised the preview while
+// RADAR was scanning, RADAR was told it had lost focus, and the BT teardown ran
+// from inside the LoRa receive path.
+TEST(ScreenTransition, RaisingAPopupLeavesNothing) {
+    EXPECT_EQ(RIFT_XN_NONE, riftScreenTransition(false, false, true));
+}
+
+// The other one, same cause: SYSTEM was told it had been left and wiped the
+// one-time channel key while the user was still reading it off the screen.
+TEST(ScreenTransition, PopupOverAModalScreenStillLeavesNothing) {
+    // the rule does not depend on what is underneath - a popup is never navigation
+    EXPECT_EQ(RIFT_XN_NONE, riftScreenTransition(false, false, true));
+}
+
+// Not reachable as the UI is wired today: overlays never become the current
+// screen, so nothing transitions out of one. Asserted anyway, because the fourth
+// row of a four-row table should not be left to guesswork.
+TEST(ScreenTransition, DismissingAPopupOnlyEnters) {
+    // the overlay was never really "on" anything, so there is no screen to leave
+    EXPECT_EQ(RIFT_XN_ENTER, riftScreenTransition(false, true, false));
+}
+
+TEST(ScreenTransition, ReselectingTheSameScreenIsNotATransition) {
+    // a nav-bar tap on the screen already showing must not wipe its state
+    EXPECT_EQ(RIFT_XN_NONE, riftScreenTransition(true, false, false));
+    EXPECT_EQ(RIFT_XN_NONE, riftScreenTransition(true, true, true));
+}
+
+TEST(ScreenTransition, SameScreenWinsOverEverythingElse) {
+    // ordering matters: the same-screen check has to come first, or re-selecting
+    // a screen would be treated as a dismissal and fire onEnter again
+    EXPECT_EQ(RIFT_XN_NONE, riftScreenTransition(true, true, false));
+    EXPECT_EQ(RIFT_XN_NONE, riftScreenTransition(true, false, true));
+}
+
 // ---------------------------------------------------------------- mesh activity
 
 TEST(MeshActivity, NothingHeardIsNotJustVeryOld) {

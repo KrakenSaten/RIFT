@@ -38,6 +38,30 @@ void riftApplyPalette(bool day);
 // from thirteen places - can draw its dot without changing every signature.
 extern int rift_nav_unread;
 
+// RIFT's screens need four things UIScreen has no notion of. They live here
+// rather than in src/helpers/ui/UIScreen.h deliberately: that header is shared
+// with ui-new, ui-orig and ui-tiny, and RIFT's diff against upstream MeshCore is
+// worth keeping small. Every screen UITask holds is a Rift* class, so nothing
+// outside ui-rift is affected.
+//
+// All four default to the passive answer, so a screen implements only what it
+// actually needs.
+class RiftScreen : public UIScreen {
+public:
+  // Real navigation into and out of this screen. Not fired for popups - see
+  // riftScreenTransition() in RiftLogic.h for the rule and why it exists.
+  virtual void onEnter() { }
+  virtual void onLeave() { }
+
+  // True while this screen holds something a popup would destroy: half-typed
+  // text, or a secret being read. Checked before raising the message preview.
+  virtual bool isModal() const { return false; }
+
+  // True for a transient popup drawn over the screen the user is actually on,
+  // rather than a destination they navigated to.
+  virtual bool isOverlay() const { return false; }
+};
+
 // Boot phase timing. setup() runs with no watchdog and several of its steps can
 // block for a long time - the filesystem mount most of all - so a slow boot gives
 // no clue which step is responsible. These marks record when each phase finished
@@ -101,11 +125,20 @@ public:
 private:
 #endif
 
-  UIScreen* splash;
-  UIScreen* msg_preview;
-  UIScreen* nav_screens[RIFT_NAV_COUNT];   // indexed by RIFT_NAV_*
+  RiftScreen* splash;
+  RiftScreen* msg_preview;
+  RiftScreen* nav_screens[RIFT_NAV_COUNT];   // indexed by RIFT_NAV_*
   int nav_idx;
-  UIScreen* curr;
+  RiftScreen* curr;
+
+  // The popup currently drawn over curr, or NULL. One deep, and no allocation:
+  // static RAM is already around half used and the design spec is explicit that
+  // per-item allocations are not to be added.
+  //
+  // An overlay does not replace curr and does not touch nav_idx, which is the
+  // whole point - dismissing it needs nothing restored, and the screen
+  // underneath was never told it had been left.
+  RiftScreen* _overlay;
 
   void userLedHandler();
 
@@ -115,7 +148,7 @@ private:
   char handleDoubleClick(char c);
   char handleTripleClick(char c);
 
-  void setCurrScreen(UIScreen* c);
+  void setCurrScreen(RiftScreen* c);
 
 public:
 
@@ -124,11 +157,18 @@ public:
     ui_started_at = 0;
     nav_idx = 0;
     curr = NULL;
+    _overlay = NULL;
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
   void gotoHomeScreen() { nav_idx = RIFT_NAV_MESH; setCurrScreen(nav_screens[RIFT_NAV_MESH]); }
   void cycleNavScreen(int dir);
+
+  // Raise a popup over the current screen, or take it away again. A screen the
+  // user has to dismiss should call dismissOverlay(), not gotoHomeScreen() -
+  // the latter used to drop them on MESH wherever they actually were.
+  void pushOverlay(RiftScreen* o);
+  void dismissOverlay();
   // last key code the UI saw - reading this on screen is what identified the
   // keyboard co-processor repeating held keys
   int lastKeyCode() const { return _last_key; }

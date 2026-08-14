@@ -43,6 +43,43 @@ static inline int riftChannelCapacity(int max_text_len, const char* sender_name)
   return (cap < 0) ? 0 : cap;
 }
 
+// -------------------------------------------------------- screen transitions
+
+// Which lifecycle hooks a screen change should fire. Both bugs this encodes were
+// the same mistake made twice: a transient popup was treated as navigation. Once
+// it tore the BT controller down mid-scan and panicked the device, once it wiped
+// a one-time channel key while it was still being read. Each was fixed locally,
+// with the same open-coded guard, at two separate call sites.
+//
+// It is a decision table rather than a condition inline in setCurrScreen()
+// because it has been wrong in shipped firmware, and because three call sites
+// used to answer it three different ways.
+#define RIFT_XN_NONE   0
+#define RIFT_XN_LEAVE  1
+#define RIFT_XN_ENTER  2
+
+static inline int riftScreenTransition(bool same_screen, bool from_overlay, bool to_overlay) {
+  // re-selecting the current screen is not a transition; firing onLeave here
+  // would wipe SYSTEM's state on a tap that changed nothing
+  if (same_screen) return RIFT_XN_NONE;
+
+  // A popup does not navigate. The screen behind it has not been left, and
+  // must not be told it was - this is the case that caused both bugs.
+  if (to_overlay) return RIFT_XN_NONE;
+
+  // Dismissing a popup by navigating straight out of it. There is no screen to
+  // leave: the overlay was never really "on" anything, so only the destination
+  // is entered.
+  //
+  // Unreachable as the UI is wired today - overlays no longer become the current
+  // screen at all, so nothing can transition *from* one. Kept because it is the
+  // correct answer if that ever changes, and because leaving it out would make
+  // the table look like it had considered only three of the four cases.
+  if (from_overlay) return RIFT_XN_ENTER;
+
+  return RIFT_XN_LEAVE | RIFT_XN_ENTER;
+}
+
 // ------------------------------------------------------------- mesh activity
 
 // How the MESH headline decides what to say. The screen used to report the

@@ -432,7 +432,7 @@ void riftDrawBootScreen(DisplayDriver& display, const char* status) {
   display.drawTextLeftAlign(x, 212, line);
 }
 
-class RiftSplashScreen : public UIScreen {
+class RiftSplashScreen : public RiftScreen {
   UITask* _task;
   unsigned long dismiss_after;
 
@@ -458,7 +458,7 @@ public:
 };
 
 // MESH: home dashboard - mesh/battery status, node count, link stats, radar ping.
-class RiftMeshScreen : public UIScreen {
+class RiftMeshScreen : public RiftScreen {
   UITask* _task;
   NodePrefs* _node_prefs;
   int _tick;
@@ -573,7 +573,7 @@ public:
 
 // SYSTEM: live keyboard/trackball diagnostics - proves the Step 2 input
 // drivers work end-to-end. Real settings/diagnostics content lands later.
-class RiftSystemScreen : public UIScreen {
+class RiftSystemScreen : public RiftScreen {
   UITask* _task;
 
   // A small action menu rather than hidden letter shortcuts - discoverable, and
@@ -606,7 +606,7 @@ class RiftSystemScreen : public UIScreen {
 public:
   // True while a text field is open or a generated key is on screen. A message
   // popup over either of those loses half-typed input or a secret being read.
-  bool isModal() const { return _mode != MENU; }
+  bool isModal() const override { return _mode != MENU; }
 private:
 
   Mode _mode;
@@ -619,7 +619,11 @@ public:
   // through this screen's own handling, but a tap on the nav bar changes screen
   // from UITask without asking, and the generated key stayed in _ch_key - so
   // coming back to SYSTEM redisplayed a secret the user had already dismissed.
-  void onLeave() {
+  //
+  // A message popup is not navigating away, and must not reach here: it used to,
+  // and wiped the key mid-read. That is now riftScreenTransition()'s job rather
+  // than a condition at the call site.
+  void onLeave() override {
     memset(_ch_key, 0, sizeof(_ch_key));
     memset(_edit.buf, 0, sizeof(_edit.buf));
     _edit.len = 0;
@@ -1138,7 +1142,7 @@ public:
 static inline uint8_t riftHopCount(uint8_t path_len) { return mesh::Packet::pathHashCount(path_len); }
 static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::pathHashSize(path_len); }
 
-class RiftConstellationScreen : public UIScreen {
+class RiftConstellationScreen : public RiftScreen {
   UITask* _task;
   AdvertPath _paths[RIFT_CONST_MAX];
   int _plot_x[RIFT_CONST_MAX];   // where each node was drawn, for tap hit-testing
@@ -1416,7 +1420,7 @@ const int RiftConstellationScreen::COL_X[RIFT_HOP_COLS] = { 46, 114, 182, 250 };
 const int RiftConstellationScreen::ROW_MARK_Y[RIFT_HOP_ROWS] = { 36, 64, 92 };
 
 // Placeholder nav screen - visual only, real functionality lands in a later milestone.
-class RiftPlaceholderScreen : public UIScreen {
+class RiftPlaceholderScreen : public RiftScreen {
   UITask* _task;
   int _nav_idx;
   const char* _title;
@@ -1590,7 +1594,7 @@ static void onBleScanComplete(BLEScanResults results) { ble_scan_done = true; }
 // idle), so a blocking call would silently starve the LoRa radio rather than
 // panicking. Both scan APIs have a blocking overload that is easy to hit by
 // accident - see the comments at each call site.
-class RiftRadarScreen : public UIScreen {
+class RiftRadarScreen : public RiftScreen {
   UITask* _task;
 
   enum ScanState { OFF, START_WIFI, WIFI_RUNNING, START_BLE, BLE_RUNNING, STOPPING };
@@ -1671,11 +1675,16 @@ public:
        _wifi_up(false), _ble_up(false), _torn_down(true),
        _wait_since(0), _wait_ms(0), _scroll(0), _last_n(0) { }
 
-  // Only records intent. Screen changes can originate from a mesh callback
-  // (an incoming message switches to the preview screen), and tearing the BT
-  // controller down from inside the LoRa receive path crashes the device -
-  // so the actual work happens in service(), on the main loop.
-  void setActive(bool active) { _want_active = active; }
+  // These only record intent. Screen changes can originate from a mesh callback,
+  // and tearing the BT controller down from inside the LoRa receive path crashes
+  // the device - so the actual work happens in service(), on the main loop.
+  //
+  // service() is still driven from UITask::loop() on every iteration whichever
+  // screen is showing. It must not move in here: teardown has to keep running
+  // after the user has navigated away, which is exactly when onLeave() has
+  // already fired.
+  void onEnter() override { _want_active = true; }
+  void onLeave() override { _want_active = false; }
 
   // Ask the radios to stop, but do NOT deinit yet - BLEDevice::deinit() while a
   // scan is still winding down panics the device. The actual teardown happens
@@ -2053,7 +2062,7 @@ public:
 
 #endif   // RIFT_RADAR
 
-class RiftMsgPreviewScreen : public UIScreen {
+class RiftMsgPreviewScreen : public RiftScreen {
   UITask* _task;
   int num_unread;
   int _back;    // how far back in the shared log we're previewing
@@ -2061,34 +2070,57 @@ class RiftMsgPreviewScreen : public UIScreen {
 public:
   RiftMsgPreviewScreen(UITask* task) : _task(task) { num_unread = 0; _back = 0; }
 
+  // A popup over whatever the user is doing, not somewhere they navigated to.
+  // This is what keeps RADAR's teardown and SYSTEM's secret wipe from firing
+  // when a message arrives; both used to, and both were bugs.
+  bool isOverlay() const override { return true; }
+
   void onNewMsg() {
     if (num_unread < RIFT_MSG_LOG_SIZE) num_unread++;
     rift_nav_unread = num_unread;   // what the nav dot means: unread *here*
     _back = 0;
   }
 
+  // Drawn over the screen the user is on, after its own render() and inside the
+  // same frame - the mechanism showAlert() already used. It is a panel rather
+  // than a full-screen repaint so the title bar and nav bar behind it stay
+  // readable: battery, and which screen you will be back on when you dismiss it.
+  //
+  // Not a saving in SPI traffic - endFrame() ships the whole canvas in one burst
+  // either way - but it does keep the user's context on screen.
   int render(DisplayDriver& display) override {
-    renderTitleBar(display, _task, "MESSAGE");
+    const int x = 8, w = display.width() - 16;
+    const int y = 24, h = display.height() - 24 - 24;
+
+    display.setColor(rift_pal.bg);
+    display.fillRect(x, y, w, h);
+    display.setColor(rift_pal.accent);
+    display.drawRect(x, y, w, h);
+
+    display.setTextSize(1);
+    display.setColor(rift_pal.accent);
+    display.drawTextLeftAlign(x + 6, y + 6, "MESSAGE");
 
     char tmp[16];
     sprintf(tmp, "Unread: %d", num_unread);
-    display.setColor(UIColor::corp_blue);
-    display.setTextSize(1);
-    display.drawTextLeftAlign(4, 22, tmp);
+    display.setColor(rift_pal.mid);
+    display.drawTextRightAlign(x + w - 6, y + 6, tmp);
+
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(x + 6, y + h - 14, "ENTER next   BKSP dismiss");
 
     auto p = msg_log.peek(_back);
     if (p == NULL) return 1000;
 
-    display.setCursor(4, 40);
-    display.setColor(UIColor::secondary_txt);
+    display.setColor(rift_pal.mid);
     char filtered_origin[sizeof(p->origin)];
     riftTranslateUTF8(filtered_origin, p->origin, sizeof(filtered_origin));
-    display.print(filtered_origin);
+    display.drawTextLeftAlign(x + 6, y + 24, filtered_origin);
 
-    display.setColor(UIColor::primary_txt);
+    display.setColor(rift_pal.fg);
     char filtered_msg[sizeof(p->msg)];
     riftTranslateUTF8(filtered_msg, p->msg, sizeof(filtered_msg));
-    wrapText(filtered_msg, display.width() - 8, 54, &display, 4);
+    wrapText(filtered_msg, w - 12, y + 40, &display, x + 6);
 
     return 1000;
   }
@@ -2103,7 +2135,9 @@ public:
       if (num_unread <= 0) num_unread = 0;
       rift_nav_unread = num_unread;   // the nav dot follows what is unread here
       if (num_unread == 0) {
-        _task->gotoHomeScreen();
+        // hands the screen back to whatever was underneath. This called
+        // gotoHomeScreen(), which dropped the user on MESH from anywhere.
+        _task->dismissOverlay();
       }
       return true;
     }
@@ -2111,7 +2145,7 @@ public:
     if (c == RIFT_KEY_BACK) {
       num_unread = 0;
       rift_nav_unread = 0;
-      _task->gotoHomeScreen();
+      _task->dismissOverlay();
       return true;
     }
     return false;
@@ -2127,7 +2161,7 @@ public:
 // out, and the UI says when contacts were cut rather than silently hiding them.
 #define RIFT_PICKER_MAX 48
 
-class RiftCommsScreen : public UIScreen, ContactVisitor {
+class RiftCommsScreen : public RiftScreen, ContactVisitor {
   UITask* _task;
   char _input[MAX_TEXT_LEN + 1];
   int _len;
@@ -2148,6 +2182,17 @@ public:
     memcpy(_target_key, key6, 6);
     _picking = false;
   }
+
+  // Unconditional, which preserves exactly the behaviour this replaced: newMsg()
+  // exempted COMMS from popups outright, on the grounds that the message is
+  // already in the history right there and a popup would drop a half-typed line.
+  //
+  // The honest answer is `_picking || _len > 0` - COMMS is only really busy while
+  // composing or choosing a target. Changing it would mean a message arriving at
+  // an idle history view now raises a popup, where today it never does. That is a
+  // design decision, not a refactor, so it is left alone deliberately; the
+  // half-typed-line argument holds either way but the idle case is arguable.
+  bool isModal() const override { return true; }
 private:
   char _target_name[32];
 
@@ -2787,16 +2832,15 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   msg_log.add(rtc_clock.getCurrentTime(), origin, text, false);
   ((RiftMsgPreviewScreen *) msg_preview)->onNewMsg();
 
-  // Don't yank the user out of the COMMS terminal - the message is already
-  // visible in its history there, and stealing focus would drop a half-typed
-  // line. Everywhere else keeps the popup behaviour.
-  // Nor over a text field or a displayed key: a popup would take the screen away
-  // from someone halfway through typing a channel name, and the message is in
-  // the COMMS history either way.
-  bool busy = (curr == nav_screens[RIFT_NAV_SYSTEM]
-               && ((RiftSystemScreen *) nav_screens[RIFT_NAV_SYSTEM])->isModal());
-  if (curr != nav_screens[RIFT_NAV_COMMS] && !busy) {
-    setCurrScreen(msg_preview);
+  // Don't take the screen away from someone mid-input: a half-typed line in
+  // COMMS, a channel name being entered, or a one-time key being read. Each
+  // screen answers for itself now - this used to name COMMS and SYSTEM here and
+  // reach into the latter to ask.
+  //
+  // Nothing stacks: a second message while the preview is already up must leave
+  // it where it is, or dismissing would land back on the popup.
+  if (_overlay == NULL && curr != NULL && !curr->isModal()) {
+    pushOverlay(msg_preview);
   }
 
   if (_display != NULL) {
@@ -2836,42 +2880,38 @@ void UITask::userLedHandler() {
 #endif
 }
 
-void UITask::setCurrScreen(UIScreen* c) {
-#ifdef RIFT_RADAR
-  // UIScreen has no enter/exit hook and this is the single funnel every screen
-  // change passes through, so RADAR learns about focus here. This only records
-  // intent - see RiftRadarScreen::setActive().
-  //
-  // Only real navigation counts: a transient popup (an incoming message
-  // switching to the preview screen) must not tear the RF stacks down, both
-  // because the user is still "on" RADAR and because doing it mid-scan used to
-  // panic the device.
-  if (nav_screens[RIFT_NAV_RADAR] != NULL) {
-    bool is_nav = false;
-    for (int i = 0; i < RIFT_NAV_COUNT; i++) {
-      if (c == nav_screens[i]) { is_nav = true; break; }
-    }
-    if (is_nav) ((RiftRadarScreen *) nav_screens[RIFT_NAV_RADAR])->setActive(c == nav_screens[RIFT_NAV_RADAR]);
-  }
-#endif
-  // A secret shown on SYSTEM must not survive being navigated away from. The
-  // screen's own key handling cleared it, but a nav-bar tap changes screens from
-  // here without consulting it.
-  //
-  // Only real navigation counts. The message preview is a popup that replaces
-  // the current screen and then hands it back - treating that as leaving wiped
-  // the one-time channel key the moment any message arrived, mid-read. Same
-  // distinction the RADAR teardown above makes, for the same reason.
-  bool leaving_for_nav = false;
-  for (int i = 0; i < RIFT_NAV_COUNT; i++) {
-    if (c == nav_screens[i]) { leaving_for_nav = true; break; }
-  }
-  if (leaving_for_nav && curr != c
-      && curr == nav_screens[RIFT_NAV_SYSTEM] && nav_screens[RIFT_NAV_SYSTEM] != NULL) {
-    ((RiftSystemScreen *) nav_screens[RIFT_NAV_SYSTEM])->onLeave();
-  }
+// The single funnel every screen change passes through. It used to answer "is
+// this real navigation?" twice here and a third time in newMsg(), each with its
+// own expression and its own downcast to a concrete screen class - RADAR for the
+// RF teardown, SYSTEM for the secret wipe. Both of those are now the screens'
+// own onEnter/onLeave, and the rule lives in riftScreenTransition() where it can
+// be tested.
+void UITask::setCurrScreen(RiftScreen* c) {
+  if (c == NULL) return;
+
+  int xn = riftScreenTransition(curr == c,
+                               curr != NULL && curr->isOverlay(),
+                               c->isOverlay());
+
+  if ((xn & RIFT_XN_LEAVE) && curr != NULL) curr->onLeave();
 
   curr = c;
+  if (xn & RIFT_XN_ENTER) c->onEnter();
+
+  _next_refresh = 100;
+}
+
+// A popup over the current screen. curr and nav_idx are untouched, so there is
+// nothing to restore on dismissal and the screen underneath is never told it was
+// left - which is what made the RADAR and SYSTEM guards necessary before.
+void UITask::pushOverlay(RiftScreen* o) {
+  if (o == NULL) return;
+  _overlay = o;
+  _next_refresh = 100;
+}
+
+void UITask::dismissOverlay() {
+  _overlay = NULL;
   _next_refresh = 100;
 }
 
@@ -2988,7 +3028,10 @@ void UITask::loop() {
   // delivered the keystroke to a screen the user was not looking at when they
   // typed it - an ENTER meant for COMMS arriving at whatever the nav-bar tap had
   // just selected.
-  UIScreen* key_target = curr;
+  // An overlay owns the keyboard while it is up, and it is captured here for the
+  // same reason curr was: touch is polled below and can navigate, so resolving
+  // the target afterwards delivered the keystroke to something else.
+  RiftScreen* key_target = (_overlay != NULL) ? _overlay : curr;
 
 #ifdef RIFT_INPUT_TOUCH
   {
@@ -3003,10 +3046,17 @@ void UITask::loop() {
         // nav bar: jump straight to the tapped screen
         int col = (tx * RIFT_NAV_COUNT) / _display->width();
         if (col >= 0 && col < RIFT_NAV_COUNT) {
+          // the nav bar stays live behind a popup, and using it puts the popup
+          // away - navigating somewhere is an answer to it
+          dismissOverlay();
           nav_idx = col;
           setCurrScreen(nav_screens[nav_idx]);
         }
         _auto_off = millis() + AUTO_OFF_MILLIS;
+      } else if (_overlay != NULL) {
+        _overlay->handleTouch(tx, ty);
+        _auto_off = millis() + AUTO_OFF_MILLIS;
+        _next_refresh = 100;
       } else if (curr) {
         curr->handleTouch(tx, ty);
         _auto_off = millis() + AUTO_OFF_MILLIS;
@@ -3047,11 +3097,19 @@ void UITask::loop() {
 #endif
 
   if (curr) curr->poll();
+  if (_overlay != NULL) _overlay->poll();
 
   if (_display != NULL && _display->isOn()) {
     if (millis() >= _next_refresh && curr) {
       _display->startFrame();
       int delay_millis = curr->render(*_display);
+      // Popup, then alert box: three layers into one canvas, one bulk transfer
+      // out of endFrame(). The overlay's cadence wins while it is up, since it is
+      // what the user is looking at.
+      if (_overlay != NULL) {
+        int od = _overlay->render(*_display);
+        if (od > 0) delay_millis = od;
+      }
       if (millis() < _alert_expiry) {
         _display->setTextSize(1);
         int y = _display->height() / 3;
