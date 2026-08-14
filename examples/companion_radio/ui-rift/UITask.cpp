@@ -1678,12 +1678,24 @@ public:
   }
 
   // colour ramp for observed signal strength; 0 means nothing heard
+  // This is the one place brightness genuinely is the quantity, so it is the one
+  // place a ramp belongs. The old four colours - orange, orange, white, grey -
+  // had no order, so a cell could not be read as a value at all.
+  //
+  // Four steps, not twelve: at 6x8 with no antialiasing, finer steps are not
+  // distinguishable. The ramp runs from mid-grey to full contrast rather than
+  // from the background up, since the darkest steps are the first to disappear
+  // under reflected light. In day mode it inverts, because a light grey on white
+  // is invisible.
   static ColorVal wfColor(int8_t rssi) {
-    if (rssi == 0) return 0;
-    if (rssi >= -55) return UIColor::warning_txt;     // strong
-    if (rssi >= -70) return UIColor::corp_blue;       // moderate
-    if (rssi >= -85) return UIColor::primary_txt;     // weak
-    return UIColor::secondary_txt;                    // barely there
+    if (rssi == 0) return 0;   // silent: leave the background
+    static const ColorVal NIGHT[4] = { 0x6B6D, 0x9CD3, 0xC618, 0xFFFF };
+    static const ColorVal DAY[4]   = { 0x9CD3, 0x6B6D, 0x39E7, 0x0000 };
+    const ColorVal* ramp = rift_day_mode ? DAY : NIGHT;
+    if (rssi >= -55) return ramp[3];
+    if (rssi >= -70) return ramp[2];
+    if (rssi >= -85) return ramp[1];
+    return ramp[0];
   }
 
   int renderWaterfall(DisplayDriver& display) {
@@ -1693,41 +1705,88 @@ public:
     display.setTextSize(1);
 
     // channels across, time down (newest at top)
-    const int left = 22;
+    const int left = 30;
     const int top = 30;
     const int cell_w = 21;
-    const int cell_h = 4;
+    const int cell_h = 5;
     const int channels = 13;
+    const int rows = 30;
 
-    display.setColor(UIColor::secondary_txt);
-    display.drawTextLeftAlign(2, top - 12, "now");
+    // The strongest cell in the frame is drawn in the accent, which is the only
+    // way to find the current peak without comparing shades by eye.
+    int8_t peak = 0;
+    for (int r = 0; r < wf_count && r < rows && r < RIFT_WF_SLICES; r++) {
+      int idx = (wf_head - r + RIFT_WF_SLICES * 2) % RIFT_WF_SLICES;
+      for (int ch = 1; ch <= channels; ch++) {
+        int8_t v = wf_hist[idx][ch];
+        if (v != 0 && (peak == 0 || v > peak)) peak = v;
+      }
+    }
 
-    for (int s = 0; s < wf_count && s < RIFT_WF_SLICES; s++) {
-      int idx = (wf_head - s + RIFT_WF_SLICES * 2) % RIFT_WF_SLICES;
-      int y = top + s * cell_h;
-      if (y + cell_h > 186) break;
+    bool peak_drawn = false;
+    for (int r = 0; r < wf_count && r < rows && r < RIFT_WF_SLICES; r++) {
+      int idx = (wf_head - r + RIFT_WF_SLICES * 2) % RIFT_WF_SLICES;
+      int y = top + r * cell_h;
+      if (y + cell_h > 180) break;
 
       for (int ch = 1; ch <= channels; ch++) {
-        ColorVal c = wfColor(wf_hist[idx][ch]);
-        if (c == 0) continue;   // nothing heard - leave background
-        display.setColor(c);
+        int8_t v = wf_hist[idx][ch];
+        if (v == 0) continue;   // nothing heard - leave background
+        if (!peak_drawn && v == peak) {
+          display.setColor(rift_pal.accent);
+          peak_drawn = true;
+        } else {
+          display.setColor(wfColor(v));
+        }
         display.fillRect(left + (ch - 1) * cell_w, y, cell_w - 2, cell_h - 1);
       }
     }
 
     if (wf_count == 0) {
-      display.setColor(UIColor::secondary_txt);
-      display.drawTextCentered(display.width() / 2, top + 40, "waiting for first sweep...");
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(left, top + 40, "waiting for first sweep...");
     }
 
+    // time axis - without it the vertical dimension is unlabelled and the plot
+    // cannot be read as history at all
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, top, "now");
+    display.drawTextLeftAlign(2, top + 10 * cell_h, "-1m");
+    display.drawTextLeftAlign(2, top + 20 * cell_h, "-2m");
+
     // channel axis
-    display.setColor(UIColor::secondary_txt);
-    char tmp[8];
-    for (int ch = 1; ch <= channels; ch += 2) {
-      sprintf(tmp, "%d", ch);
-      display.drawTextCentered(left + (ch - 1) * cell_w + cell_w / 2, 190, tmp);
+    char tmp[40];
+    for (int ch = 1; ch <= channels; ch += 3) {
+      sprintf(tmp, "%s%d", ch == 1 ? "CH" : "", ch);
+      display.drawTextLeftAlign(left + (ch - 1) * cell_w, 186, tmp);
     }
-    display.drawTextCentered(display.width() / 2, 202, "WIFI CHANNEL");
+
+    // Read the answer out rather than leaving it to be inferred from the
+    // shading: knowing which channel is congested is why this screen is opened.
+    // Silence sorts below the weakest signal, and ties are broken by the lower
+    // channel number, so the answer does not flicker between redraws.
+    int busiest = 1, quietest = 1;
+    int best = -128, worst = 127;
+    for (int ch = 1; ch <= channels; ch++) {
+      int8_t m = 0;
+      for (int r = 0; r < wf_count && r < rows && r < RIFT_WF_SLICES; r++) {
+        int idx = (wf_head - r + RIFT_WF_SLICES * 2) % RIFT_WF_SLICES;
+        int8_t v = wf_hist[idx][ch];
+        if (v != 0 && (m == 0 || v > m)) m = v;
+      }
+      int strength = (m == 0) ? -128 : (int) m;
+      if (strength > best)  { best = strength;  busiest = ch; }
+      if (strength < worst) { worst = strength; quietest = ch; }
+    }
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 196, display.width(), 1);
+    display.setColor(rift_pal.mid);
+    if (wf_count > 0) {
+      sprintf(tmp, "busiest CH%d - quietest CH%d", busiest, quietest);
+      display.drawTextLeftAlign(2, 206, tmp);
+    }
+    display.drawTextRightAlign(display.width() - 2, 206, "ENTER: back");
 
     renderNavBar(display, RIFT_NAV_RADAR);
     return 700;
@@ -2068,11 +2127,18 @@ private:
       int x = col * tw;
       bool active = _target_is_channel && _tabs[i].idx == _target_channel_idx;
 
-      if (active) {   // filled so the current channel is unmistakable
-        display.setColor(UIColor::title_bkg);
+      if (active) {
+        // accent fill with the label reversed out of it - the active channel has
+        // to survive being read in sunlight, where a fill one shade off the
+        // background does not
+        display.setColor(rift_pal.accent);
         display.fillRect(x, TABS_Y - 2, tw - 2, 13);
+        display.setColor(0xFFFF);
+      } else {
+        display.setColor(rift_pal.rule);
+        display.drawRect(x, TABS_Y - 2, tw - 2, 13);
+        display.setColor(rift_pal.mid);
       }
-      display.setColor(active ? UIColor::title_txt : UIColor::secondary_txt);
 
       char filtered[sizeof(_tabs[i].name)];
       riftTranslateUTF8(filtered, _tabs[i].name, sizeof(filtered));
@@ -2082,12 +2148,12 @@ private:
     // a contact target is not in the strip, so say so rather than showing no
     // selection at all
     if (!_target_is_channel) {
-      display.setColor(UIColor::warning_txt);
+      display.setColor(rift_pal.accent);
       display.drawTextRightAlign(display.width() - 2, TABS_Y, "DM");
     }
 
-    display.setColor(UIColor::secondary_txt);
-    display.drawRect(0, TABS_Y + 13, display.width(), 1);
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, TABS_Y + 13, display.width(), 1);
   }
 
   bool getTargetChannel(ChannelDetails& ch) {
@@ -2349,7 +2415,6 @@ public:
       char filtered[sizeof(p->msg)];
       riftTranslateUTF8(filtered, p->msg, sizeof(filtered));
 
-      char head_line[96];
       char filtered_origin[sizeof(p->origin)];
       riftTranslateUTF8(filtered_origin, p->origin, sizeof(filtered_origin));
       int hh = (p->timestamp / 3600) % 24;
@@ -2357,11 +2422,6 @@ public:
 
       char ack_buf[16];
       const char* ack = deliveryLabel(p, ack_buf, sizeof(ack_buf));
-      if (ack != NULL) {
-        sprintf(head_line, "%02d:%02d %s  %s", hh, mm, filtered_origin, ack);
-      } else {
-        sprintf(head_line, "%02d:%02d %s", hh, mm, filtered_origin);
-      }
 
       int body_lines = wrapText(filtered, avail_px, 0, NULL, 0);
       int block_h = (body_lines + 1) * RIFT_LINE_H;
@@ -2369,29 +2429,57 @@ public:
       y -= block_h;
       if (y < HIST_TOP) break;   // ran out of room going up
 
-      display.setColor(p->outgoing ? UIColor::secondary_txt : UIColor::title_txt);
-      display.setCursor(4, y);
-      display.print(head_line);
+      // Own messages carry a 2px accent bar down the left edge rather than being
+      // right-aligned: on a 320px screen right alignment costs half the width for
+      // every outgoing line, and this costs two pixels.
+      if (p->outgoing) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y, 2, block_h - 2);
+      }
 
-      display.setColor(p->outgoing ? UIColor::secondary_txt : UIColor::primary_txt);
-      wrapText(filtered, avail_px, y + RIFT_LINE_H, &display, 4);
+      char tbuf[8];
+      sprintf(tbuf, "%02d:%02d", hh, mm);
+      display.setColor(rift_pal.dim);
+      display.drawTextLeftAlign(6, y, tbuf);
+      display.setColor(rift_pal.mid);
+      display.drawTextEllipsized(42, y, 190, filtered_origin);
+
+      if (ack != NULL) {
+        // green for delivered, accent for a send that never landed. Channel
+        // messages get nothing, because no ack exists to report.
+        bool ok = (strncmp(ack, "ACK", 3) == 0);
+        display.setColor(ok ? rift_pal.ok : (ack[0] == '.' ? rift_pal.mid : rift_pal.accent));
+        display.drawTextRightAlign(display.width() - 2, y, ack);
+      }
+
+      display.setColor(rift_pal.fg);
+      wrapText(filtered, avail_px, y + RIFT_LINE_H, &display, 6);
     }
 
     // Compose line - show the tail once the text outgrows one line.
-    display.setColor(UIColor::secondary_txt);
-    display.drawRect(0, INPUT_Y - 4, display.width(), 1);
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, INPUT_Y - 4, display.width(), 1);
 
+    display.setColor(rift_pal.dim);
     if (_len == 0) {
-      display.drawTextRightAlign(display.width() - 4, INPUT_Y, "ENTER: pick target");
+      display.drawTextRightAlign(display.width() - 2, INPUT_Y, "ENTER: pick target");
+    } else {
+      // MeshCore truncates at MAX_TEXT_LEN, so show how close the message is
+      char cnt[12];
+      sprintf(cnt, "%d/%d", _len, MAX_TEXT_LEN);
+      display.setColor(_len >= MAX_TEXT_LEN ? rift_pal.accent : rift_pal.dim);
+      display.drawTextRightAlign(display.width() - 2, INPUT_Y, cnt);
     }
 
-    int max_chars = (display.width() - 16) / RIFT_CHAR_W;
+    int max_chars = (display.width() - 70) / RIFT_CHAR_W;
     const char* shown = _input;
     if (_len > max_chars) shown = _input + (_len - max_chars);
 
-    display.setColor(UIColor::primary_txt);
-    display.setCursor(4, INPUT_Y);
-    display.print("> ");
+    display.setColor(rift_pal.accent);
+    display.setCursor(2, INPUT_Y);
+    display.print(">");
+    display.setColor(rift_pal.fg);
+    display.print(" ");
     display.print(shown);
     display.print("_");
 
