@@ -444,10 +444,14 @@ only adds a T-Deck UI and does not track their releases.
 
 ## Status
 
-**Current version: 0.1.0** — set by the `RIFT_VERSION` build flag and shown on
+**Current version: 0.2.0** — set by the `RIFT_VERSION` build flag and shown on
 the boot screen and SYSTEM, alongside the MeshCore version it is built on.
 Deliberately 0.x: it works and is verified on hardware, but it has had no
-external users and the limitations above are real. `FIRMWARE_VERSION` is left as
+external users and the limitations above are real.
+
+0.2.0 adds a browser flasher and a boot screen, disables MeshCore's private-key
+export, and takes boot from 243 seconds to 5.1 by restoring the I²C bus after the
+RTC probe. Everything in it is verified on hardware. `FIRMWARE_VERSION` is left as
 upstream MeshCore's, since that string is reported over the companion protocol
 next to `FIRMWARE_VER_CODE`.
 
