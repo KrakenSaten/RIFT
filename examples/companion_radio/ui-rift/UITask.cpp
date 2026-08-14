@@ -172,8 +172,6 @@ static int wrapText(const char* text, int max_px, int y, DisplayDriver* display,
 
 // evenly spread directions for the radial plots (cos/sin * 100), shared by the
 // RADAR scatter and the CONSTELLATION topology view
-static const int8_t RF_DIR_X[16] = { 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92, -100, -92, -71, -38 };
-static const int8_t RF_DIR_Y[16] = { -100, -92, -71, -38, 0, 38, 71, 92, 100, 92, 71, 38, 0, -38, -71, -92 };
 
 // UTF-8 to what the display can actually draw.
 //
@@ -1308,6 +1306,7 @@ struct RfContact {
   bool is_wifi;
   bool encrypted;     // wifi only
   unsigned long seen_at;
+  unsigned long first_seen;   // for the "+N new" figure; set once, never refreshed
 };
 
 static RfContact rf_table[RIFT_RF_MAX];
@@ -1352,6 +1351,7 @@ static void rfUpsert(const uint8_t* key, const char* name, int8_t rssi, uint8_t 
       break;
     }
   }
+  bool is_new = (slot < 0);
   if (slot < 0) {
     if (rf_count < RIFT_RF_MAX) {
       slot = rf_count++;
@@ -1372,6 +1372,7 @@ static void rfUpsert(const uint8_t* key, const char* name, int8_t rssi, uint8_t 
   e->is_wifi = is_wifi;
   e->encrypted = encrypted;
   e->seen_at = millis();
+  if (is_new) e->first_seen = e->seen_at;
   portEXIT_CRITICAL(&rf_mux);
 }
 
@@ -1435,7 +1436,7 @@ class RiftRadarScreen : public UIScreen {
   UITask* _task;
 
   enum ScanState { OFF, START_WIFI, WIFI_RUNNING, START_BLE, BLE_RUNNING, STOPPING };
-  enum View { VIEW_SCATTER, VIEW_WATERFALL };
+  enum View { VIEW_BANDS, VIEW_WATERFALL };
   ScanState _state;
   View _view;
   bool _want_active;   // set by screen changes; acted on from the main loop
@@ -1452,8 +1453,6 @@ class RiftRadarScreen : public UIScreen {
   int _scroll;
   int _last_n;
 
-  static const int LIST_TOP = 118;
-  static const int LIST_BOTTOM = 208;
 
   void beginWifi() {
     if (!_wifi_up) {
@@ -1510,7 +1509,7 @@ class RiftRadarScreen : public UIScreen {
 
 public:
   RiftRadarScreen(UITask* task)
-     : _task(task), _state(OFF), _view(VIEW_SCATTER), _want_active(false),
+     : _task(task), _state(OFF), _view(VIEW_BANDS), _want_active(false),
        _wifi_up(false), _ble_up(false), _torn_down(true),
        _wait_since(0), _wait_ms(0), _scroll(0), _last_n(0) { }
 
@@ -1679,50 +1678,91 @@ public:
     // snapshot under the lock, then draw without holding it
     RfContact snap[RIFT_RF_MAX];
     int n;
+    unsigned long now_ms = millis();
     portENTER_CRITICAL(&rf_mux);
     n = rf_count;
     memcpy(snap, rf_table, sizeof(RfContact) * n);
     portEXIT_CRITICAL(&rf_mux);
     _last_n = n;
 
-    // entries age out between renders, so a stale offset would leave the list
-    // drawing nothing at all
-    if (_scroll >= n) _scroll = (n > 0) ? n - 1 : 0;
-
-    int wifi_n = 0, ble_n = 0;
+    int wifi_n = 0, ble_n = 0, new_n = 0;
     for (int i = 0; i < n; i++) {
       if (snap[i].is_wifi) wifi_n++; else ble_n++;
-    }
-
-    // scatter: distance from centre derived from signal strength
-    int cx = display.width() / 2;
-    int cy = 66;
-    display.setColor(UIColor::secondary_txt);
-    display.drawRect(cx - 46, cy - 44, 92, 88);
-    display.drawRect(cx - 24, cy - 23, 48, 46);
-    display.setColor(UIColor::title_txt);
-    display.fillRect(cx - 1, cy - 1, 3, 3);   // us
-
-    for (int i = 0; i < n; i++) {
-      int s = snap[i].rssi;
-      if (s < -100) s = -100;
-      if (s > -30) s = -30;
-      int radius = ((-s - 30) * 42) / 70;   // -30dBm near centre, -100 at edge
-      int d = i & 15;
-      display.setColor(snap[i].is_wifi ? UIColor::corp_blue : UIColor::primary_txt);
-      display.fillRect(cx + (radius * RF_DIR_X[d]) / 100, cy + (radius * RF_DIR_Y[d]) / 100, 2, 2);
+      if (now_ms - snap[i].first_seen < 60000) new_n++;
     }
 
     char tmp[64];
-    display.setTextSize(1);
-    display.setColor(UIColor::primary_txt);
-    sprintf(tmp, "%d WIFI   %d BLE", wifi_n, ble_n);
-    display.drawTextCentered(cx, 112, tmp);
 
-    // live heap while the RF stacks are up - this is where memory gets tight
-    display.setColor(UIColor::secondary_txt);
-    sprintf(tmp, "%uK", (unsigned) (ESP.getFreeHeap() / 1024));
-    display.drawTextRightAlign(display.width() - 4, 112, tmp);
+    // The one large value on the screen. "Is there anything around me" is the
+    // question RADAR exists for, and it was previously answered by counting
+    // dots in a scatter plot.
+    display.setTextSize(3);
+    display.setColor(rift_pal.fg);
+    sprintf(tmp, "%d", n);
+    display.drawTextLeftAlign(2, 22, tmp);
+
+    display.setTextSize(1);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(44, 24, "DEVICES NEARBY");
+    display.setColor(rift_pal.fg);
+    sprintf(tmp, "%d wifi  %d ble", wifi_n, ble_n);
+    display.drawTextLeftAlign(44, 36, tmp);
+
+    // "and is that changing" - the second half of the question
+    if (new_n > 0) {
+      sprintf(tmp, "+%d new", new_n);
+      if (rift_day_mode) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(280, 23, 40, 10);
+        display.setColor(0xFFFF);
+      } else {
+        display.setColor(rift_pal.accent);
+      }
+      display.drawTextRightAlign(display.width() - 2, 24, tmp);
+      display.setColor(rift_pal.mid);
+      display.drawTextRightAlign(display.width() - 2, 36, "in 60s");
+    }
+
+    // Distance bands replace the scatter. The scatter placed each blip by
+    // `i & 15` - its index in a table that compacts whenever a device ages out -
+    // so blips moved with nothing having moved. One countable cell per device
+    // in a signal-strength band says the same thing and stays still.
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 54, display.width(), 1);
+
+    static const int BAND_Y[3] = { 62, 78, 94 };
+    static const char* BAND_LABEL[3] = { "CLOSE", "MID", "FAR" };
+    static const char* BAND_RANGE[3] = { "-30..-60", "-60..-80", "-80..-100" };
+    const int CELL_X = 116;
+    const int CELL_SHOWN = 24;   // (320-116-2)/8 = 25 slots; the last marks overflow
+
+    for (int b = 0; b < 3; b++) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(2, BAND_Y[b], BAND_LABEL[b]);
+      display.drawTextLeftAlign(46, BAND_Y[b], BAND_RANGE[b]);
+
+      int cnt = 0;
+      for (int i = 0; i < n; i++) {
+        int s = snap[i].rssi;
+        int band = (s > -60) ? 0 : (s > -80 ? 1 : 2);
+        if (band == b) cnt++;
+      }
+
+      display.setColor(rift_pal.fg);
+      int drawn = (cnt > CELL_SHOWN) ? CELL_SHOWN : cnt;
+      for (int c = 0; c < drawn; c++) {
+        int x = CELL_X + c * 8;
+        // FAR is hollow rather than a dimmer grey: brightness steps disappear
+        // under reflected light outdoors, form does not
+        if (b == 2) display.drawRect(x, BAND_Y[b], 6, 8);
+        else        display.fillRect(x, BAND_Y[b], 6, 8);
+      }
+      if (cnt > CELL_SHOWN) {
+        // more than the row can hold - say so rather than silently clipping
+        display.setColor(rift_pal.accent);
+        display.fillRect(CELL_X + CELL_SHOWN * 8, BAND_Y[b], 6, 8);
+      }
+    }
 
     // strongest first
     for (int i = 0; i < n - 1; i++) {
@@ -1732,37 +1772,42 @@ public:
         }
       }
     }
+    if (_scroll >= n) _scroll = (n > 0) ? n - 1 : 0;
 
-    int y = LIST_TOP;
-    display.setColor(UIColor::secondary_txt);
-    display.drawTextLeftAlign(4, y, "strongest:");
-    display.drawTextRightAlign(display.width() - 4, y, "ENTER: waterfall");
-    y += RIFT_LINE_H;
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 112, display.width(), 1);
 
-    int type_x = display.width() - 108;
-    for (int i = _scroll; i < n && y < LIST_BOTTOM; i++, y += RIFT_LINE_H) {
+    int y = 120;
+    for (int i = _scroll; i < n && y <= 192; i++, y += RIFT_LINE_H) {
+      bool top = (i == 0);
       char filtered[sizeof(snap[i].name)];
       riftTranslateUTF8(filtered, snap[i].name, sizeof(filtered));
 
-      display.setColor(snap[i].is_wifi ? UIColor::corp_blue : UIColor::primary_txt);
-      display.drawTextEllipsized(4, y, type_x - 8, filtered);
+      display.setColor(top ? rift_pal.fg : rift_pal.mid);
+      sprintf(tmp, "%d", snap[i].rssi);
+      display.drawTextLeftAlign(2, y, tmp);
+      display.drawTextEllipsized(32, y, 180, filtered);
 
-      display.setColor(UIColor::secondary_txt);
       if (snap[i].is_wifi) {
         sprintf(tmp, "WIFI c%d%s", snap[i].channel, snap[i].encrypted ? " *" : "");
       } else {
         strcpy(tmp, "BLE");
       }
-      display.drawTextLeftAlign(type_x, y, tmp);
-
-      sprintf(tmp, "%d", snap[i].rssi);
-      display.drawTextRightAlign(display.width() - 4, y, tmp);
+      display.setColor(top ? (rift_day_mode ? 0x2104 : rift_pal.accent) : rift_pal.mid);
+      display.drawTextRightAlign(display.width() - 2, y, tmp);
     }
 
     if (n == 0) {
-      display.setColor(UIColor::secondary_txt);
-      display.drawTextCentered(cx, LIST_TOP + RIFT_LINE_H * 2, "listening...");
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(2, 120, "listening...");
     }
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 196, display.width(), 1);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 206, "ENTER: waterfall");
+    // a claim the user is entitled to see on the device, not only in the README
+    display.drawTextRightAlign(display.width() - 2, 206, "nothing transmitted");
 
     renderNavBar(display, RIFT_NAV_RADAR);
     return 700;   // coarse: the TFT shares its SPI bus with the LoRa radio
@@ -1773,15 +1818,15 @@ public:
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
     // both views are fed by the same scan cycle, so this is just a display swap
     if (c == KEY_ENTER) {
-      _view = (_view == VIEW_SCATTER) ? VIEW_WATERFALL : VIEW_SCATTER;
+      _view = (_view == VIEW_BANDS) ? VIEW_WATERFALL : VIEW_BANDS;
       return true;
     }
-    // waterfall is a level down from the scatter view
+    // waterfall is a level down from the band view
     if (c == RIFT_KEY_BACK && _view == VIEW_WATERFALL) {
-      _view = VIEW_SCATTER;
+      _view = VIEW_BANDS;
       return true;
     }
-    if (_view == VIEW_SCATTER) {
+    if (_view == VIEW_BANDS) {
       if (c == KEY_UP) { if (_scroll > 0) _scroll--; return true; }
       if (c == KEY_DOWN) { if (_scroll + 1 < _last_n) _scroll++; return true; }
     }
