@@ -83,28 +83,33 @@ Version <strong id="ver">(loading)</strong>.</p>
   device was dead the first time we saw it.
 </div>
 
-<h2>What this does to the device</h2>
-<p>The installer writes a merged image at offset 0: bootloader, partition table,
-boot selector and application. Concretely:</p>
-<ul>
-  <li><strong>Your node identity survives.</strong> MeshCore keeps the private
-  key in a file on the SPIFFS partition, which sits at <code>0xc90000</code> —
-  far past the end of this image. Upgrading in place keeps your key, your
-  contacts and your channels.</li>
-  <li><strong>NVS is erased</strong> (<code>0x9000</code> falls inside the image
-  and is filled with <code>0xFF</code>). That holds Arduino-side preferences,
-  not the MeshCore identity.</li>
-  <li><strong>Message history is lost</strong> on every reboot regardless —
-  RIFT's log is RAM-only by design.</li>
-</ul>
+<h2>Erase, or keep your identity?</h2>
+<p>The installer asks this before it writes anything. It matters more here than
+on most devices, so it is worth understanding before you click.</p>
 
 <div class="note">
-  <strong>Do not use a full chip erase unless you mean it.</strong> Erasing wipes
-  SPIFFS and therefore the private key. RIFT deliberately disables MeshCore's
-  private-key export command, so there is no way to back the key up first and no
-  way to recover it afterwards. The device comes back as a new node with a new
-  identity, and your contacts will not recognise it.
+  <strong>Answer "no" to erasing if this device is already a node you use.</strong>
+  MeshCore keeps its private key in a file on the SPIFFS partition at
+  <code>0xc90000</code>. Erasing wipes it, and RIFT deliberately disables
+  MeshCore's private-key export command — so there is no way to back the key up
+  beforehand and no way to recover it after. The device returns as a brand new
+  node and your contacts will not recognise it. Erasing also costs one to two
+  minutes on the next boot while the filesystem is rebuilt.
 </div>
+
+<p>Keeping your data is safe: the firmware image spans offset 0 to roughly
+<code>0x19d000</code> — bootloader, partition table, boot selector and
+application — and SPIFFS sits well past the end of it. Your key, contacts and
+channels are not in the way of the write.</p>
+
+<p>Erase deliberately when you are setting up a device for the first time, moving
+it to a new identity, or recovering from a filesystem you believe is corrupt.</p>
+
+<p>Two things happen either way: <strong>NVS is erased</strong>
+(<code>0x9000</code> falls inside the image and is filled with <code>0xFF</code>),
+which holds Arduino-side preferences rather than MeshCore state; and
+<strong>message history is lost</strong>, which happens on every reboot regardless
+because RIFT's log is RAM-only by design.</p>
 
 <h2>If the browser cannot see the device</h2>
 <p>The T-Deck's ESP32-S3 uses native USB, which re-enumerates as the firmware
