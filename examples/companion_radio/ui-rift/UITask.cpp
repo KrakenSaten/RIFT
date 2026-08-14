@@ -1,4 +1,5 @@
 #include "UITask.h"
+#include "RiftLogic.h"
 #include <helpers/TxtDataHelpers.h>
 #include "../MyMesh.h"
 #include "target.h"
@@ -1106,22 +1107,18 @@ class RiftConstellationScreen : public UIScreen {
   // a straight memcpy from pub_key), so it can be matched against any node we
   // have heard an advert from. Returns -1 when the repeater is not one of them,
   // which is normal - we may never have heard it directly.
-  // A path hash is only the first byte or three of a public key, so more than
-  // one node we know can legitimately match it. Returning the first match named
-  // a repeater with confidence the hash does not justify - a 1-byte hash
-  // collides once in 256. RIFT_HASH_AMBIGUOUS says so instead.
-  static const int RIFT_HASH_AMBIGUOUS = -2;
-
+  // The resolution itself lives in RiftLogic.h so it can be tested; see
+  // test/test_rift_logic. Nodes not drawn this frame are passed as NULL rather
+  // than skipped here, so the caller's notion of "visible" stays in one place.
   int findPlottedByHash(const uint8_t* hash, uint8_t len) {
     if (len > sizeof(AdvertPath::pubkey_prefix)) len = sizeof(AdvertPath::pubkey_prefix);
-    int found = -1;
-    for (int i = 0; i < _count; i++) {
-      if (_plot_x[i] < 0) continue;
-      if (memcmp(hash, _paths[i].pubkey_prefix, len) != 0) continue;
-      if (found >= 0) return RIFT_HASH_AMBIGUOUS;
-      found = i;
+
+    const uint8_t* candidates[RIFT_CONST_MAX];
+    for (int i = 0; i < _count && i < RIFT_CONST_MAX; i++) {
+      candidates[i] = (_plot_x[i] < 0) ? NULL : _paths[i].pubkey_prefix;
     }
-    return found;
+    int n = (_count < RIFT_CONST_MAX) ? _count : RIFT_CONST_MAX;
+    return riftResolveHash(hash, len, candidates, n);
   }
 
   // DisplayDriver has no line primitive, but every segment here is axis-aligned,
@@ -2200,9 +2197,7 @@ private:
   // 22 characters of message.
   int channelCapacity() const {
     if (!_target_is_channel) return MAX_TEXT_LEN;
-    int prefix = strlen(the_mesh.getNodeName()) + 2;   // name, colon, space
-    int cap = MAX_TEXT_LEN - prefix;
-    return (cap < 0) ? 0 : cap;
+    return riftChannelCapacity(MAX_TEXT_LEN, the_mesh.getNodeName());
   }
 
   bool getTargetChannel(ChannelDetails& ch) {
