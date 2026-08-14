@@ -63,12 +63,29 @@ jobs:
             out
             site
 
+      # The annotated tag message is written as the release notes. github.event
+      # carries the commit message, not the tag's, and is empty for a tag push.
+      - name: Release notes from the tag annotation
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch --force --tags --depth=1             origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" || true
+          git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > RELEASE_NOTES.md
+          # a lightweight tag carries no annotation - do not ship a blank release
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "RIFT ${GITHUB_REF_NAME}" > RELEASE_NOTES.md
+          fi
+          cat RELEASE_NOTES.md
+
       - name: Create release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3
         with:
           name: "RIFT ${{ steps.version.outputs.version }}"
-          draft: true
+          # published directly rather than as a draft: a draft has to be clicked
+          # before anyone can see it, and pushing the tag was already the decision
+          # to release
+          draft: false
+          body_path: RELEASE_NOTES.md
           files: out/*
 
       # deliberately not gated on tags: a manual run publishes a dev-<sha> build
