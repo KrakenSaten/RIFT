@@ -205,11 +205,11 @@ left/right**, **double-click** (previous screen), or **tapping a nav-bar tab**.
 
 | Screen | What it shows | Screen-specific controls |
 |---|---|---|
-| **MESH** | Dashboard: connection state, battery, node count, link RSSI/SNR, radio config, radar ping animation | — |
-| **NODES** | Mesh topology — nodes placed by real hop distance, branched by the repeater they arrived through | trackball up/down selects a node, or tap one |
-| **RADAR** | Passive Wi-Fi + BLE scatter and strongest-signal list | **Enter** toggles waterfall view; up/down scrolls the list |
-| **COMMS** | MeshCore text terminal — a channel strip, message history, and a compose line | **tap a channel** in the strip to switch to it; **Enter** sends, or opens the target picker when the line is empty; **backspace** deletes; up/down scrolls history |
-| **SYSTEM** | Action menu plus diagnostics: node name, keyboard status and last key code, I²C bus, free heap, external-power state, last reset reason, touch coordinates | up/down or tap selects; **Enter** activates. Actions: send advert, edit node name, add channel |
+| **MESH** | Link state large enough to read at a glance, plus node count, link RSSI/SNR, radio config and the ping animation | — |
+| **NODES** | Who you can reach and how far away, as four hop columns. Filled marker = heard in the last 30 minutes, hollow = older. The selected node's route is drawn through the repeaters it actually travelled | trackball up/down selects a node, or tap one; **Enter** starts a DM to it |
+| **RADAR** | Passive Wi-Fi + BLE. Device count, how many are new in the last 60s, three signal-strength bands with one cell per device, and the strongest-first list | **Enter** toggles the waterfall; up/down scrolls the list |
+| **COMMS** | MeshCore text terminal — channel tabs, message history, compose line with a character count | **tap a channel** to switch to it; **Enter** sends, or opens the target picker when the line is empty; **backspace** deletes; up/down scrolls history |
+| **SYSTEM** | Actions left of the divider, read-only diagnostics right of it: node name, keyboard, last key, I²C bus, touch, GPS, free heap, external power, last reset, boot timings | up/down or tap selects; **Enter** activates. Actions: send advert (two kinds), edit node name, add channel, path hash size, day/night |
 
 **Long-press the trackball within 8 seconds of boot** to enter MeshCore's CLI
 rescue mode (upstream behaviour, preserved).
@@ -235,6 +235,39 @@ timeout). Channel messages show none: they are always flooded and carry no
 acknowledgement, so there is nothing truthful to display.
 
 ---
+
+## The screen design
+
+The five on-device screens follow a design handoff
+(`logo/RIFT design review.zip`), written against this repo's actual constraints:
+the 6x8 Adafruit GFX cell with only whole-integer scaling, `DisplayDriver`'s
+primitives, and the SPI bus shared with the SX1262. Every coordinate in it is a
+real device coordinate.
+
+It carries a night and a day palette — the same geometry with a swapped colour
+table, toggled from SYSTEM. Two rules run through both. **Nothing encodes data in
+brightness where shape can carry it**, because a grey ramp is the first thing to
+go once reflected light lifts black toward grey outdoors; freshness in NODES and
+the FAR band in RADAR are filled versus hollow instead. And **de-emphasis inverts
+with the field** — on white, dim has to be darker, not lighter. The accent
+`#FF4100` keeps its value in both modes but changes role: at 6.0:1 on black it may
+be text, at 3.5:1 on white it may only be a fill with white reversed out of it.
+
+The review also found three real bugs, all confirmed in the source before
+anything was changed: nodes placed by `branch & 15` so two nodes behind the same
+repeater landed on the same pixel; a "link line" that was `fillRect(cx, cy, 1, 1)`,
+a single pixel at the midpoint of the line it was meant to be; and radar blips
+placed by array index, which moved whenever an unrelated device aged out of the
+table. Implementing the spec precisely turned up a fourth: `AdvertPath::path_len`
+is Packet's raw encoding, where bits 6-7 hold the hash size and bits 0-5 the hop
+count, and reading it as a plain count made a two-hop route display as 66 hops at
+the 2-byte path hash setting.
+
+Two things in the spec could not be built as drawn. The splash progress bar has
+nothing to animate against — `SPIFFS.begin()` blocks the only running task and
+reports no progress — so the screen says what is happening instead. And day mode
+is a menu item rather than being bound to backlight level, because this panel's
+backlight is on or off with no level to read.
 
 ## Architecture
 
@@ -358,7 +391,10 @@ RF. What is plotted is observed 802.11 activity — the strongest signal seen pe
 channel, one row per sweep.
 
 **No per-node signal strength in NODES.** Adverts are cached without RSSI, so
-brightness encodes recency instead of link quality.
+the screen shows hop distance and recency — a filled marker for heard in the last
+30 minutes, hollow for older — rather than link quality. Freshness is deliberately
+carried by shape rather than by a grey level: reflected light outdoors lays a veil
+over the panel and the darker steps of a grey ramp collapse into each other.
 
 **Nordic characters can be read but not typed.** Incoming UTF-8 is mapped to
 CP437, which carries æ Æ å Å ä Ä ö Ö; ø and Ø are absent from the font entirely
