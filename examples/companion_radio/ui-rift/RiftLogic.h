@@ -277,6 +277,33 @@ static inline void riftTranslateUTF8(char* dest, const char* src, size_t dest_si
   dest[j] = 0;
 }
 
+// --------------------------------------------------------- Nordic characters
+
+// What a long press on a base vowel offers. The T-Deck keyboard is a US QWERTY
+// with no Nordic keys, and SYM is not free - it is a working symbol layer that
+// emits the characters printed on the keys. Holding the base letter is the
+// remaining trigger, and it is the one every phone keyboard already uses.
+//
+// UTF-8, because this goes into the compose buffer and the compose buffer is what
+// goes on the air. The CP437 codes are for drawing only: o-slash displays as 0x01,
+// which on the wire would be a C0 control byte that other clients may mangle or
+// drop the message over.
+//
+// Covers Norwegian, Swedish and Danish. Ordered by how often each is wanted for
+// the language this device is used in, so the first is one press away.
+#define RIFT_NORDIC_MAX_VARIANTS  3
+
+static inline int riftNordicVariants(char base, const char* out[RIFT_NORDIC_MAX_VARIANTS]) {
+  if (out == NULL) return 0;
+  switch (base) {
+    case 'a': out[0] = "\xC3\xA6"; out[1] = "\xC3\xA5"; out[2] = "\xC3\xA4"; return 3;  // ae a-ring a-uml
+    case 'A': out[0] = "\xC3\x86"; out[1] = "\xC3\x85"; out[2] = "\xC3\x84"; return 3;
+    case 'o': out[0] = "\xC3\xB8"; out[1] = "\xC3\xB6"; return 2;                       // o-slash o-uml
+    case 'O': out[0] = "\xC3\x98"; out[1] = "\xC3\x96"; return 2;
+  }
+  return 0;
+}
+
 // -------------------------------------------------------- screen transitions
 
 // Which lifecycle hooks a screen change should fire. Both bugs this encodes were

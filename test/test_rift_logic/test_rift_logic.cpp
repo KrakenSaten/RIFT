@@ -253,6 +253,58 @@ TEST(Utf8Decode, ReportsLengthAndRejectsMalformed) {
     EXPECT_EQ(0, riftUtf8Decode("\xC3\x41", &cp));        // bad continuation
 }
 
+// ------------------------------------------------------------ Nordic variants
+
+TEST(NordicVariants, BaseVowelsOfferTheirForms) {
+    const char* v[RIFT_NORDIC_MAX_VARIANTS] = { NULL, NULL, NULL };
+
+    EXPECT_EQ(3, riftNordicVariants('a', v));
+    EXPECT_STREQ("\xC3\xA6", v[0]);   // ae
+    EXPECT_STREQ("\xC3\xA5", v[1]);   // a-ring
+    EXPECT_STREQ("\xC3\xA4", v[2]);   // a-umlaut
+
+    EXPECT_EQ(2, riftNordicVariants('o', v));
+    EXPECT_STREQ("\xC3\xB8", v[0]);   // o-slash
+    EXPECT_STREQ("\xC3\xB6", v[1]);   // o-umlaut
+}
+
+TEST(NordicVariants, CaseIsCarriedThrough) {
+    const char* v[RIFT_NORDIC_MAX_VARIANTS] = { NULL, NULL, NULL };
+    EXPECT_EQ(3, riftNordicVariants('A', v));
+    EXPECT_STREQ("\xC3\x86", v[0]);   // AE
+    EXPECT_EQ(2, riftNordicVariants('O', v));
+    EXPECT_STREQ("\xC3\x98", v[0]);   // O-slash
+}
+
+TEST(NordicVariants, OtherKeysOfferNothing) {
+    const char* v[RIFT_NORDIC_MAX_VARIANTS] = { NULL, NULL, NULL };
+    EXPECT_EQ(0, riftNordicVariants('e', v));
+    EXPECT_EQ(0, riftNordicVariants('z', v));
+    EXPECT_EQ(0, riftNordicVariants(' ', v));
+    EXPECT_EQ(0, riftNordicVariants(0, v));
+    EXPECT_EQ(0, riftNordicVariants('a', NULL));
+}
+
+// Every variant has to be UTF-8, because the compose buffer is what goes on the
+// air. A CP437 code here would send a control byte other clients cannot decode -
+// o-slash is 0x01 on the display and 0xC3 0xB8 on the wire, and confusing the two
+// is the sharpest trap in this feature.
+TEST(NordicVariants, EveryVariantIsValidTwoByteUtf8) {
+    static const char BASES[] = { 'a', 'A', 'o', 'O' };
+    for (size_t b = 0; b < sizeof(BASES); b++) {
+        const char* v[RIFT_NORDIC_MAX_VARIANTS] = { NULL, NULL, NULL };
+        int n = riftNordicVariants(BASES[b], v);
+        for (int i = 0; i < n; i++) {
+            ASSERT_NE(nullptr, v[i]);
+            EXPECT_EQ(2u, strlen(v[i])) << "variant " << i << " of " << BASES[b];
+            uint32_t cp = 0;
+            EXPECT_EQ(2, riftUtf8Decode(v[i], &cp));
+            // and it must be one the panel can actually draw back
+            EXPECT_NE(0, riftNordicToCP437(cp)) << "variant " << i << " has no glyph";
+        }
+    }
+}
+
 // ------------------------------------------------------------ screen transitions
 
 // Arguments are (same_screen, from_overlay, to_overlay).

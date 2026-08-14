@@ -146,6 +146,11 @@ private:
   // underneath was never told it had been left.
   RiftScreen* _overlay;
 
+  // Nordic character picker, raised by holding a base vowel on COMMS.
+  RiftScreen* nordic_picker;
+  // fires the picker once per hold rather than on every poll past the threshold
+  bool _longpress_fired = false;
+
   void userLedHandler();
 
   // Button action handlers
@@ -164,6 +169,7 @@ public:
     nav_idx = 0;
     curr = NULL;
     _overlay = NULL;
+    nordic_picker = NULL;
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
@@ -175,6 +181,10 @@ public:
   // the latter used to drop them on MESH wherever they actually were.
   void pushOverlay(RiftScreen* o);
   void dismissOverlay();
+
+  // Offer a held key to the Nordic picker. Does nothing unless COMMS is showing
+  // and the key actually has variants.
+  void openNordicPicker(char base);
 
   // Real navigation to COMMS, dismissing any popup on the way. The message
   // preview needs it: Enter there means "show me the full history", and the

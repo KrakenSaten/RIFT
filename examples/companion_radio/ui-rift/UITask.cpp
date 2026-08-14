@@ -1,6 +1,7 @@
 #include "UITask.h"
 #include "RiftLogic.h"
 #include <helpers/TxtDataHelpers.h>
+#include <helpers/UTF8Helpers.h>
 #include "../MyMesh.h"
 #include "target.h"
 
@@ -64,6 +65,12 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 // "one level back" wherever there is no text to delete. UIScreen.h has no
 // constant for it - the raw byte is what the co-processor sends.
 #define RIFT_KEY_BACK       8
+
+// Polls a key must be held beyond the initial press before the Nordic picker
+// opens. KEYBOARD_POLL_MILLIS is 100, so this is roughly half a second - the
+// threshold phone keyboards use, and far enough above a normal keystroke that
+// ordinary typing never reaches it.
+#define RIFT_LONGPRESS_POLLS  5
 
 #define RIFT_MSG_LOG_SIZE  48
 #define RIFT_CHAR_W         6   // Adafruit GFX classic font cell at setTextSize(1)
@@ -929,6 +936,22 @@ public:
     display.drawTextLeftAlign(LX, y, "LAST KEY");
     display.setColor(rift_pal.fg);
     sprintf(tmp, "%d / %d", _task->lastKeyCode(), (int) rift_keyboard.lastSeen());
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
+
+    // Whether this keyboard repeats a held key, and for how long. The long-press
+    // trigger depends on it entirely - the co-processor sends no key-up - and it
+    // was taken from a code comment rather than measured. Reads "a x7" while a is
+    // held if the repeat is real; stays "- x0" if the key is reported once and
+    // then dropped.
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "KEY HELD");
+    display.setColor(rift_pal.fg);
+    {
+      char k = rift_keyboard.heldKey();
+      sprintf(tmp, "%c x%u", (k >= 32 && k < 127) ? k : '-',
+                             (unsigned) rift_keyboard.heldPolls());
+    }
     display.drawTextRightAlign(display.width() - 2, y, tmp);
     y += RIFT_LINE_H;
 
@@ -2441,8 +2464,14 @@ private:
     // BaseChatMesh prepends "<name>: " and then silently truncates the packet to
     // MAX_TEXT_LEN. Truncate here too, so the history shows what was transmitted
     // rather than what was typed.
+    // Cut on a code point boundary, not a byte. _len can exceed the capacity even
+    // though input is bounded, because the capacity moves: it depends on this
+    // node's name, and a DM allows the full MAX_TEXT_LEN where a channel does not.
+    // Compose a long direct message, switch the target to a channel, and the text
+    // is now over budget - a byte-wise cut there could split a two-byte character
+    // and put a dangling lead byte on the air.
     int cap = channelCapacity();
-    int sent_len = (_len > cap) ? cap : _len;
+    int sent_len = (int) mesh::validUtf8PrefixLength(_input, (size_t) cap);
     char sent[MAX_TEXT_LEN + 1];
     memcpy(sent, _input, sent_len);
     sent[sent_len] = 0;
@@ -2623,6 +2652,16 @@ public:
 
   bool isComposing() const { return _len > 0; }
 
+  // Whether a keystroke would reach the compose line at all. False while the
+  // target picker is up: handleInput() routes everything there instead, so the
+  // line is neither visible nor being typed into.
+  //
+  // The Nordic picker has to check this. Holding a vowel over the target picker
+  // would otherwise open it, and choosing a variant would replace the last
+  // character of a line the user cannot see - a character the held key never
+  // inserted, because the keystroke went to the picker.
+  bool acceptsText() const { return !_picking; }
+
   void onDelivered(uint32_t ack_hash, uint32_t trip_ms) {
     msg_log.markDelivered(ack_hash, trip_ms);
   }
@@ -2731,9 +2770,17 @@ public:
       display.drawTextRightAlign(display.width() - 2, INPUT_Y, cnt);
     }
 
+    // Translate first, then take the tail of the *translated* text. The compose
+    // buffer holds UTF-8, because that is what goes on the air, but CP437 output
+    // is one byte per code point - so slicing after translation cannot land
+    // inside a sequence. Slicing _input by byte could, and would draw a block or
+    // a stray glyph as soon as the line was long enough to scroll.
     int max_chars = (display.width() - 70) / RIFT_CHAR_W;
-    const char* shown = _input;
-    if (_len > max_chars) shown = _input + (_len - max_chars);
+    char filtered[sizeof(_input)];   // translation never outputs more bytes than it reads
+    riftTranslateUTF8(filtered, _input, sizeof(filtered));
+    int flen = (int) strlen(filtered);
+    const char* shown = filtered;
+    if (flen > max_chars) shown = filtered + (flen - max_chars);
 
     display.setColor(rift_pal.accent);
     display.setCursor(2, INPUT_Y);
@@ -2795,13 +2842,152 @@ public:
     // backspace deletes while composing; with nothing to delete this is
     // already the top level, so there is nowhere further back to go
     if (c == RIFT_KEY_BACK) {
-      if (_len > 0) _input[--_len] = 0;
+      // Delete a whole code point, not a byte. Dropping one byte of a two-byte
+      // character leaves a dangling lead byte, which is not valid UTF-8 and which
+      // the next backspace would then have to clean up. Truncating to _len-1
+      // without splitting a sequence is exactly what this helper does, so the
+      // walk is not reimplemented here.
+      deleteLastChar();
       return true;
     }
 
     if (c >= 32 && c < 127 && _len < channelCapacity()) {
       _input[_len++] = c;
       _input[_len] = 0;
+      return true;
+    }
+    return false;
+  }
+
+public:
+  // Insert a character the keyboard cannot produce, as UTF-8. Used by the Nordic
+  // picker. Returns false if it would not fit - the caller should not silently
+  // drop it, since the user chose it deliberately.
+  //
+  // What goes in here is what goes on the air. CP437 codes must never be inserted:
+  // o-slash on the wire is 0xC3 0xB8, while 0x01 is a display-side placeholder
+  // that other clients would read as a C0 control byte.
+  bool insertUtf8(const char* utf8) {
+    if (utf8 == NULL) return false;
+    int n = (int) strlen(utf8);
+    if (n <= 0 || _len + n > channelCapacity()) return false;
+    memcpy(&_input[_len], utf8, n);
+    _len += n;
+    _input[_len] = 0;
+    return true;
+  }
+
+  // Remove one whole code point. Dropping a single byte of a two-byte character
+  // would leave a dangling lead byte, which is not valid UTF-8 and which the next
+  // backspace would have to clean up. Truncating to _len-1 without splitting a
+  // sequence is exactly what this helper does, so the walk is not reimplemented.
+  //
+  // Also used by the Nordic picker, which replaces the base letter the initial
+  // keypress inserted.
+  void deleteLastChar() {
+    if (_len <= 0) return;
+    _len = (int) mesh::validUtf8PrefixLength(_input, (size_t) (_len - 1));
+    _input[_len] = 0;
+  }
+private:
+};
+
+// Nordic character picker: a long press on a base vowel offers its forms.
+//
+// An overlay, not a screen - the third use of that mechanism and the reason it
+// exists. The compose line underneath keeps its half-typed text, stays on screen
+// while you choose, and is handed straight back on dismissal.
+//
+// The base letter is already in the buffer, because the initial press inserted it
+// normally - holding a key must not make ordinary typing feel delayed. Choosing a
+// variant therefore replaces that character rather than appending to it.
+class RiftNordicPickerScreen : public RiftScreen {
+  UITask* _task;
+  RiftCommsScreen* _comms;
+  const char* _variants[RIFT_NORDIC_MAX_VARIANTS];
+  int _count;
+  int _sel;
+  char _base;
+
+public:
+  RiftNordicPickerScreen(UITask* task, RiftCommsScreen* comms)
+     : _task(task), _comms(comms), _count(0), _sel(0), _base(0) {
+    for (int i = 0; i < RIFT_NORDIC_MAX_VARIANTS; i++) _variants[i] = NULL;
+  }
+
+  bool isOverlay() const override { return true; }
+
+  // returns false if this key has no variants, so the caller knows not to open
+  bool openFor(char base) {
+    _count = riftNordicVariants(base, _variants);
+    if (_count == 0) return false;
+    _base = base;
+    _sel = 0;
+    return true;
+  }
+
+  int render(DisplayDriver& display) override {
+    // Sits just above the compose line rather than centred, so it is next to the
+    // text it is about and does not cover the history being replied to.
+    const int cell = 26;
+    const int w = _count * cell + 12;
+    const int h = 40;
+    const int x = 2;
+    const int y = 158;
+
+    display.setColor(rift_pal.bg);
+    display.fillRect(x, y, w, h);
+    display.setColor(rift_pal.accent);
+    display.drawRect(x, y, w, h);
+
+    display.setTextSize(1);
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(x + 6, y + 4, "ENTER  BKSP");
+
+    for (int i = 0; i < _count; i++) {
+      int cx = x + 6 + i * cell;
+      if (i == _sel) {
+        // accent fill with the glyph reversed out - legal in both palettes, where
+        // accent as text is not
+        display.setColor(rift_pal.accent);
+        display.fillRect(cx - 2, y + 14, cell - 2, 22);
+        display.setColor(0xFFFF);
+      } else {
+        display.setColor(rift_pal.fg);
+      }
+      // the variant is UTF-8; translate it to draw it
+      char glyph[8];
+      riftTranslateUTF8(glyph, _variants[i], sizeof(glyph));
+      display.setTextSize(3);
+      display.drawTextLeftAlign(cx, y + 16, glyph);
+      display.setTextSize(1);
+    }
+
+    return 1000;
+  }
+
+  bool handleInput(char c) override {
+    if (c == KEY_RIGHT || c == KEY_NEXT) { _sel = (_sel + 1) % _count; return true; }
+    if (c == KEY_LEFT || c == KEY_PREV)  { _sel = (_sel + _count - 1) % _count; return true; }
+
+    if (c == KEY_ENTER) {
+      // replace the base letter the initial press already inserted
+      if (_comms != NULL) {
+        _comms->deleteLastChar();
+        if (!_comms->insertUtf8(_variants[_sel])) {
+          // put the base back rather than silently losing a character
+          char base[2] = { _base, 0 };
+          _comms->insertUtf8(base);
+          _task->showAlert("No room for that character", 1200);
+        }
+      }
+      _task->dismissOverlay();
+      return true;
+    }
+
+    // cancel keeps the base letter, which is what was typed
+    if (c == RIFT_KEY_BACK || c == KEY_CANCEL) {
+      _task->dismissOverlay();
       return true;
     }
     return false;
@@ -2860,10 +3046,26 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #else
   nav_screens[RIFT_NAV_RADAR] = new RiftPlaceholderScreen(this, RIFT_NAV_RADAR, "RF RADAR", "Wi-Fi / BLE / RF scan");
 #endif
-  nav_screens[RIFT_NAV_COMMS] = new RiftCommsScreen(this);
+  RiftCommsScreen* comms = new RiftCommsScreen(this);
+  nav_screens[RIFT_NAV_COMMS] = comms;
   nav_screens[RIFT_NAV_SYSTEM] = new RiftSystemScreen(this);
+  // holds the concrete type: the picker edits the compose line directly, which is
+  // the whole point of it
+  nordic_picker = new RiftNordicPickerScreen(this, comms);
   nav_idx = 0;
   setCurrScreen(splash);
+}
+
+// Raised by holding a base vowel while COMMS is composing. Returns quietly for
+// any other key, so the caller can offer every keypress without filtering first.
+void UITask::openNordicPicker(char base) {
+  if (nordic_picker == NULL || _overlay != NULL) return;
+  if (curr != nav_screens[RIFT_NAV_COMMS]) return;   // nowhere else has a text field
+  // and not while COMMS has the target picker up: the keystroke went there, not
+  // into the compose line, so there is no base letter to replace
+  if (!((RiftCommsScreen *) nav_screens[RIFT_NAV_COMMS])->acceptsText()) return;
+  if (!((RiftNordicPickerScreen *) nordic_picker)->openFor(base)) return;
+  pushOverlay(nordic_picker);
 }
 
 void UITask::cycleNavScreen(int dir) {
@@ -3127,6 +3329,21 @@ void UITask::loop() {
   if (c == 0) {
     char key = rift_keyboard.poll();
     if (key != 0) c = checkDisplayOn(key);
+  }
+
+  // Holding a base vowel offers its Nordic forms. The keyboard sends no key-up,
+  // so the co-processor's repeat is the only evidence a key is down; poll()
+  // suppresses those repeats for typing and counts them for this.
+  //
+  // Fires once per hold rather than on every poll past the threshold, and the
+  // base letter has already been inserted by the initial press - the picker
+  // replaces it. Typing normally must not feel delayed by a feature that only
+  // triggers when you keep holding.
+  if (rift_keyboard.heldPolls() == 0) {
+    _longpress_fired = false;
+  } else if (!_longpress_fired && rift_keyboard.heldPolls() >= RIFT_LONGPRESS_POLLS) {
+    _longpress_fired = true;
+    openNordicPicker(rift_keyboard.heldKey());
   }
 #endif
   // The screen that was showing when the key was pressed. Touch is polled after

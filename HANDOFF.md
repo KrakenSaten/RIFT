@@ -282,19 +282,38 @@ to CP437 translation.
 
 1. **Message history does not survive reboot.** RAM-only by design; persisting it
    means new code and flash wear.
-2. **Nordic character input.** Reading works; writing does not. The trigger
-   question is settled — see section 3: `SYM` is a working symbol layer, not a
-   spare key, so it cannot host a picker. Long-pressing the base vowel is the
-   plan, using the co-processor's key repeat that the driver currently discards.
+2. **Nordic character input — half done, and blocked on one measurement.**
 
-   The larger half is the COMMS compose line, which prints `_input` raw. That
-   works only because every keystroke is currently single-byte ASCII. Storing
-   UTF-8 is right for what goes on the air, but then the display needs translating,
-   tail-scrolling has to count characters rather than bytes and never slice
-   mid-sequence, and backspace has to delete a whole code point. The comment above
-   `RiftTextInput` warns against touching that component for good reason.
+   **Done and correct:** the COMMS compose line is UTF-8 aware. It renders by
+   translating first and taking the tail of the *translated* text, so a cut cannot
+   land inside a sequence; backspace removes a whole code point; and the send path
+   truncates on a code point boundary. All three go through
+   `mesh::validUtf8PrefixLength`, which upstream already has and already tests —
+   no second UTF-8 walk was written. Two of those were live bugs: a byte-wise
+   backspace would leave a dangling lead byte, and the send truncation could put
+   invalid UTF-8 on the air when the capacity drops under the composed length
+   (compose a long DM, switch the target to a channel).
 
-   Sharpest trap: `ø` on the air must be UTF-8 `0xC3 0xB8`. `0x01` is a
+   `RiftNordicPickerScreen` and `riftNordicVariants()` are written and build. The
+   picker is an overlay, so the compose line keeps its text underneath.
+
+   **Blocked:** holding a vowel does nothing on hardware. The trigger assumed the
+   co-processor repeats a held key — taken from the comment in
+   `TDeckKeyboard::poll()` rather than measured, which is the mistake this project
+   otherwise avoids.
+
+   **Next step is to read a number, not to write code.** SYSTEM now has a
+   `KEY HELD` row showing `heldKey()` and `heldPolls()`. Hold `a` on SYSTEM:
+
+   - counter climbs → the repeat is real and `RIFT_LONGPRESS_POLLS` (5, ~500ms) is
+     simply too high; lower it to what the hardware actually reaches.
+   - counter stays 0, or hits 1 and drops → the keyboard reports a key once and
+     never again, there is no key-up either, and **long press does not exist as a
+     signal on this hardware**. The trigger has to become something else: a double
+     tap on the vowel, or a key combination that emits its own code, which
+     `LAST KEY` can now be used to hunt for.
+
+   Sharpest trap, still: `ø` on the air must be UTF-8 `0xC3 0xB8`. `0x01` is a
    display-side placeholder only, and putting it in outgoing text sends a C0
    control byte that other clients may mangle or truncate.
 3. **Report the I²C bus issue upstream.** It costs every T-Deck user four minutes

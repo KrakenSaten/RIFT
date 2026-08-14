@@ -71,6 +71,17 @@ char TDeckKeyboard::poll() {
   // held, so report it only on the transition out of idle. Without this a
   // single press fires repeatedly at our poll rate.
   char emit = (key != 0 && _last_raw == 0) ? key : 0;
+
+  // The repeats the line above discards are the only evidence a key is being
+  // held - this keyboard sends no key-up - so count them rather than throw them
+  // away. Saturates instead of wrapping: a key wedged down for two hours must
+  // not read as freshly pressed.
+  if (key != 0 && key == _last_raw) {
+    if (_held_polls < 0xFFFF) _held_polls++;
+  } else {
+    _held_polls = 0;
+  }
+
   _last_raw = key;
   return emit;
 }
