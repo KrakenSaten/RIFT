@@ -76,8 +76,18 @@ public:
    */
   uint8_t getPayloadVer() const { return (header >> PH_VER_SHIFT) & PH_VER_MASK; }
 
-  uint8_t getPathHashSize() const { return (path_len >> 6) + 1; }
-  uint8_t getPathHashCount() const { return path_len & 63; }
+  // path_len packs the hash size into bits 6-7 and the hop count into bits 0-5.
+  // Exposed as statics too, because callers that hold a stored path_len rather
+  // than a Packet - the advert cache, and the UI drawing hop counts from it -
+  // were otherwise repeating the bit twiddling, and one of them got it wrong.
+  // uint16_t, not uint8_t: the member below is uint16_t, and narrowing it here
+  // would change what these return for any value above 255 rather than just
+  // relocating the arithmetic.
+  static uint8_t pathHashSize(uint16_t path_len) { return (path_len >> 6) + 1; }
+  static uint8_t pathHashCount(uint16_t path_len) { return path_len & 63; }
+
+  uint8_t getPathHashSize() const { return pathHashSize(path_len); }
+  uint8_t getPathHashCount() const { return pathHashCount(path_len); }
   uint8_t getPathByteLen() const { return getPathHashCount() * getPathHashSize(); }
   void setPathHashCount(uint8_t n) { path_len &= ~63; path_len |= n; }
   void setPathHashSizeAndCount(uint8_t sz, uint8_t n) { path_len = ((sz - 1) << 6) | (n & 63); }

@@ -1077,8 +1077,8 @@ public:
 // the hash size minus one and bits 0-5 the number of hops (Mesh.cpp:449). Reading
 // it as a plain count worked only while path_hash_mode was 0 - at 2-byte hashes a
 // two-hop route reads as 66 hops.
-static inline uint8_t riftHopCount(uint8_t path_len) { return path_len & 63; }
-static inline uint8_t riftHashSize(uint8_t path_len) { return (path_len >> 6) + 1; }
+static inline uint8_t riftHopCount(uint8_t path_len) { return mesh::Packet::pathHashCount(path_len); }
+static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::pathHashSize(path_len); }
 
 class RiftConstellationScreen : public UIScreen {
   UITask* _task;

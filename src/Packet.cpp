@@ -11,8 +11,8 @@ Packet::Packet() {
 }
 
 bool Packet::isValidPathLen(uint8_t path_len) {
-  uint8_t hash_count = path_len & 63;
-  uint8_t hash_size = (path_len >> 6) + 1;
+  uint8_t hash_count = pathHashCount(path_len);
+  uint8_t hash_size = pathHashSize(path_len);
   if (hash_size == 4) return false;  // Reserved for future
   return hash_count*hash_size <= MAX_PATH_SIZE;
 }
