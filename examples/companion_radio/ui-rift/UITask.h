@@ -169,6 +169,11 @@ public:
   // the latter used to drop them on MESH wherever they actually were.
   void pushOverlay(RiftScreen* o);
   void dismissOverlay();
+
+  // Real navigation to COMMS, dismissing any popup on the way. The message
+  // preview needs it: Enter there means "show me the full history", and the
+  // history is COMMS.
+  void gotoCommsScreen();
   // last key code the UI saw - reading this on screen is what identified the
   // keyboard co-processor repeating held keys
   int lastKeyCode() const { return _last_key; }

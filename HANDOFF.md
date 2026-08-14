@@ -136,7 +136,16 @@ than any amount of code reading.
   bottom-right = raw (6, 310). Status register 0x814E, bit 7 = data ready, and it
   must be written back to 0 or the controller stops reporting.
 - **Keyboard** is I²C 0x55, polled. The co-processor repeats held keys, so edge
-  detection is required or one Enter fires several times.
+  detection is required or one Enter fires several times. That repeat is also the
+  only signal available for a long-press on a keyboard key — the driver currently
+  throws it away.
+- **`SYM` emits nothing on its own, and is not a spare key.** `SYM`+letter emits
+  the symbol printed on the key, as plain ASCII well under 127, so it already
+  reaches the app: `SYM`+a is 42 `*`, +o is 43 `+`, +e is 50 `2`. It is a working
+  symbol layer, and repurposing it would cost `* + / : ; ' " @ #` and the digits.
+  Settled by putting `TDeckKeyboard::lastSeen()` — the raw byte, recorded before
+  the >127 filter — next to the filtered one on SYSTEM. Those two numbers
+  differing is how to tell a key being discarded from a key that does not exist.
 - **I²C after the RTC probe is broken** until the bus is restarted. A transaction
   to an absent address took ~920 ms, and two callers walk all 112 addresses —
   that was 243 seconds of boot. `radio_init()` now does `Wire.end()` then
@@ -146,7 +155,14 @@ than any amount of code reading.
   `isCDC_Connected()`, which needs the host to *open* the port and returns false
   by design.
 - **CP437 font** has æÆåÅäÄöÖ but no ø/Ø — those are drawn manually as the base
-  letter plus a stroke.
+  letter plus a stroke, keyed on bytes 0x01 and 0x02. Those happen to be CP437's
+  two smiley faces, so they are spent: an incoming smiley cannot be mapped there.
+- **Two byte values are undrawable.** `Adafruit_GFX::write()` special-cases 0x0A
+  as a newline and 0x0D as a carriage return before `drawChar` ever sees them, so
+  a glyph mapped to either renders as nothing at all. 0x0D is CP437's eighth
+  note, and mapping music there made it vanish. `riftNoGlyphAt()` in
+  `RiftLogic.h` states the rule and a test walks the whole mapping table to
+  enforce it.
 - **No watchdog on the main loop.** `loopTaskWDTEnabled = false`, and the IDF task
   WDT only watches core 0 idle. A blocking call will not panic; it silently
   starves LoRa. `WiFi.scanNetworks()` with default arguments blocks 10 s, and
@@ -218,6 +234,19 @@ Checked on device against both bugs the old arrangement caused: a message
 arriving mid-scan no longer disturbs RADAR, and no longer wipes a channel key
 being read on SYSTEM.
 
+The popup lists the six newest messages rather than showing one at a time with
+ENTER to step through — paging cost N presses to clear N messages and told you
+less. ENTER now opens COMMS, which is where the full history and scrolling live.
+Rows follow the COMMS idiom so it reads as a shorter COMMS. The alert box uses
+the same panel language, `bg` fill and accent border, sized to its text: it used
+to fill with `bar`, a band two percent from its own background, and read as a
+stray outline.
+
+Incoming emoji no longer arrive as runs of blocks. Invisible code points —
+variation selectors, ZWJ, skin tones — are dropped rather than drawn, consecutive
+unmappable ones collapse to one block, and the rest map to real glyphs or ASCII
+emoticons where a genuine equivalent exists.
+
 **CI** (`.github/workflows/rift-build-check.yml`, `rift-release.yml`): tests gate
 the builds, all five environments build, third-party actions pinned to SHAs,
 read-only by default with write only on the publish job, and a release is refused
@@ -227,17 +256,30 @@ if the tag and `RIFT_VERSION` disagree.
 compiles clean. `-Werror` is off while ~210 warnings in shared MeshCore code are
 not ours to fix.
 
-**74 native tests**, all runnable locally. They cover the five places that have
+**91 native tests**, all runnable locally. They cover the six places that have
 actually been wrong: base64 key validation, `path_len` decoding, hash collision
-resolution, the mesh-activity thresholds, and screen-transition hooks.
+resolution, the mesh-activity thresholds, screen-transition hooks, and the UTF-8
+to CP437 translation.
 
 ### Open items
 
 1. **Message history does not survive reboot.** RAM-only by design; persisting it
    means new code and flash wear.
-2. **Nordic character input.** Reading works; the keyboard has no Nordic keys and
-   no alt/sym combination produces distinct codes, so entering them needs a
-   software compose scheme.
+2. **Nordic character input.** Reading works; writing does not. The trigger
+   question is settled — see section 3: `SYM` is a working symbol layer, not a
+   spare key, so it cannot host a picker. Long-pressing the base vowel is the
+   plan, using the co-processor's key repeat that the driver currently discards.
+
+   The larger half is the COMMS compose line, which prints `_input` raw. That
+   works only because every keystroke is currently single-byte ASCII. Storing
+   UTF-8 is right for what goes on the air, but then the display needs translating,
+   tail-scrolling has to count characters rather than bytes and never slice
+   mid-sequence, and backspace has to delete a whole code point. The comment above
+   `RiftTextInput` warns against touching that component for good reason.
+
+   Sharpest trap: `ø` on the air must be UTF-8 `0xC3 0xB8`. `0x01` is a
+   display-side placeholder only, and putting it in outgoing text sends a C0
+   control byte that other clients may mangle or truncate.
 3. **Report the I²C bus issue upstream.** It costs every T-Deck user four minutes
    of boot. Measurements are in commit `3528d80a`.
 4. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning the version
@@ -256,6 +298,29 @@ resolution, the mesh-activity thresholds, and screen-transition hooks.
    was deliberately kept out of the refactor.
 8. **Why a single flash write over ~1.2 MB fails.** Section 1 has a working split
    write and what was ruled out, but not a cause.
+9. **Emoji still show as blocks past the mapped set**, and the user reports that
+   as too many for current message traffic. The limit is now fundamental rather
+   than a gap in the table: CP437 has no emoji, and what remains has no honest
+   ASCII synonym — mapping it anyway would put a claim on screen the sender did
+   not make. The route is custom glyphs, drawn through the same `print()`
+   interception that synthesises `ø`. Bounded, but the cell is 6x8 with no
+   antialiasing, so the list has to be chosen for shapes that survive that size.
+   An unrecognisable custom glyph is worse than a block: a block admits it cannot
+   draw the thing, a vague shape looks like it means something specific.
+10. **Chrome rework, queued and agreed.** Drop the top title bar and move its
+    content into the nav bar and the screen bodies: battery to the nav bar's
+    unused right-hand 32px, `MESH` renamed `RIFT` so the wordmark sits bottom
+    left, and `meshcore.io` above the MESH state to front the protocol and
+    distinguish the device from Meshtastic. Six of the fifteen `renderTitleBar`
+    call sites pass `NAV_LABELS` and are redundant, but nine carry computed state
+    that needs a home first. Precedent: the design already moved MESH's link state
+    out of the subtitle into the body, and judged it an improvement.
+    `design/handoff.md` specifies the title bar at y 0..15 and must be updated in
+    the same change.
+11. **README is 580 lines doing four jobs**, and two of them duplicate this file
+    nearly word for word. That duplicate has already drifted twice in one session.
+    The browser flasher link is also buried mid-paragraph under four paragraphs of
+    caveats, and was missed by a real reader looking for it.
 
 ---
 

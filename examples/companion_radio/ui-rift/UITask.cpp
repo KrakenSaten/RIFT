@@ -336,9 +336,14 @@ void riftApplyPalette(bool day) {
   UIColor::primary_txt   = rift_pal.fg;
   UIColor::secondary_txt = rift_pal.mid;
   UIColor::warning_txt   = rift_pal.accent;
+  // corp_blue is not blue on this driver - ST7789NativeDisplay assigns it
+  // ST77XX_ORANGE and calls it the RIFT accent. The name is upstream's; the boot
+  // screen still reads it, so it stays pointed at the accent.
   UIColor::corp_blue     = rift_pal.accent;
-  UIColor::popup_bkg     = rift_pal.bar;
-  UIColor::popup_txt     = rift_pal.fg;
+  // popup_bkg/popup_txt are deliberately not assigned. Nothing in ui-rift reads
+  // them any more: the alert box draws from rift_pal directly, like every other
+  // RIFT surface, rather than through a shared role whose one option was `bar` -
+  // a band two percent from its own background, which is not a popup fill.
 }
 
 RiftBootMark rift_boot_marks[RIFT_BOOT_MARKS];
@@ -2034,13 +2039,16 @@ public:
 
 #endif   // RIFT_RADAR
 
+// How many messages the popup lists. Two rows each at RIFT_LINE_H in the 154px
+// between the header and the hint row is six, with 10px to spare.
+#define RIFT_PREVIEW_ROWS  6
+
 class RiftMsgPreviewScreen : public RiftScreen {
   UITask* _task;
   int num_unread;
-  int _back;    // how far back in the shared log we're previewing
 
 public:
-  RiftMsgPreviewScreen(UITask* task) : _task(task) { num_unread = 0; _back = 0; }
+  RiftMsgPreviewScreen(UITask* task) : _task(task) { num_unread = 0; }
 
   // A popup over whatever the user is doing, not somewhere they navigated to.
   // This is what keeps RADAR's teardown and SYSTEM's secret wipe from firing
@@ -2050,7 +2058,6 @@ public:
   void onNewMsg() {
     if (num_unread < RIFT_MSG_LOG_SIZE) num_unread++;
     rift_nav_unread = num_unread;   // what the nav dot means: unread *here*
-    _back = 0;
   }
 
   // Drawn over the screen the user is on, after its own render() and inside the
@@ -2060,9 +2067,17 @@ public:
   //
   // Not a saving in SPI traffic - endFrame() ships the whole canvas in one burst
   // either way - but it does keep the user's context on screen.
+  //
+  // A list rather than one message with ENTER to step through them, which is what
+  // this was. Paging through an arrival one press at a time told you less than
+  // seeing six at once, and cost N presses to clear N messages. Rows follow the
+  // COMMS idiom exactly - time in dim, sender in mid, body in fg beneath - so
+  // this reads as a shorter COMMS rather than a different view. It is triage;
+  // COMMS is the record.
   int render(DisplayDriver& display) override {
     const int x = 8, w = display.width() - 16;
     const int y = 24, h = display.height() - 24 - 24;
+    const int inner = w - 12;
 
     display.setColor(rift_pal.bg);
     display.fillRect(x, y, w, h);
@@ -2071,56 +2086,88 @@ public:
 
     display.setTextSize(1);
     display.setColor(rift_pal.accent);
-    display.drawTextLeftAlign(x + 6, y + 6, "MESSAGE");
+    display.drawTextLeftAlign(x + 6, y + 6, "MESSAGES");
 
-    char tmp[16];
+    char tmp[40];
     sprintf(tmp, "Unread: %d", num_unread);
     display.setColor(rift_pal.mid);
     display.drawTextRightAlign(x + w - 6, y + 6, tmp);
 
+    int row_y = y + 22;
+    int shown = 0;
+    for (int back = 0; back < RIFT_PREVIEW_ROWS; back++) {
+      auto p = msg_log.peek(back);
+      if (p == NULL) break;
+
+      char filtered_origin[sizeof(p->origin)];
+      riftTranslateUTF8(filtered_origin, p->origin, sizeof(filtered_origin));
+      char filtered_msg[sizeof(p->msg)];
+      riftTranslateUTF8(filtered_msg, p->msg, sizeof(filtered_msg));
+
+      // same sender line as COMMS: time, then the origin, ellipsized rather than
+      // hard-cut so a long name reads as truncated instead of as a shorter name
+      char tbuf[8];
+      sprintf(tbuf, "%02d:%02d", (int) ((p->timestamp / 3600) % 24),
+                                 (int) ((p->timestamp / 60) % 60));
+      display.setColor(rift_pal.dim);
+      display.drawTextLeftAlign(x + 6, row_y, tbuf);
+      display.setColor(rift_pal.mid);
+      display.drawTextEllipsized(x + 42, row_y, inner - 36, filtered_origin);
+
+      display.setColor(rift_pal.fg);
+      display.drawTextEllipsized(x + 6, row_y + RIFT_LINE_H, inner, filtered_msg);
+
+      row_y += RIFT_LINE_H * 2;
+      shown++;
+    }
+
+    if (shown == 0) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(x + 6, y + 22, "no messages");
+    }
+
+    // The hint row doubles as the overflow notice. Anything past the six newest
+    // is in COMMS, which is one key away - there is deliberately no scrolling
+    // here, because scrolling is what COMMS is for.
     display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(x + 6, y + h - 14, "ENTER next   BKSP dismiss");
-
-    auto p = msg_log.peek(_back);
-    if (p == NULL) return 1000;
-
-    display.setColor(rift_pal.mid);
-    char filtered_origin[sizeof(p->origin)];
-    riftTranslateUTF8(filtered_origin, p->origin, sizeof(filtered_origin));
-    display.drawTextLeftAlign(x + 6, y + 24, filtered_origin);
-
-    display.setColor(rift_pal.fg);
-    char filtered_msg[sizeof(p->msg)];
-    riftTranslateUTF8(filtered_msg, p->msg, sizeof(filtered_msg));
-    wrapText(filtered_msg, w - 12, y + 40, &display, x + 6);
+    if (msg_log.count > shown) {
+      sprintf(tmp, "+%d more - ENTER opens COMMS", msg_log.count - shown);
+    } else {
+      strcpy(tmp, "ENTER opens COMMS   BKSP dismiss");
+    }
+    display.drawTextLeftAlign(x + 6, y + h - 14, tmp);
 
     return 1000;
   }
 
   bool handleInput(char c) override {
-    // Enter (and so a trackball click) steps through the unread one at a time -
-    // it used to clear the whole queue, which with click mapped to Enter would
-    // have discarded several messages on a single press.
+    // One press ends it either way. Enter used to advance one message and take N
+    // presses to clear N of them; with trackball click mapped to Enter that was
+    // also easy to overshoot. Now Enter is the way through to the full history and
+    // backspace is the way out.
     if (c == KEY_NEXT || c == KEY_RIGHT || c == KEY_ENTER) {
-      if (_back + 1 < msg_log.count) _back++;
-      num_unread--;
-      if (num_unread <= 0) num_unread = 0;
-      rift_nav_unread = num_unread;   // the nav dot follows what is unread here
-      if (num_unread == 0) {
-        // hands the screen back to whatever was underneath. This called
-        // gotoHomeScreen(), which dropped the user on MESH from anywhere.
-        _task->dismissOverlay();
-      }
+      clearUnread();
+      _task->gotoCommsScreen();
       return true;
     }
     // the preview is an overlay on whatever you were doing - back dismisses it
+    // and hands that screen back untouched
     if (c == RIFT_KEY_BACK) {
-      num_unread = 0;
-      rift_nav_unread = 0;
+      clearUnread();
       _task->dismissOverlay();
       return true;
     }
     return false;
+  }
+
+private:
+  // Dismissing zeroes the count even when more than RIFT_PREVIEW_ROWS arrived, so
+  // strictly it claims more was read than was shown. Accepted deliberately: the
+  // full history is in COMMS and the nav dot means "unread here". Leaving the dot
+  // lit for what scrolled past would recreate the nagging this replaced.
+  void clearUnread() {
+    num_unread = 0;
+    rift_nav_unread = 0;
   }
 };
 
@@ -2887,6 +2934,12 @@ void UITask::dismissOverlay() {
   _next_refresh = 100;
 }
 
+void UITask::gotoCommsScreen() {
+  dismissOverlay();
+  nav_idx = RIFT_NAV_COMMS;
+  setCurrScreen(nav_screens[RIFT_NAV_COMMS]);
+}
+
 /*
   hardware-agnostic pre-shutdown activity should be done here
 */
@@ -3083,14 +3136,30 @@ void UITask::loop() {
         if (od > 0) delay_millis = od;
       }
       if (millis() < _alert_expiry) {
+        // Same panel language as the message overlay: bg fill, accent border. It
+        // used to fill with UIColor::popup_bkg, which riftApplyPalette points at
+        // rift_pal.bar - the title-bar band, two percent from its own background
+        // in both modes - so the box read as a stray outline rather than something
+        // above the screen. bg occludes, and accent as a stroke is legal in both
+        // palettes where accent as text is not.
+        //
+        // Sized to the text rather than to a third of the screen: the widest
+        // string is "Name saved - send advert" at 24 chars, and the old box was
+        // 306x80 with the text sitting 21px into it.
         _display->setTextSize(1);
-        int y = _display->height() / 3;
-        int p = _display->height() / 32;
-        _display->setColor(UIColor::popup_bkg);
-        _display->fillRect(p, y, _display->width() - p*2, y);
-        _display->setColor(UIColor::popup_txt);
-        _display->drawRect(p, y, _display->width() - p*2, y);
-        _display->drawTextCentered(_display->width() / 2, y + p*3, _alert);
+        int tw = (int) strlen(_alert) * RIFT_CHAR_W;
+        int bw = tw + 28;
+        if (bw > _display->width() - 16) bw = _display->width() - 16;
+        int bh = 8 + 14 * 2;
+        int bx = (_display->width() - bw) / 2;
+        int by = (_display->height() - bh) / 2;
+
+        _display->setColor(rift_pal.bg);
+        _display->fillRect(bx, by, bw, bh);
+        _display->setColor(rift_pal.accent);
+        _display->drawRect(bx, by, bw, bh);
+        _display->setColor(rift_pal.fg);
+        _display->drawTextCentered(_display->width() / 2, by + 14, _alert);
         _next_refresh = _alert_expiry;
       } else {
         _next_refresh = millis() + delay_millis;
