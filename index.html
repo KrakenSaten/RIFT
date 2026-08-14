@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash RIFT to a LilyGO T-Deck</title>
+<style>
+  :root {
+    --bg: #0b0f0c;
+    --fg: #b8ffc8;
+    --dim: #6f9d7c;
+    --accent: #8fff6a;
+    --warn: #ffd166;
+    --rule: #1e2c22;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2.5rem 1.25rem 4rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; color: var(--accent); letter-spacing: .04em; }
+  h2 { font-size: 1rem; margin: 2.25rem 0 .6rem; color: var(--accent); }
+  .sub { color: var(--dim); margin: 0 0 2rem; }
+  a { color: var(--accent); }
+  code {
+    background: #121a15;
+    border: 1px solid var(--rule);
+    padding: .1rem .35rem;
+    border-radius: 3px;
+  }
+  pre {
+    background: #121a15;
+    border: 1px solid var(--rule);
+    padding: .8rem 1rem;
+    border-radius: 4px;
+    overflow-x: auto;
+  }
+  pre code { background: none; border: 0; padding: 0; }
+  .flash {
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 1.5rem;
+    margin: 0 0 1.25rem;
+    text-align: center;
+    background: #101710;
+  }
+  .note {
+    border-left: 3px solid var(--warn);
+    padding: .1rem 0 .1rem 1rem;
+    margin: 1.25rem 0;
+    color: #e8dfc0;
+  }
+  ul { padding-left: 1.2rem; }
+  li { margin: .4rem 0; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 2.5rem 0; }
+  footer { color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>RIFT</h1>
+<p class="sub">Radio Intelligence &amp; Field Terminal — firmware for the original LilyGO T-Deck.
+Version <strong id="ver">(loading)</strong>.</p>
+
+<div class="flash">
+  <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+  <p style="color:var(--dim);margin:.9rem 0 0;font-size:13px">
+    Requires Chrome or Edge on desktop. Firefox and Safari have no WebSerial —
+    use the command-line route below.
+  </p>
+</div>
+
+<div class="note">
+  <strong>The first boot can take one to two minutes.</strong> If the boot screen
+  reads <code>Formatting SPIFFS</code>, the filesystem is being created and the
+  device is working — it just cannot show progress, because the format blocks
+  everything else while it runs. Leave it alone and wait it out. We assumed the
+  device was dead the first time we saw it.
+</div>
+
+<h2>What this does to the device</h2>
+<p>The installer writes a merged image at offset 0: bootloader, partition table,
+boot selector and application. Concretely:</p>
+<ul>
+  <li><strong>Your node identity survives.</strong> MeshCore keeps the private
+  key in a file on the SPIFFS partition, which sits at <code>0xc90000</code> —
+  far past the end of this image. Upgrading in place keeps your key, your
+  contacts and your channels.</li>
+  <li><strong>NVS is erased</strong> (<code>0x9000</code> falls inside the image
+  and is filled with <code>0xFF</code>). That holds Arduino-side preferences,
+  not the MeshCore identity.</li>
+  <li><strong>Message history is lost</strong> on every reboot regardless —
+  RIFT's log is RAM-only by design.</li>
+</ul>
+
+<div class="note">
+  <strong>Do not use a full chip erase unless you mean it.</strong> Erasing wipes
+  SPIFFS and therefore the private key. RIFT deliberately disables MeshCore's
+  private-key export command, so there is no way to back the key up first and no
+  way to recover it afterwards. The device comes back as a new node with a new
+  identity, and your contacts will not recognise it.
+</div>
+
+<h2>If the browser cannot see the device</h2>
+<p>The T-Deck's ESP32-S3 uses native USB, which re-enumerates as the firmware
+boots. If no port appears, or the connection drops mid-flash, hold the
+<strong>BOOT</strong> button while plugging the cable in to force the bootloader,
+then try again.</p>
+
+<h2>Command-line route</h2>
+<p>Download <code>*-merged.bin</code> from the
+<a href="https://github.com/KrakenSaten/RIFT/releases">releases page</a> and
+write it with <a href="https://pypi.org/project/esptool/">esptool</a>. Adjust the
+port.</p>
+<pre><code>python -m esptool --chip esp32s3 --port COM5 write-flash 0x0 rift-merged.bin</code></pre>
+<p>To upgrade only the application and leave the bootloader and partition table
+alone, use the plain <code>.bin</code> at the application offset instead:</p>
+<pre><code>python -m esptool --chip esp32s3 --port COM5 write-flash 0x10000 rift.bin</code></pre>
+<p>Those are esptool 5 command names. Esptool 4 &mdash; which is what PlatformIO
+bundles &mdash; spells them with underscores: <code>write_flash</code>. Invoking
+through <code>python -m esptool</code> rather than a bare <code>esptool</code>
+works on both, since the two versions install different console scripts.</p>
+<p>If esptool reports that the port does not exist while it is clearly listed, a
+serial monitor still has it open. Close it and retry.</p>
+
+<h2>Building it yourself</h2>
+<p>Everything here is produced from source by CI; the
+<a href="https://github.com/KrakenSaten/RIFT">repository README</a> has the two
+environment gotchas that cost real time, and the full build instructions.</p>
+
+<hr>
+<footer>
+RIFT is an independent fork of <a href="https://github.com/meshcore-dev/MeshCore">MeshCore</a>
+by Scott Powell and contributors, MIT licensed. The mesh stack, LoRa drivers and
+protocol are theirs; RIFT adds a keyboard-driven terminal UI on top.
+The install button is <a href="https://esphome.github.io/esp-web-tools/">ESP Web Tools</a>,
+loaded from unpkg.
+</footer>
+
+</main>
+
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<script>
+  // show the version straight from the manifest the installer will use, so the
+  // page can never advertise a different build than it flashes
+  fetch('manifest.json')
+    .then(r => r.json())
+    .then(m => { document.getElementById('ver').textContent = m.version; })
+    .catch(() => { document.getElementById('ver').textContent = 'unknown'; });
+</script>
+</body>
+</html>
