@@ -196,7 +196,17 @@ void setup() {
       riftDrawBootScreen(*disp, "Formatting SPIFFS");
       disp->endFrame();
     }
-    SPIFFS.begin(true);
+    if (!SPIFFS.begin(true)) {
+      // Nothing downstream can work without a filesystem - the identity, the
+      // contacts and the channels all live on it - and carrying on would fail
+      // later in ways that look like anything but a dead filesystem.
+      if (disp != NULL) {
+        disp->startFrame();
+        riftDrawBootScreen(*disp, "SPIFFS FAILED");
+        disp->endFrame();
+      }
+      halt();
+    }
   }
   #else
   SPIFFS.begin(true);

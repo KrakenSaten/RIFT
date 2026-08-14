@@ -40,6 +40,21 @@ jobs:
             echo "version=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           fi
 
+      # The device reads RIFT_VERSION from platformio.ini while the release name
+      # comes from the tag, so the two can drift and ship a binary that calls
+      # itself something the release does not. Cheaper to refuse than to detect
+      # later from a screenshot.
+      - name: Tag must match RIFT_VERSION
+        if: github.ref_type == 'tag'
+        run: |
+          FW=$(grep -oP "RIFT_VERSION='\"\K[^\"]+" variants/lilygo_tdeck/platformio.ini)
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "firmware=$FW tag=$TAG"
+          if [ "$FW" != "$TAG" ]; then
+            echo "::error::RIFT_VERSION is $FW but the tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
+
       - name: Build firmware
         env:
           FIRMWARE_VERSION: ${{ steps.version.outputs.version }}

@@ -563,6 +563,18 @@ class RiftSystemScreen : public UIScreen {
   RiftTextInput _edit;
   char _ch_name[32];       // held while the key is being chosen
   char _ch_key[48];        // generated key, shown so it can be typed elsewhere
+public:
+  // Called when the user navigates away. Leaving by trackball or keyboard went
+  // through this screen's own handling, but a tap on the nav bar changes screen
+  // from UITask without asking, and the generated key stayed in _ch_key - so
+  // coming back to SYSTEM redisplayed a secret the user had already dismissed.
+  void onLeave() {
+    memset(_ch_key, 0, sizeof(_ch_key));
+    memset(_edit.buf, 0, sizeof(_edit.buf));
+    _edit.len = 0;
+    _mode = MENU;
+  }
+private:
   int _key_choice;         // 0 = generate, 1 = enter existing
 
   void activate() {
@@ -1090,13 +1102,22 @@ class RiftConstellationScreen : public UIScreen {
   // a straight memcpy from pub_key), so it can be matched against any node we
   // have heard an advert from. Returns -1 when the repeater is not one of them,
   // which is normal - we may never have heard it directly.
+  // A path hash is only the first byte or three of a public key, so more than
+  // one node we know can legitimately match it. Returning the first match named
+  // a repeater with confidence the hash does not justify - a 1-byte hash
+  // collides once in 256. RIFT_HASH_AMBIGUOUS says so instead.
+  static const int RIFT_HASH_AMBIGUOUS = -2;
+
   int findPlottedByHash(const uint8_t* hash, uint8_t len) {
     if (len > sizeof(AdvertPath::pubkey_prefix)) len = sizeof(AdvertPath::pubkey_prefix);
+    int found = -1;
     for (int i = 0; i < _count; i++) {
       if (_plot_x[i] < 0) continue;
-      if (memcmp(hash, _paths[i].pubkey_prefix, len) == 0) return i;
+      if (memcmp(hash, _paths[i].pubkey_prefix, len) != 0) continue;
+      if (found >= 0) return RIFT_HASH_AMBIGUOUS;
+      found = i;
     }
-    return -1;
+    return found;
   }
 
   // DisplayDriver has no line primitive, but every segment here is axis-aligned,
@@ -1188,7 +1209,7 @@ public:
       bool first = true;
       for (int k = 0; k < hops; k++) {
         int via = findPlottedByHash(&sp->path[k * hsz], hsz);
-        if (via < 0) continue;
+        if (via < 0) continue;   // unknown or ambiguous: draw the leg straight
         drawElbow(display, px, py, _plot_x[via] + 2, _plot_y[via] + 2, first);
         px = _plot_x[via] + 2; py = _plot_y[via] + 2;
         first = false;
@@ -1262,7 +1283,9 @@ public:
 
       uint8_t hsz = riftHashSize(p->path_len);
       int via = (hops > 0) ? findPlottedByHash(p->path, hsz) : -1;
-      if (via >= 0) {
+      if (via == RIFT_HASH_AMBIGUOUS) {
+        snprintf(tmp, sizeof(tmp), "via ?, heard %s", when);
+      } else if (via >= 0) {
         char vname[sizeof(p->name)];
         riftTranslateUTF8(vname, _paths[via].name, sizeof(vname));
         if (strlen(vname) > RIFT_NODE_NAME_MAX) vname[RIFT_NODE_NAME_MAX] = 0;
@@ -2089,7 +2112,10 @@ private:
   // Configured channels, cached for the strip. Rebuilt on a timer rather than
   // every frame: render runs on the same SPI bus as the LoRa radio.
   struct ChanTab { char name[20]; uint8_t idx; };
-  ChanTab _tabs[12];
+  // Sized from the configured channel limit rather than a round number: at 12,
+  // channels 13 and up existed, could be picked from the target picker, and
+  // received messages, but never appeared in the strip. 21 bytes each.
+  ChanTab _tabs[MAX_GROUP_CHANNELS];
   int _tab_count;
   int _tab_scroll;
   int _tab_w;                 // recorded at render, so taps hit the same columns
@@ -2164,6 +2190,17 @@ private:
     display.fillRect(0, TABS_Y + 13, display.width(), 1);
   }
 
+  // What actually fits in a channel message. MeshCore puts "<sender>: " in front
+  // of the text and truncates the whole thing at MAX_TEXT_LEN, so the usable
+  // length depends on how long this node's name is - a 20-character name costs
+  // 22 characters of message.
+  int channelCapacity() const {
+    if (!_target_is_channel) return MAX_TEXT_LEN;
+    int prefix = strlen(the_mesh.getNodeName()) + 2;   // name, colon, space
+    int cap = MAX_TEXT_LEN - prefix;
+    return (cap < 0) ? 0 : cap;
+  }
+
   bool getTargetChannel(ChannelDetails& ch) {
     return the_mesh.getChannel(_target_channel_idx, ch) && ch.name[0] != 0;
   }
@@ -2221,13 +2258,22 @@ private:
       return;
     }
 
+    // BaseChatMesh prepends "<name>: " and then silently truncates the packet to
+    // MAX_TEXT_LEN. Truncate here too, so the history shows what was transmitted
+    // rather than what was typed.
+    int cap = channelCapacity();
+    int sent_len = (_len > cap) ? cap : _len;
+    char sent[MAX_TEXT_LEN + 1];
+    memcpy(sent, _input, sent_len);
+    sent[sent_len] = 0;
+
     bool ok = the_mesh.sendGroupMessage(the_mesh.getRTCClock()->getCurrentTime(),
                                         ch.channel, the_mesh.getNodeName(),
-                                        _input, _len);
+                                        sent, sent_len);
     if (ok) {
       char origin[62];
       sprintf(origin, "%s:", the_mesh.getNodeName());
-      msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, _input, true);
+      msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, sent, true);
       clearInput();
     } else {
       _task->showAlert("Send failed", 1200);
@@ -2474,8 +2520,9 @@ public:
     } else {
       // MeshCore truncates at MAX_TEXT_LEN, so show how close the message is
       char cnt[12];
-      sprintf(cnt, "%d/%d", _len, MAX_TEXT_LEN);
-      display.setColor(_len >= MAX_TEXT_LEN ? rift_pal.accent : rift_pal.dim);
+      int cap = channelCapacity();
+      sprintf(cnt, "%d/%d", _len, cap);
+      display.setColor(_len >= cap ? rift_pal.accent : rift_pal.dim);
       display.drawTextRightAlign(display.width() - 2, INPUT_Y, cnt);
     }
 
@@ -2542,7 +2589,7 @@ public:
       return true;
     }
 
-    if (c >= 32 && c < 127 && _len < MAX_TEXT_LEN) {
+    if (c >= 32 && c < 127 && _len < channelCapacity()) {
       _input[_len++] = c;
       _input[_len] = 0;
       return true;
@@ -2737,6 +2784,13 @@ void UITask::setCurrScreen(UIScreen* c) {
     if (is_nav) ((RiftRadarScreen *) nav_screens[RIFT_NAV_RADAR])->setActive(c == nav_screens[RIFT_NAV_RADAR]);
   }
 #endif
+  // A secret shown on SYSTEM must not survive being navigated away from. The
+  // screen's own key handling cleared it, but a nav-bar tap changes screens from
+  // here without consulting it.
+  if (curr != c && curr == nav_screens[RIFT_NAV_SYSTEM] && nav_screens[RIFT_NAV_SYSTEM] != NULL) {
+    ((RiftSystemScreen *) nav_screens[RIFT_NAV_SYSTEM])->onLeave();
+  }
+
   curr = c;
   _next_refresh = 100;
 }
@@ -2849,6 +2903,13 @@ void UITask::loop() {
     if (key != 0) c = checkDisplayOn(key);
   }
 #endif
+  // The screen that was showing when the key was pressed. Touch is polled after
+  // the keyboard and can navigate elsewhere, so dispatching to curr afterwards
+  // delivered the keystroke to a screen the user was not looking at when they
+  // typed it - an ENTER meant for COMMS arriving at whatever the nav-bar tap had
+  // just selected.
+  UIScreen* key_target = curr;
+
 #ifdef RIFT_INPUT_TOUCH
   {
     int tx, ty;
@@ -2887,8 +2948,8 @@ void UITask::loop() {
 #endif
 
   if (c != 0) _last_key = (int) (unsigned char) c;
-  if (c != 0 && curr) {
-    curr->handleInput(c);
+  if (c != 0 && key_target) {
+    key_target->handleInput(c);
     _auto_off = millis() + AUTO_OFF_MILLIS;
     _next_refresh = 100;
   }
