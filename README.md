@@ -198,6 +198,42 @@ upstream stay conflict-free.
 
 ## Screens and controls
 
+<table>
+<tr>
+<td width="50%"><img src="design/screens/mesh.png" alt="MESH: the link state CONNECTED set large on the left, a radar box with one blip on the right, node count and link RSSI/SNR beneath, and the radio configuration line" width="100%"></td>
+<td width="50%"><img src="design/screens/nodes.png" alt="NODES: four columns headed DIRECT, 1 HOP, 2 HOPS and 3 HOPS, with node markers and names, a route line drawn from YOU through two repeaters to the selected node, and a detail bar showing the selected node and ENTER: DM" width="100%"></td>
+</tr>
+<tr>
+<td><strong>MESH</strong> — am I on the network</td>
+<td><strong>NODES</strong> — who I can reach, and how far away</td>
+</tr>
+<tr>
+<td><img src="design/screens/radar.png" alt="RADAR: the device count 35 set large, DEVICES NEARBY beside it, a signal-strength band strip, and a list of the strongest devices with dBm, name and type" width="100%"></td>
+<td><img src="design/screens/system.png" alt="SYSTEM: an ACTIONS menu on the left with the first item highlighted and an explanatory note beneath it, DIAGNOSTICS in a label-and-value column on the right, and a footer reading PRIVATE KEY EXPORT DISABLED" width="100%"></td>
+</tr>
+<tr>
+<td><strong>RADAR</strong> — is there anything around me, and is that changing</td>
+<td><strong>SYSTEM</strong> — actions left, read-only diagnostics right</td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="50%"><img src="design/screens/nodes-night.png" alt="NODES in night mode: white text and markers on black, with the accent in orange" width="100%"></td>
+<td width="50%"><img src="design/screens/nodes-day.png" alt="NODES in day mode: black text and markers on white, with the same orange accent used as a fill rather than as text" width="100%"></td>
+</tr>
+<tr>
+<td colspan="2"><strong>Night and day</strong> — the same geometry with a swapped colour table, toggled from SYSTEM. Note that the accent is the same value in both, but on white it becomes a fill with the text reversed out of it rather than text in its own right.</td>
+</tr>
+</table>
+
+> These are the design renderings from `design/`, drawn at 1:1 device
+> resolution and shown at 2x — not photographs of the panel. The firmware follows
+> them closely but not pixel-for-pixel: the SYSTEM menu carries a sixth item for
+> day mode, the diagnostics column has two extra rows for boot timings, and the
+> proposed wordmark is still drawn as `setTextSize(3)` text because it would need
+> hand-pixelling as a 1-bit bitmap first.
+
 **Trackball click is Enter** — it selects, activates and sends, the same as the
 keyboard's Enter. Screen changes are covered by **rolling the trackball
 left/right**, **double-click** (previous screen), or **tapping a nav-bar tab**.
@@ -239,7 +275,8 @@ acknowledgement, so there is nothing truthful to display.
 ## The screen design
 
 The five on-device screens follow a design handoff
-(`logo/RIFT design review.zip`), written against this repo's actual constraints:
+(`design/`, with the original archive kept alongside it), written against
+this repo's actual constraints:
 the 6x8 Adafruit GFX cell with only whole-integer scaling, `DisplayDriver`'s
 primitives, and the SPI bus shared with the SX1262. Every coordinate in it is a
 real device coordinate.
@@ -480,14 +517,16 @@ only adds a T-Deck UI and does not track their releases.
 
 ## Status
 
-**Current version: 0.2.0** — set by the `RIFT_VERSION` build flag and shown on
+**Current version: 0.3.0** — set by the `RIFT_VERSION` build flag and shown on
 the boot screen and SYSTEM, alongside the MeshCore version it is built on.
 Deliberately 0.x: it works and is verified on hardware, but it has had no
 external users and the limitations above are real.
 
-0.2.0 adds a browser flasher and a boot screen, disables MeshCore's private-key
-export, and takes boot from 243 seconds to 5.1 by restoring the I²C bus after the
-RTC probe. Everything in it is verified on hardware. `FIRMWARE_VERSION` is left as
+0.3.0 rebuilds all five screens to the design in `design/`, and fixes four real
+bugs found along the way. 0.2.0 added the browser flasher and the boot screen,
+disabled MeshCore's private-key export, and took boot from 243 seconds to 5.1 by
+restoring the I²C bus after the RTC probe. Everything in both is verified on
+hardware. `FIRMWARE_VERSION` is left as
 upstream MeshCore's, since that string is reported over the companion protocol
 next to `FIRMWARE_VER_CODE`.
 
