@@ -38,6 +38,12 @@ void riftApplyPalette(bool day);
 // from thirteen places - can draw its dot without changing every signature.
 extern int rift_nav_unread;
 
+// Battery percentage, mirrored for the same reason. It moved from the title bar
+// to the nav bar, which had 32px of unused width to the right of SYSTEM.
+// Computed once per frame in loop(); the title bar used to read the ADC on every
+// call instead.
+extern int rift_nav_batt_pct;
+
 // RIFT's screens need four things UIScreen has no notion of. They live here
 // rather than in src/helpers/ui/UIScreen.h deliberately: that header is shared
 // with ui-new, ui-orig and ui-tiny, and RIFT's diff against upstream MeshCore is

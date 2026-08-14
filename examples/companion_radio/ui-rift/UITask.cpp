@@ -50,7 +50,9 @@
   #define PRESS_LABEL "long press"
 #endif
 
-static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "MESH", "NODES", "RADAR", "COMMS", "SYSTEM" };
+// The first slot is the wordmark as well as the home destination - logo as home.
+// The RIFT_NAV_MESH constant keeps its name in code; only the label changed.
+static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COMMS", "SYSTEM" };
 
 // channel the COMMS screen starts on; any configured channel can be selected
 // from the target picker at runtime
@@ -255,45 +257,47 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
     display.setColor(rift_pal.accent);
     display.fillRect(246, 227, 3, 3);
   }
+
+  // Battery, moved down from the title bar into space that was already here:
+  // SYSTEM is centred at 270 and ends at 288, leaving 32px to the right edge, and
+  // "100%" is 24px. The active-tab underline runs to 320 under it but sits at
+  // y 226..228 while this text occupies 228..236, so they do not touch.
+  //
+  // mid rather than fg: this is chrome, and fg would make it compete with the
+  // active nav label. accent when low, which is the one case worth interrupting.
+  char batt[8];
+  sprintf(batt, "%d%%", rift_nav_batt_pct);
+  display.setColor(rift_nav_batt_pct <= 15 ? rift_pal.accent : rift_pal.mid);
+  display.drawTextRightAlign(display.width() - 2, 228, batt);
 }
 
-// Compact top status bar shared by every RIFT nav screen: title + battery %.
-static void renderTitleBar(DisplayDriver& display, UITask* task, const char* subtitle) {
-  display.setColor(rift_pal.bar);
-  display.fillRect(0, 0, display.width(), 16);
-
-  display.setTextSize(1);
-  if (rift_day_mode) {
-    // the accent is only 3.5:1 on white, below the readable floor, so on the
-    // light field it becomes a fill with the wordmark reversed out of it
-    display.setColor(rift_pal.accent);
-    display.fillRect(0, 0, 30, 16);
-    display.setColor(0xFFFF);
-  } else {
-    display.setColor(rift_pal.accent);
-  }
-  display.setCursor(2, 4);
-  display.print("RIFT");
-
-  display.setColor(rift_pal.mid);
-  display.setCursor(40, 4);
-  display.print(subtitle);
-
-  // battery percentage, top-right
 #ifndef BATT_MIN_MILLIVOLTS
   #define BATT_MIN_MILLIVOLTS 3000
 #endif
 #ifndef BATT_MAX_MILLIVOLTS
   #define BATT_MAX_MILLIVOLTS 4200
 #endif
-  uint16_t mv = task->getBattMilliVolts();
-  int pct = ((mv - BATT_MIN_MILLIVOLTS) * 100) / (BATT_MAX_MILLIVOLTS - BATT_MIN_MILLIVOLTS);
-  if (pct < 0) pct = 0;
-  if (pct > 100) pct = 100;
-  char batt[8];
-  sprintf(batt, "%d%%", pct);
-  display.setColor(pct <= 15 ? rift_pal.accent : rift_pal.fg);
-  display.drawTextRightAlign(display.width() - 2, 4, batt);
+
+// Compact top status bar: per-screen context only now.
+//
+// The wordmark moved to the nav bar, where the first tab is labelled RIFT rather
+// than MESH - logo as home. Its day-mode treatment did not come with it: the
+// design gave it an accent fill with the letters reversed out, because accent is
+// only 3.5:1 on white and below the readable floor as text. A 64px nav column
+// that may already carry the accent underline has nowhere to put that, so RIFT is
+// a nav label like the other four. Deliberate, not lost.
+//
+// The battery moved down as well, so all the chrome is on one edge. What is left
+// here is the subtitle, and this whole bar is due to go - see the open items.
+static void renderTitleBar(DisplayDriver& display, UITask* task, const char* subtitle) {
+  (void) task;   // battery is read once per frame in loop() now
+  display.setColor(rift_pal.bar);
+  display.fillRect(0, 0, display.width(), 16);
+
+  display.setTextSize(1);
+  display.setColor(rift_pal.mid);
+  display.setCursor(2, 4);
+  display.print(subtitle);
 }
 
 // RGB565 straight from the design handoff. Night and day are the same geometry
@@ -324,6 +328,7 @@ static const RiftPalette RIFT_DAY = {
 RiftPalette rift_pal = RIFT_NIGHT;
 bool rift_day_mode = false;
 int rift_nav_unread = 0;
+int rift_nav_batt_pct = 0;
 
 void riftApplyPalette(bool day) {
   rift_day_mode = day;
@@ -462,9 +467,21 @@ public:
       default:               state = "NO SIGNAL"; state_col = rift_pal.accent; break;
     }
 
+    // The protocol, not the screen name - the nav bar carries that. LoRa
+    // handhelds are dominated by Meshtastic and a T-Deck looks like one, so
+    // saying which mesh stack this is answers a question people actually ask.
+    // It is also something the firmware knows for certain, being compiled in.
+    //
+    // Lowercase, against the all-caps convention of every other piece of chrome
+    // here. A URL in capitals reads worse and less like an address. Deliberate.
+    //
+    // In mid for now, following the label it replaced. MeshCore's brand blue is a
+    // separate open item: it needs the real value and a contrast check in both
+    // palettes, and a saturated blue is likely to fail on black the way the accent
+    // fails on white.
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 18, "MESH");
+    display.drawTextLeftAlign(2, 18, "meshcore.io");
     display.setTextSize(3);
     display.setColor(state_col);
     display.drawTextLeftAlign(2, 30, state);
@@ -3126,6 +3143,13 @@ void UITask::loop() {
 
   if (_display != NULL && _display->isOn()) {
     if (millis() >= _next_refresh && curr) {
+      // Once per frame, for the nav bar to draw. The title bar used to read the
+      // ADC inside its own render, so this is no more work - just in one place.
+      {
+        int mv = (int) getBattMilliVolts();
+        int pct = ((mv - BATT_MIN_MILLIVOLTS) * 100) / (BATT_MAX_MILLIVOLTS - BATT_MIN_MILLIVOLTS);
+        rift_nav_batt_pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+      }
       _display->startFrame();
       int delay_millis = curr->render(*_display);
       // Popup, then alert box: three layers into one canvas, one bulk transfer
