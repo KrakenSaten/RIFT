@@ -206,7 +206,11 @@ static void riftTranslateUTF8(char* dest, const char* src, size_t dest_size) {
     }
 
     if (c >= 0x80) {   // anything else non-ASCII: block, as before
-      dest[j++] = 'Û';
+      // 0xDB is the CP437 full block. Writing it as a character literal made it
+      // a two-byte multi-character constant - this file is UTF-8 - which
+      // narrowed to 0x9B, a cent sign in CP437. Every unmappable character was
+      // drawn as the wrong glyph.
+      dest[j++] = (char) 0xDB;
       while (src[i + 1] && (src[i + 1] & 0xC0) == 0x80) i++;
     }
   }
@@ -895,8 +899,8 @@ public:
       LocationProvider* nmea = sensors.getLocationProvider();
       display.setColor(rift_pal.fg);
       if (nmea != NULL && nmea->isValid()) {
-        sprintf(tmp, "%s, %d sat", _task->getGPSState() ? "on" : "off",
-                nmea->satellitesCount());
+        snprintf(tmp, sizeof(tmp), "%s, %ld sat", _task->getGPSState() ? "on" : "off",
+                 (long) nmea->satellitesCount());
       } else {
         sprintf(tmp, "%s, no fix", _task->getGPSState() ? "on" : "off");
       }
@@ -1814,7 +1818,7 @@ public:
     display.fillRect(0, 196, display.width(), 1);
     display.setColor(rift_pal.mid);
     if (wf_count > 0) {
-      sprintf(tmp, "busiest CH%d - quietest CH%d", busiest, quietest);
+      snprintf(tmp, sizeof(tmp), "busiest CH%d - quietest CH%d", busiest, quietest);
       display.drawTextLeftAlign(2, 206, tmp);
     }
     display.drawTextRightAlign(display.width() - 2, 206, "ENTER: back");
@@ -2368,7 +2372,7 @@ private:
     if (total > rows) {
       display.setColor(UIColor::secondary_txt);
       char pos[16];
-      sprintf(pos, "%d/%d", _pick_idx + 1, total);
+      snprintf(pos, sizeof(pos), "%d/%d", _pick_idx + 1, total);
       display.drawTextRightAlign(display.width() - 4, BODY_TOP + 4, pos);
     }
 
@@ -2426,12 +2430,15 @@ private:
   }
 
 public:
+  // Order follows the declarations, which is the order they are actually
+  // constructed in regardless of what is written here.
   RiftCommsScreen(UITask* task)
      : _task(task), _len(0), _scroll(0),
-       _tab_count(0), _tab_scroll(0), _tab_w(0), _last_tabs_refresh(0), _tabs_refreshed_once(false),
        _target_is_channel(true), _target_channel_idx(RIFT_PUBLIC_CHANNEL_IDX),
        _picking(false), _pick_idx(0), _pick_scroll(0), _pick_count(0),
-       _pick_truncated(false) {
+       _pick_truncated(false),
+       _tab_count(0), _tab_scroll(0), _tab_w(0),
+       _last_tabs_refresh(0), _tabs_refreshed_once(false) {
     _input[0] = 0;
     _target_name[0] = 0;
     memset(_target_key, 0, sizeof(_target_key));
