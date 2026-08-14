@@ -22,6 +22,17 @@
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 
+// Boot phase timing. setup() runs with no watchdog and several of its steps can
+// block for a long time - the filesystem mount most of all - so a slow boot gives
+// no clue which step is responsible. These marks record when each phase finished
+// and are shown on SYSTEM, which is the only console a field device has.
+#define RIFT_BOOT_MARKS 16
+struct RiftBootMark { const char* name; uint32_t at_ms; };
+extern RiftBootMark rift_boot_marks[RIFT_BOOT_MARKS];
+extern uint8_t rift_boot_mark_count;
+void riftBootMark(const char* name);
+#define RIFT_MARK(n)  riftBootMark(n)
+
 // Draws the RIFT boot screen. Lives outside UITask because main.cpp has to draw
 // it during setup(), before the UI task exists - see the SPIFFS format probe
 // there. Pass a status line, or NULL for none. Caller owns startFrame/endFrame.

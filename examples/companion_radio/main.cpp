@@ -103,6 +103,10 @@ MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store
 
 /* END GLOBAL OBJECTS */
 
+#ifndef RIFT_MARK
+  #define RIFT_MARK(n)
+#endif
+
 void halt() {
   while (1) ;
 }
@@ -139,8 +143,10 @@ void setup() {
     disp->endFrame();
   }
 #endif
+  RIFT_MARK("disp");
 
   if (!radio_init()) { halt(); }
+  RIFT_MARK("radio");
 
   fast_rng.begin(radio_driver.getRngSeed());
 
@@ -195,7 +201,9 @@ void setup() {
   #else
   SPIFFS.begin(true);
   #endif
+  RIFT_MARK("fs");
   store.begin();
+  RIFT_MARK("store");
   the_mesh.begin(
     #ifdef DISPLAY_CLASS
         disp != NULL
@@ -253,8 +261,20 @@ void setup() {
   interface_manager.addInterface(InterfaceType::HardwareSerial, &hardware_serial_interface);
 #endif
 
+  RIFT_MARK("mesh");
   the_mesh.startInterface(interface_manager);
+  RIFT_MARK("iface");
+#ifdef RIFT_DISPLAY
+  // One transaction to an address nothing answers on. If this alone costs about
+  // a second, then the 112-address scans inside sensors.begin() and the keyboard
+  // driver explain the whole slow boot, and the bus - not the scanning code - is
+  // what needs fixing.
+  Wire.beginTransmission(0x7F);
+  Wire.endTransmission();
+  RIFT_MARK("i2c1");
+#endif
   sensors.begin();
+  RIFT_MARK("sensors");
 
 #if ENV_INCLUDE_GPS == 1
   the_mesh.applyGpsPrefs();
@@ -263,11 +283,13 @@ void setup() {
 #ifdef DISPLAY_CLASS
   ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());  // still want to pass this in as dependency, as prefs might be moved
 #endif
+  RIFT_MARK("ui");
 
   board.onBootComplete();
 }
 
 void loop() {
+  { static bool first = true; if (first) { first = false; RIFT_MARK("loop1"); } }
   the_mesh.loop();
   interface_manager.loop();
   sensors.loop();

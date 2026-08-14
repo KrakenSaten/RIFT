@@ -174,7 +174,9 @@ it before retrying.
 
 **First boot after switching firmware may reformat SPIFFS**, which takes one to
 two minutes. The boot screen says `Formatting SPIFFS` when that is happening.
-Wait it out rather than resetting.
+Wait it out rather than resetting. An ordinary boot takes about five seconds; if
+it takes materially longer, SYSTEM shows `boot:` and `slowest:` so the phase
+responsible can be named rather than guessed at.
 
 ### Other environments
 
@@ -372,11 +374,30 @@ instead, so this has not mattered in practice.
 
 ### An upstream bug worked around here
 
-`variants/lilygo_tdeck/target.cpp` runs the RTC auto-discovery I²C probe
-*before* `Wire.begin(18, 8)` on the following line, so the bus is touched
-uninitialised. The symptom is an apparently empty I²C bus — the keyboard is not
-found at all. `TDeckKeyboard::begin()` detects an empty bus and re-initialises
-it on the known pins. **The real fix belongs upstream**, in the ordering.
+**The I²C bus is left unusable by the RTC probe, and it cost four minutes of
+boot.** In `variants/lilygo_tdeck/target.cpp`, `rtc_clock.begin(Wire)` runs the
+RTC auto-discovery probe. Afterwards, a transaction to an address nothing answers
+on takes about **920 ms**, where a NACK should cost microseconds — measured on
+hardware, and eighteen times the Arduino default timeout of 50 ms, so it is not
+the timeout doing it.
+
+Two callers walk all 112 addresses: `EnvironmentSensorManager::begin()` and
+`TDeckKeyboard::begin()`. That was 113 and 125 seconds. Boot took **243
+seconds**, and none of it was visible — `setup()` prints nothing to the display,
+so it simply looked like a hang.
+
+Ending and restarting the bus restores normal timing, so `radio_init()` now does
+`Wire.end()` then `Wire.begin(18, 8, 100000)` immediately after the probe. Boot
+went from 243 seconds to **5.1 seconds**, of which 2.5 is the splash screen and
+1.0 is the GPS detection delay. `TDeckKeyboard::begin()` already did exactly this
+recovery to find its co-processor at all; doing it centrally means every user of
+the bus gets a working one. That code stays as a safety net.
+
+This is a workaround, not a diagnosis: **why** the probe leaves the peripheral in
+that state is not established, and the honest fix belongs upstream. All four
+stock T-Deck environments have the same bug and get the same benefit, since the
+variant file is shared. Boot-phase timings are on the SYSTEM screen — `boot:` and
+`slowest:` — so a regression here is visible rather than mysterious.
 
 Similarly, `DisplayDriver::printWordWrap()` is only a default that forwards to
 `print()` and is not overridden by the native driver, so Adafruit GFX wraps to

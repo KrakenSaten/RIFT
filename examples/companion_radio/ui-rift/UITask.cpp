@@ -303,6 +303,16 @@ static void renderTitleBar(DisplayDriver& display, UITask* task, const char* sub
   display.drawTextRightAlign(display.width() - 2, 4, batt);
 }
 
+RiftBootMark rift_boot_marks[RIFT_BOOT_MARKS];
+uint8_t rift_boot_mark_count = 0;
+
+void riftBootMark(const char* name) {
+  if (rift_boot_mark_count >= RIFT_BOOT_MARKS) return;
+  rift_boot_marks[rift_boot_mark_count].name = name;
+  rift_boot_marks[rift_boot_mark_count].at_ms = millis();
+  rift_boot_mark_count++;
+}
+
 // MeshCore's version string carries a build suffix; the boot screen only wants
 // the part before the dash.
 static void riftShortMeshCoreVersion(char* out, size_t out_sz) {
@@ -369,6 +379,7 @@ public:
 
   void poll() override {
     if (millis() >= dismiss_after) {
+      RIFT_MARK("home");
       _task->gotoHomeScreen();
     }
   }
@@ -747,6 +758,36 @@ public:
     sprintf(tmp, "last reset: %s", rr);
     display.drawTextLeftAlign(4, y, tmp);
     y += RIFT_LINE_H;
+
+    // How long boot took, and which two phases cost the most. Dumping all the
+    // marks ran off the bottom of the screen and answered the question less
+    // directly than naming the culprit does.
+    if (rift_boot_mark_count > 0) {
+      sprintf(tmp, "boot: %u ms", (unsigned) rift_boot_marks[rift_boot_mark_count - 1].at_ms);
+      display.drawTextLeftAlign(4, y, tmp);
+      y += RIFT_LINE_H;
+
+      int worst = -1, second = -1;
+      uint32_t worst_ms = 0, second_ms = 0;
+      for (int i = 0; i < rift_boot_mark_count; i++) {
+        uint32_t prev = (i == 0) ? 0 : rift_boot_marks[i - 1].at_ms;
+        uint32_t gap = rift_boot_marks[i].at_ms - prev;
+        if (gap > worst_ms) {
+          second = worst; second_ms = worst_ms;
+          worst = i; worst_ms = gap;
+        } else if (gap > second_ms) {
+          second = i; second_ms = gap;
+        }
+      }
+      sprintf(tmp, "slowest: %s +%u", rift_boot_marks[worst].name, (unsigned) worst_ms);
+      if (second >= 0) {
+        char part[24];
+        sprintf(part, "  %s +%u", rift_boot_marks[second].name, (unsigned) second_ms);
+        strcat(tmp, part);
+      }
+      display.drawTextLeftAlign(4, y, tmp);
+      y += RIFT_LINE_H;
+    }
 
     sprintf(tmp, "RIFT v%s on MeshCore %s", RIFT_VERSION, FIRMWARE_VERSION);
     display.drawTextLeftAlign(4, y, tmp);
@@ -2116,12 +2157,15 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   analog_btn.begin();
 #endif
 #ifdef RIFT_INPUT_TRACKBALL
+  RIFT_MARK("ui0");
   rift_trackball.begin();
 #endif
 #ifdef RIFT_INPUT_KEYBOARD
+  RIFT_MARK("ball");
   rift_keyboard.begin();
 #endif
 #ifdef RIFT_INPUT_TOUCH
+  RIFT_MARK("kbd");
   rift_touch.begin();
 #endif
 

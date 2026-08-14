@@ -33,8 +33,24 @@ EnvironmentSensorManager sensors(gps);
 
 bool radio_init() {
   fallback_clock.begin();
-  rtc_clock.begin(Wire);
   Wire.begin(18, 8);
+  rtc_clock.begin(Wire);
+
+  // Measured on hardware: after the RTC auto-discovery probe, a transaction to
+  // an address nothing answers on takes ~920ms instead of the microseconds a
+  // NACK should cost. EnvironmentSensorManager::begin() and TDeckKeyboard::begin()
+  // each walk all 112 addresses, which was about four minutes of boot before the
+  // mesh screen appeared.
+  //
+  // Ending and restarting the bus restores normal timing. TDeckKeyboard already
+  // did exactly this to find its co-processor at all - doing it here instead
+  // means every later user of the bus gets a working one, not just the keyboard.
+  // Why the probe leaves the peripheral in that state is not established; this
+  // treats the symptom, and the boot-phase timings on SYSTEM show whether it
+  // still works.
+  Wire.end();
+  Wire.begin(18, 8, 100000UL);
+  Wire.setTimeOut(50);   // bound any transaction that still misbehaves
 
 #if defined(P_LORA_SCLK)
   return radio.std_init(&spi);
