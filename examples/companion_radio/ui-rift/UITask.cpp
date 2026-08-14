@@ -248,7 +248,25 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
 
   display.setTextSize(1);
   for (int i = 0; i < RIFT_NAV_COUNT; i++) {
-    display.setColor(i == curr_idx ? rift_pal.fg : rift_pal.dim);
+    // The wordmark slot gets the brand colour, but only while it is the active
+    // tab, and by the accent's two documented roles: legible as text at 6.0:1 on
+    // black, fill-only at 3.5:1 on white.
+    //
+    // Only while active, because an accent fill *is* the active signal in this
+    // design - a permanent orange chip on one tab would read as selected from
+    // every screen and undermine the one thing the underline says. Inactive, RIFT
+    // is dim like the other four.
+    if (i == RIFT_NAV_MESH && i == curr_idx) {
+      if (rift_day_mode) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y_rule + 2, 64, 12);
+        display.setColor(0xFFFF);
+      } else {
+        display.setColor(rift_pal.accent);
+      }
+    } else {
+      display.setColor(i == curr_idx ? rift_pal.fg : rift_pal.dim);
+    }
     display.drawTextCentered(NAV_CENTRE_X[i], 228, NAV_LABELS[i]);
   }
 
@@ -278,26 +296,25 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   #define BATT_MAX_MILLIVOLTS 4200
 #endif
 
-// Compact top status bar: per-screen context only now.
+// Where a screen is, in one line at the top of its own body.
 //
-// The wordmark moved to the nav bar, where the first tab is labelled RIFT rather
-// than MESH - logo as home. Its day-mode treatment did not come with it: the
-// design gave it an accent fill with the letters reversed out, because accent is
-// only 3.5:1 on white and below the readable floor as text. A 64px nav column
-// that may already carry the accent underline has nowhere to put that, so RIFT is
-// a nav label like the other four. Deliberate, not lost.
+// This replaced a filled 16px title bar that carried the wordmark, the battery
+// and this text. The first two moved to the nav bar, so all the chrome is on one
+// edge; what was left was a band whose only content was context, and on the
+// screens where that context was just the screen name it was saying nothing the
+// nav bar did not already say.
 //
-// The battery moved down as well, so all the chrome is on one edge. What is left
-// here is the subtitle, and this whole bar is due to go - see the open items.
-static void renderTitleBar(DisplayDriver& display, UITask* task, const char* subtitle) {
-  (void) task;   // battery is read once per frame in loop() now
-  display.setColor(rift_pal.bar);
-  display.fillRect(0, 0, display.width(), 16);
-
+// Screens with nothing to add do not call this at all. Eleven of the fourteen old
+// call sites did have something: which step of SYSTEM's channel flow you are in,
+// which channel or contact COMMS is aimed at, how many nodes NODES has heard,
+// whether RADAR is scanning. Those are worth a line; a band was not.
+//
+// Same position as the old subtitle, minus the fill - so it reads as the screen's
+// heading rather than as chrome sitting above it.
+static void renderHeading(DisplayDriver& display, const char* text) {
   display.setTextSize(1);
   display.setColor(rift_pal.mid);
-  display.setCursor(2, 4);
-  display.print(subtitle);
+  display.drawTextLeftAlign(2, 2, text);
 }
 
 // RGB565 straight from the design handoff. Night and day are the same geometry
@@ -444,7 +461,6 @@ public:
      : _task(task), _node_prefs(node_prefs), _tick(0) { }
 
   int render(DisplayDriver& display) override {
-    renderTitleBar(display, _task, NAV_LABELS[RIFT_NAV_MESH]);
 
     // The headline is mesh receive activity, which is the question this screen
     // exists to answer. It used to be the USB/BLE companion link - honest about
@@ -479,12 +495,14 @@ public:
     // separate open item: it needs the real value and a contrast check in both
     // palettes, and a saturated blue is likely to fail on black the way the accent
     // fails on white.
+    // Up 14px from where the title bar used to end. This screen has no heading -
+    // the nav bar says RIFT - so the masthead sits at the very top instead.
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 18, "meshcore.io");
+    display.drawTextLeftAlign(2, 4, "meshcore.io");
     display.setTextSize(3);
     display.setColor(state_col);
-    display.drawTextLeftAlign(2, 30, state);
+    display.drawTextLeftAlign(2, 16, state);
 
     // Show the age and the count, not just the verdict. Every hardware problem
     // on this project was settled by putting the real value on screen, and a
@@ -589,7 +607,10 @@ class RiftSystemScreen : public RiftScreen {
     }
   }
 
-  static const int MENU_TOP = 34;   // shared by render() and handleTouch()
+  // shared by render() and handleTouch(), so touch targets follow the layout.
+  // Up 14 from 34 when the title bar went: this screen has no heading, because
+  // the nav bar already says SYSTEM, and the strip it left behind was empty.
+  static const int MENU_TOP = 20;
 
 public:
   // True while a text field is open or a generated key is on screen. A message
@@ -712,7 +733,7 @@ private:
   }
 
   int renderChannelName(DisplayDriver& display) {
-    renderTitleBar(display, _task, "NEW CHANNEL");
+    renderHeading(display, "NEW CHANNEL");
     display.setTextSize(1);
     display.setColor(UIColor::secondary_txt);
     display.drawTextLeftAlign(4, 30, "Channel name:");
@@ -725,7 +746,7 @@ private:
   }
 
   int renderKeyChoice(DisplayDriver& display) {
-    renderTitleBar(display, _task, "CHANNEL KEY");
+    renderHeading(display, "CHANNEL KEY");
     display.setTextSize(1);
 
     display.setColor(UIColor::secondary_txt);
@@ -766,7 +787,7 @@ private:
   }
 
   int renderKeyEntry(DisplayDriver& display) {
-    renderTitleBar(display, _task, "CHANNEL KEY");
+    renderHeading(display, "CHANNEL KEY");
     display.setTextSize(1);
     display.setColor(UIColor::secondary_txt);
     display.drawTextLeftAlign(4, 30, "Paste the base64 key (24 or 44 chars):");
@@ -778,7 +799,7 @@ private:
   }
 
   int renderShowKey(DisplayDriver& display) {
-    renderTitleBar(display, _task, "CHANNEL ADDED");
+    renderHeading(display, "CHANNEL ADDED");
     display.setTextSize(1);
 
     display.setColor(UIColor::title_txt);
@@ -804,7 +825,7 @@ private:
   }
 
   int renderEditName(DisplayDriver& display) {
-    renderTitleBar(display, _task, "NODE NAME");
+    renderHeading(display, "NODE NAME");
     display.setTextSize(1);
 
     display.setColor(UIColor::secondary_txt);
@@ -836,7 +857,6 @@ public:
       default: break;
     }
 
-    renderTitleBar(display, _task, NAV_LABELS[RIFT_NAV_SYSTEM]);
     display.setTextSize(1);
 
     char tmp[72];
@@ -848,10 +868,10 @@ public:
     // The divider is at 160 rather than the midpoint because the longest action
     // is "Send advert (neighbours)" - 24 chars, 144px.
     display.setColor(rift_pal.rule);
-    display.fillRect(160, 16, 1, 210);
+    display.fillRect(160, 2, 1, 224);
 
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 18, "ACTIONS");
+    display.drawTextLeftAlign(2, 4, "ACTIONS");
 
     int y = MENU_TOP;
     for (int i = 0; i < IT_COUNT; i++, y += RIFT_LINE_H) {
@@ -869,20 +889,22 @@ public:
     // The one thing a user has to understand before messaging a stranger, put
     // next to the action rather than left in the README.
     display.setColor(rift_pal.rule);
-    display.fillRect(0, 108, 158, 1);
+    display.fillRect(0, 94, 158, 1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 116, "neighbours reaches direct");
-    display.drawTextLeftAlign(2, 128, "RF only. whole mesh floods");
-    display.drawTextLeftAlign(2, 140, "further, through repeaters.");
-    display.drawTextLeftAlign(2, 152, "use it before a first DM");
-    display.drawTextLeftAlign(2, 164, "to a distant node.");
+    display.drawTextLeftAlign(2, 102, "neighbours reaches direct");
+    display.drawTextLeftAlign(2, 114, "RF only. whole mesh floods");
+    display.drawTextLeftAlign(2, 126, "further, through repeaters.");
+    display.drawTextLeftAlign(2, 138, "use it before a first DM");
+    display.drawTextLeftAlign(2, 150, "to a distant node.");
 
     // ---- right column: read-only ----
     const int LX = 166;
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, 18, "DIAGNOSTICS");
+    display.drawTextLeftAlign(LX, 4, "DIAGNOSTICS");
 
-    y = 34;
+    // 14px further up than before, which this column can use: it grows downward
+    // as boot timings are appended and was the closest to running out of room.
+    y = 20;
     display.drawTextLeftAlign(LX, y, "NODE");
     display.setColor(rift_pal.fg);
     display.drawTextRightAlign(display.width() - 2, y, the_mesh.getNodeName());
@@ -1216,7 +1238,7 @@ public:
 
     char tmp[64];
     sprintf(tmp, "%d HEARD", _count);
-    renderTitleBar(display, _task, tmp);
+    renderHeading(display, tmp);
 
     // Column headers. Distance is a column, not a ring: the old squares-as-rings
     // could not say how far anything was without counting boxes outward.
@@ -1425,7 +1447,6 @@ public:
      : _task(task), _nav_idx(nav_idx), _title(title), _detail(detail) { }
 
   int render(DisplayDriver& display) override {
-    renderTitleBar(display, _task, NAV_LABELS[_nav_idx]);
 
     display.setColor(UIColor::primary_txt);
     display.setTextSize(2);
@@ -1795,7 +1816,7 @@ public:
 
   int renderWaterfall(DisplayDriver& display) {
     const char* status = (_state == OFF) ? "IDLE" : "WATERFALL";
-    renderTitleBar(display, _task, status);
+    renderHeading(display, status);
 
     display.setTextSize(1);
 
@@ -1893,7 +1914,7 @@ public:
     const char* status = "LIVE";
     if (_state == OFF) status = "IDLE";
     else if (!_wifi_up && !_ble_up) status = "INITIALISING";
-    renderTitleBar(display, _task, status);
+    renderHeading(display, status);
 
     // snapshot under the lock, then draw without holding it
     RfContact snap[RIFT_RF_MAX];
@@ -2247,12 +2268,23 @@ private:
   int _pick_count;
   bool _pick_truncated;
 
-  static const int BODY_TOP = 20;      // picker list starts here
-  static const int TABS_Y = 22;        // channel strip on the terminal view
-  static const int HIST_TOP = 38;      // history starts below the strip
+  static const int BODY_TOP = 12;      // picker list starts here
   static const int BODY_BOTTOM = 194;
   static const int INPUT_Y = 204;
   static const int TAB_VISIBLE = 4;    // channel tabs shown at once
+
+  // The strip and the history top move by whether a heading is drawn, which is
+  // only when the target is a contact - the strip cannot name one. With a channel
+  // target there is no heading, the strip sits at the very top and the history
+  // gets the 16px the old title bar held, which is one more message.
+  //
+  // Nothing visibly jumps: the history is drawn bottom-up from BODY_BOTTOM, so a
+  // varying top changes how many messages fit rather than where they sit.
+  static const int TABS_Y_BARE    = 6;
+  static const int TABS_Y_HEADED  = 18;
+  int _tabs_y;      // recorded at render, like _tab_w, so taps hit the same rows
+  int _hist_top;
+  int _tab_visible; // 3 in DM mode, so the DM marker has a column of its own
 
   // Configured channels, cached for the strip. Rebuilt on a timer rather than
   // every frame: render runs on the same SPI bus as the LoRa radio.
@@ -2301,7 +2333,12 @@ private:
     int tw = _tab_w = tabWidth(display);
     display.setTextSize(1);
 
-    for (int i = _tab_scroll; i < _tab_count && i < _tab_scroll + TAB_VISIBLE; i++) {
+    // One fewer channel tab in DM mode, so the DM marker below gets the fourth
+    // column instead of being drawn on top of it. The tab width is unchanged, so
+    // the columns and their tap targets stay where they were.
+    _tab_visible = _target_is_channel ? TAB_VISIBLE : TAB_VISIBLE - 1;
+
+    for (int i = _tab_scroll; i < _tab_count && i < _tab_scroll + _tab_visible; i++) {
       int col = i - _tab_scroll;
       int x = col * tw;
       bool active = _target_is_channel && _tabs[i].idx == _target_channel_idx;
@@ -2311,28 +2348,28 @@ private:
         // to survive being read in sunlight, where a fill one shade off the
         // background does not
         display.setColor(rift_pal.accent);
-        display.fillRect(x, TABS_Y - 2, tw - 2, 13);
+        display.fillRect(x, _tabs_y - 2, tw - 2, 13);
         display.setColor(0xFFFF);
       } else {
         display.setColor(rift_pal.rule);
-        display.drawRect(x, TABS_Y - 2, tw - 2, 13);
+        display.drawRect(x, _tabs_y - 2, tw - 2, 13);
         display.setColor(rift_pal.mid);
       }
 
       char filtered[sizeof(_tabs[i].name)];
       riftTranslateUTF8(filtered, _tabs[i].name, sizeof(filtered));
-      display.drawTextEllipsized(x + 3, TABS_Y, tw - 8, filtered);
+      display.drawTextEllipsized(x + 3, _tabs_y, tw - 8, filtered);
     }
 
     // a contact target is not in the strip, so say so rather than showing no
     // selection at all
     if (!_target_is_channel) {
       display.setColor(rift_pal.accent);
-      display.drawTextRightAlign(display.width() - 2, TABS_Y, "DM");
+      display.drawTextRightAlign(display.width() - 2, _tabs_y, "DM");
     }
 
     display.setColor(rift_pal.rule);
-    display.fillRect(0, TABS_Y + 13, display.width(), 1);
+    display.fillRect(0, _tabs_y + 13, display.width(), 1);
   }
 
   // What actually fits in a channel message. MeshCore puts "<sender>: " in front
@@ -2477,7 +2514,7 @@ private:
   int pickerRows() const { return (BODY_BOTTOM - (BODY_TOP + 4)) / RIFT_LINE_H; }
 
   int renderPicker(DisplayDriver& display) {
-    renderTitleBar(display, _task, "SELECT TARGET");
+    renderHeading(display, "SELECT TARGET");
     display.setTextSize(1);
 
     int total = _pick_count;
@@ -2577,6 +2614,7 @@ public:
        _picking(false), _pick_idx(0), _pick_scroll(0), _pick_count(0),
        _pick_truncated(false),
        _tab_count(0), _tab_scroll(0), _tab_w(0),
+       _tabs_y(0), _hist_top(0), _tab_visible(TAB_VISIBLE),
        _last_tabs_refresh(0), _tabs_refreshed_once(false) {
     _input[0] = 0;
     _target_name[0] = 0;
@@ -2592,14 +2630,35 @@ public:
   int render(DisplayDriver& display) override {
     if (_picking) return renderPicker(display);
 
+    // The heading is only drawn when the strip below cannot answer the question
+    // for itself. A channel target is already there with an accent fill, so
+    // naming it again at the top said the same thing twice.
+    //
+    // A contact target is not: the strip holds channels only - there can be
+    // MAX_CONTACTS of the other kind - and marks a DM by showing "DM" without a
+    // name. So for a contact this line is the only place the target appears, and
+    // it stays. The asymmetry is the strip's, not the heading's.
+    // A contact target needs a heading: the strip holds channels only - there can
+    // be MAX_CONTACTS of the other kind - and marks a DM without naming it. This
+    // line is then the only place the target appears, and at full width rather
+    // than the twelve characters a strip column would allow.
+    //
+    // A channel target needs none. It is already in the strip under an accent
+    // fill, and naming it again above said the same thing twice. That case gets
+    // the strip at the top of the screen and the 16px into the history instead.
     ChannelDetails ch;
-    if (_target_is_channel) {
-      // read the name live rather than trusting the cached one, so a channel
-      // reconfigured from the companion app doesn't show a stale label
-      renderTitleBar(display, _task, getTargetChannel(ch) ? ch.name : "NO CHANNEL");
+    bool headed = true;
+    if (!_target_is_channel) {
+      renderHeading(display, _target_name);
+    } else if (!getTargetChannel(ch)) {
+      // nothing in the strip is filled in this state, so say why
+      renderHeading(display, "NO CHANNEL");
     } else {
-      renderTitleBar(display, _task, _target_name);
+      headed = false;
     }
+
+    _tabs_y = headed ? TABS_Y_HEADED : TABS_Y_BARE;
+    _hist_top = _tabs_y + 16;
 
     renderTabs(display);
 
@@ -2627,7 +2686,7 @@ public:
       int block_h = (body_lines + 1) * RIFT_LINE_H;
 
       y -= block_h;
-      if (y < HIST_TOP) break;   // ran out of room going up
+      if (y < _hist_top) break;   // ran out of room going up
 
       // Own messages carry a 2px accent bar down the left edge rather than being
       // right-aligned: on a 320px screen right alignment costs half the width for
@@ -2692,10 +2751,15 @@ public:
   // since there can be many of them and they don't fit a strip
   bool handleTouch(int x, int y) override {
     if (_picking) return false;
-    if (y < TABS_Y - 2 || y > TABS_Y + 13) return false;
+    if (_tabs_y <= 0) return false;   // strip hasn't been drawn yet
+    if (y < _tabs_y - 2 || y > _tabs_y + 13) return false;
 
     if (_tab_w <= 0) return false;   // strip hasn't been drawn yet
-    int i = _tab_scroll + (x / _tab_w);
+    int col = x / _tab_w;
+    // in DM mode the last column holds the DM marker rather than a channel, so a
+    // tap there must not select the tab that would have been drawn under it
+    if (col < 0 || col >= _tab_visible) return false;
+    int i = _tab_scroll + col;
     if (i < 0 || i >= _tab_count) return false;
 
     _target_is_channel = true;

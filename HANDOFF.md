@@ -247,6 +247,23 @@ variation selectors, ZWJ, skin tones — are dropped rather than drawn, consecut
 unmappable ones collapse to one block, and the rest map to real glyphs or ASCII
 emoticons where a genuine equivalent exists.
 
+The 16px title bar is gone. The wordmark moved into the nav bar — the first tab
+reads `RIFT`, and takes the accent while active, as text on black and as a fill
+with the letters reversed out on white — and the battery moved to the nav bar's
+right-hand slack, so all the chrome is on one edge. Per-screen context became
+`renderHeading()`: the same text at the top of the body with no band behind it.
+Three of the fourteen old call sites only repeated the nav bar and draw nothing
+now; eleven carried real state and kept it. MESH also fronts `meshcore.io` above
+the state, which distinguishes the device from Meshtastic and is something the
+firmware knows for certain.
+
+COMMS was the only screen genuinely short of room, and it is the one that varies:
+with a channel target there is no heading, so the strip sits at the top and the
+history takes the reclaimed 16px, which is one more message. With a contact target
+the heading is the only place the target appears — the strip holds channels
+only — so it stays and the strip drops. Nothing jumps, because the history draws
+bottom-up.
+
 **CI** (`.github/workflows/rift-build-check.yml`, `rift-release.yml`): tests gate
 the builds, all five environments build, third-party actions pinned to SHAs,
 read-only by default with write only on the publish job, and a release is refused
@@ -307,17 +324,7 @@ to CP437 translation.
    antialiasing, so the list has to be chosen for shapes that survive that size.
    An unrecognisable custom glyph is worse than a block: a block admits it cannot
    draw the thing, a vague shape looks like it means something specific.
-10. **Chrome rework, queued and agreed.** Drop the top title bar and move its
-    content into the nav bar and the screen bodies: battery to the nav bar's
-    unused right-hand 32px, `MESH` renamed `RIFT` so the wordmark sits bottom
-    left, and `meshcore.io` above the MESH state to front the protocol and
-    distinguish the device from Meshtastic. Six of the fifteen `renderTitleBar`
-    call sites pass `NAV_LABELS` and are redundant, but nine carry computed state
-    that needs a home first. Precedent: the design already moved MESH's link state
-    out of the subtitle into the body, and judged it an improvement.
-    `design/handoff.md` specifies the title bar at y 0..15 and must be updated in
-    the same change.
-11. **README is 580 lines doing four jobs**, and two of them duplicate this file
+10. **README is 580 lines doing four jobs**, and two of them duplicate this file
     nearly word for word. That duplicate has already drifted twice in one session.
     The browser flasher link is also buried mid-paragraph under four paragraphs of
     caveats, and was missed by a real reader looking for it.

@@ -126,32 +126,54 @@ forget to switch.
 
 ## Shared chrome
 
-Traced from `renderTitleBar` / `renderNavBar` in `examples/companion_radio/ui-rift/UITask.cpp`.
+Traced from `renderHeading` / `renderNavBar` in `examples/companion_radio/ui-rift/UITask.cpp`.
 
-### Title bar — y 0..15 (16px)
+### The title bar is gone — superseded
 
-- Filled band in `bar`, full width.
-- `"RIFT"` at **x=2, y=4** in accent. In day mode: fill `rect(0, 0, 30, 16)` in #FF4100 first,
-  then draw `"RIFT"` in white on top.
-- Per-screen subtitle at **x=40, y=4** in `mid`: `CONNECTED` / `9 HEARD` / `LIVE` / `SYSTEM`.
-- Battery percentage right-aligned at **x=318, y=4** in `fg`. Nothing else goes on the right —
-  frequency and heap belong in the body.
+This spec originally gave a filled 16px band at y 0..15 holding the wordmark, a per-screen
+subtitle and the battery. It was built that way and then removed, because the band cost 16px on
+every screen to carry two things that belonged elsewhere and one that was often redundant.
+
+Kept here rather than deleted, so a reading of the renderings against the code does not look like
+drift. **What replaced it:**
+
+- The wordmark moved into the nav bar: the first tab reads `RIFT` rather than `MESH`, so the
+  mark sits bottom left and doubles as home.
+- The battery moved to the nav bar's right-hand slack.
+- Per-screen context became `renderHeading()` — the same text at **x=2, y=2** in `mid`, with no
+  fill behind it, so it reads as the screen's own heading. Screens whose only subtitle was their
+  own name do not draw one at all, because the nav bar already says it.
+
+### Heading — y 2..9, drawn by the screen that wants one
+
+- Text at **x=2, y=2** in `mid`, `setTextSize(1)`. No band, no fill.
+- Drawn by: SYSTEM's channel flow (`NEW CHANNEL` / `CHANNEL KEY` / `CHANNEL ADDED` / `NODE NAME`),
+  COMMS when the target is a contact or no channel is configured, NODES (`9 HEARD`), RADAR
+  (`LIVE` / `IDLE` / `INITIALISING` / `WATERFALL`), and COMMS' picker (`SELECT TARGET`).
+- Not drawn by: MESH, SYSTEM's main view, the placeholder screen. Those reclaim the space.
 
 ### Nav bar — y 226..239 (14px band + 1px top rule)
 
 - 1px `rule` line at y=226. Band below in `bg`.
 - Five 64px columns at x = 0 / 64 / 128 / 192 / 256.
 - Labels at **y=228**, centred in their column:
-  `MESH` x=20 · `NODES` x=81 · `RADAR` x=145 · `COMMS` x=209 · `SYSTEM` x=270.
+  `RIFT` x=20 · `NODES` x=81 · `RADAR` x=145 · `COMMS` x=209 · `SYSTEM` x=270.
 - Active label in `fg`; inactive in `dim`.
-- **Added by this design:** a 64x2 accent underline at the active column's x, y=226. The current
-  code distinguishes tabs by colour alone; the underline gives a second cue that survives the
-  sunlight veil.
-- **Added by this design:** a 3x3 accent dot at x=246, y=227 when unread messages exist. Unread
-  count is not surfaced in the nav today.
+- **The `RIFT` slot is the wordmark as well as a destination**, so while it is the active tab it
+  takes the accent — as text on black at 6.0:1, and on white as `fillRect(0, 228, 64, 12)` in
+  accent with the letters reversed out in white, since accent is only 3.5:1 there. Only while
+  active: an accent fill *is* the active signal in this design, and a permanent orange chip on one
+  tab would read as selected from every screen.
+- A 64x2 accent underline at the active column's x, y=226. Colour alone did not survive the
+  sunlight veil; the underline is the second cue.
+- A 3x3 accent dot at x=246, y=227 when unread messages exist.
+- Battery percentage right-aligned at **x=318, y=228**, in `mid`, or accent at 15% and below.
+  It fits because `SYSTEM` is centred at 270 and ends at 288, leaving 32px, and `100%` is 24px.
+  The active underline runs beneath it but occupies y 226..228 against this text's 228..236.
+  In `mid` rather than `fg` so it does not compete with the active nav label.
 - The label is `SYSTEM`, not `SYS`.
 
-Body area is therefore **y 16..225**, 210px tall — 17 rows at 12px pitch.
+Body area is therefore **y 0..225** where no heading is drawn, and **y 12..225** where one is.
 
 ---
 
@@ -227,10 +249,24 @@ Never from the array index — the array is re-sorted every render.
 
 Replaces `RiftMeshScreen`'s layout; all values are the screen's existing ones.
 
-- `LINK` label at (2, 18) in `mid`.
-- Link state at (2, 30) in **setTextSize(3)**: `CONNECTED` / `PAIRING` / `STANDBY`. All are
-  <= 9 chars = 162px, so all three fit. This moves the state out of the title bar subtitle and
-  into the body — it is the question the screen exists for.
+- `meshcore.io` at (2, 4) in `mid`, lowercase. **Superseded twice, so read the note.** The spec
+  originally said `LINK` here, with the state below being the USB/BLE companion link. That was
+  honest about what it measured but not the useful thing: a standalone node with a busy mesh
+  around it read `STANDBY` forever, which is the case RIFT exists for. The label is now the
+  protocol, because LoRa handhelds are dominated by Meshtastic and a T-Deck looks like one — and
+  unlike "which mesh am I on", the stack is something the firmware knows for certain.
+  Lowercase against the all-caps convention of every other piece of chrome here: a URL in
+  capitals reads worse and less like an address. Deliberate; do not "correct" it.
+- Mesh receive state at (2, 16) in **setTextSize(3)**: `ACTIVE` / `IDLE` / `QUIET` / `NO SIGNAL`,
+  driven by how long ago the radio last decoded anything. `NO SIGNAL` is the longest at 9 chars
+  = 162px, which clears both the screen edge and the radar box (x >= 160, but y >= 80).
+  `ACTIVE` in `ok`, `IDLE` in `fg`, `QUIET` in `mid`, `NO SIGNAL` in accent.
+- `LAST RX 12m AGO`, or `NOTHING HEARD SINCE BOOT`, at (2, 62) in `fg`; `RX n PACKETS` at
+  (2, 74) in `mid`. The verdict above is a threshold, and a threshold is worth being able to
+  check against the number it came from.
+- `USB/BLE STANDBY` at (2, 90) in `mid` — the companion link, kept but labelled for what it
+  actually measures.
+- Both top rows are 14px higher than the original spec, because this screen draws no heading.
 - Radar: three nested `drawRect` centred (210, 120) — 100x80, 66x54, 32x26 — in `rule`/`mid`,
   with one 4x4 accent blip at one of the eight existing dx/dy offsets. Unchanged mechanism.
 - `NODES 14` at (2, 170) in `fg`; `LINK -87 / 8` right-aligned at y=170 in `fg`.
@@ -241,7 +277,11 @@ Replaces `RiftMeshScreen`'s layout; all values are the screen's existing ones.
 
 Replaces `RiftSystemScreen`'s single mixed list.
 
-**Divider at x=160**, y 16..225, 1px in `rule`. Left = actions, right = read-only diagnostics.
+**Divider at x=160**, y 2..225, 1px in `rule`. Left = actions, right = read-only diagnostics.
+This view draws no heading — the nav bar already says SYSTEM — so everything sits 14px higher
+than the original spec: `ACTIONS` and `DIAGNOSTICS` at y=4, the menu from y=20, the left column's
+rule at y=94 with its explanatory lines from 102, and the diagnostics rows from y=20. The right
+column needed it most: it grows downward as boot timings are appended.
 The divider must be at 160, not 128: the longest menu item is `Send advert (neighbours)` at
 24 chars = 144px.
 
@@ -278,8 +318,27 @@ reads as a hang and costs the README a paragraph of explanation.
 
 ### COMMS
 
-- Channel tabs in the title bar: active tab is an accent fill with white text; inactive are
-  `drawRect` outlines in `rule` with `mid` text.
+- Channel strip, four 80px columns: the active tab is an accent fill with white text; inactive
+  are `drawRect` outlines in `rule` with `mid` text. Names are ellipsized, not hard cut, so a
+  long one reads as truncated rather than as a shorter name.
+- **The strip's y varies with whether a heading is drawn, and it is the only screen where that
+  is true.** A channel target needs no heading — it is already in the strip under an accent fill,
+  and naming it above said the same thing twice — so the strip sits at y=6 and the history starts
+  at 22, taking the 16px the old title bar held. That is one more message on screen, and COMMS is
+  the only screen that was genuinely short of room.
+
+  A contact target does need one: the strip holds channels only, since there can be
+  `MAX_CONTACTS` of the other kind, and it marks a DM without naming it. The heading is then the
+  only place the target appears, and at full width rather than the twelve characters a strip
+  column allows. So the strip drops to y=18 and the history to 34.
+
+  Nothing visibly jumps — the history is drawn bottom-up from y=194, so a varying top changes how
+  many messages fit rather than where they sit. `_tabs_y` and `_hist_top` are recorded at render
+  for the tap targets to read, the same way `_tab_w` already was.
+- In DM mode the strip shows **three** channel tabs, not four, so the `DM` marker gets the fourth
+  column instead of being drawn on top of a tab. A tap in that column selects nothing.
+- Messages at 12px pitch. Sender line: time at x=2 in `dim`, name at x=32 in `mid`.
+  Body on the next row in `fg`.
 - Messages at 12px pitch. Sender line: time at x=2 in `dim`, name at x=32 in `mid`.
   Body on the next row in `fg`.
 - **Own messages get a 2px accent bar down the left edge**, not right alignment — you keep full
