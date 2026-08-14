@@ -158,6 +158,22 @@ like missing `Arduino.h`/`Stream.h`, which is misleading.
 export PLATFORMIO_CORE_DIR="C:/dev/.platformio"
 ```
 
+**3. Running the unit tests needs a host compiler**, which PlatformIO does not
+bring with it. Without one, `pio test -e native` fails with `'g++' is not
+recognized` and the suite can only be run in CI - which is how a missing `main()`
+once reached the branch. On Windows, MSYS2 is the shortest route: install it from
+[msys2.org](https://www.msys2.org), then from the UCRT64 shell
+
+```bash
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc
+```
+
+and put `C:\msys64\ucrt64\bin` on PATH. Verified with GCC 16.1.0.
+
+```bash
+pio test -e native -e native_kiss_modem
+```
+
 Then build and flash:
 
 ```bash
