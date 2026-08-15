@@ -146,10 +146,8 @@ private:
   // underneath was never told it had been left.
   RiftScreen* _overlay;
 
-  // Nordic character picker, raised by holding a base vowel on COMMS.
+  // Nordic character picker, raised by double-tapping a base vowel on COMMS.
   RiftScreen* nordic_picker;
-  // fires the picker once per hold rather than on every poll past the threshold
-  bool _longpress_fired = false;
 
   void userLedHandler();
 

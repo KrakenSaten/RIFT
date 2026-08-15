@@ -135,10 +135,16 @@ than any amount of code reading.
   datasheet's track-id-first layout. Calibration: display top-left = raw (228, 8),
   bottom-right = raw (6, 310). Status register 0x814E, bit 7 = data ready, and it
   must be written back to 0 or the controller stops reporting.
-- **Keyboard** is I²C 0x55, polled. The co-processor repeats held keys, so edge
-  detection is required or one Enter fires several times. That repeat is also the
-  only signal available for a long-press on a keyboard key — the driver currently
-  throws it away.
+- **Keyboard** is I²C 0x55, polled at 100 ms.
+- **There is no key repeat and no key-up, so a long press cannot be detected.**
+  Measured: holding a key produces exactly one event, and every read after it
+  returns 0 for as long as the key stays down. Holding `a` in a text field types
+  one `a`, however long you hold. The comment in `TDeckKeyboard::poll()` used to
+  claim the opposite — that a held key repeats and edge detection is needed to
+  suppress it — and a whole trigger design was built on that before anyone put the
+  number on screen. It now says what was measured. Anything needing a second
+  gesture has to be built from discrete presses; the Nordic picker uses a double
+  tap for exactly this reason.
 - **`SYM` emits nothing on its own, and is not a spare key.** `SYM`+letter emits
   the symbol printed on the key, as plain ASCII well under 127, so it already
   reaches the app: `SYM`+a is 42 `*`, +o is 43 `+`, +e is 50 `2`. It is a working
@@ -273,45 +279,43 @@ if the tag and `RIFT_VERSION` disagree.
 compiles clean. `-Werror` is off while ~210 warnings in shared MeshCore code are
 not ours to fix.
 
-**91 native tests**, all runnable locally. They cover the six places that have
+**95 native tests**, all runnable locally. They cover the places that have
 actually been wrong: base64 key validation, `path_len` decoding, hash collision
-resolution, the mesh-activity thresholds, screen-transition hooks, and the UTF-8
-to CP437 translation.
+resolution, the mesh-activity thresholds, screen-transition hooks, the UTF-8 to
+CP437 translation, and the Nordic variant table — including an assertion that
+every variant is two-byte UTF-8 with a glyph the panel can draw back, since
+confusing the wire form with the display form is this feature's sharpest trap.
 
 ### Open items
 
 1. **Message history does not survive reboot.** RAM-only by design; persisting it
    means new code and flash wear.
-2. **Nordic character input — half done, and blocked on one measurement.**
+2. **Nordic character input — done, one thing left to confirm.**
 
-   **Done and correct:** the COMMS compose line is UTF-8 aware. It renders by
-   translating first and taking the tail of the *translated* text, so a cut cannot
-   land inside a sequence; backspace removes a whole code point; and the send path
-   truncates on a code point boundary. All three go through
-   `mesh::validUtf8PrefixLength`, which upstream already has and already tests —
-   no second UTF-8 walk was written. Two of those were live bugs: a byte-wise
-   backspace would leave a dangling lead byte, and the send truncation could put
-   invalid UTF-8 on the air when the capacity drops under the composed length
-   (compose a long DM, switch the target to a channel).
+   Double-tapping a base vowel in COMMS opens a picker: `a` offers æ å ä, `o`
+   offers ø ö, and the uppercase forms follow. Verified on hardware in both cases.
+   Both taps are inserted as ordinary letters first and the picker replaces the
+   pair, so cancelling leaves exactly what was typed — which is what makes a false
+   trigger on a genuine double vowel (Haakon, Aage) cost one keypress.
 
-   `RiftNordicPickerScreen` and `riftNordicVariants()` are written and build. The
-   picker is an overlay, so the compose line keeps its text underneath.
+   A double tap rather than a long press because a long press cannot be detected
+   at all — see section 3. That was measured only after building the wrong thing.
 
-   **Blocked:** holding a vowel does nothing on hardware. The trigger assumed the
-   co-processor repeats a held key — taken from the comment in
-   `TDeckKeyboard::poll()` rather than measured, which is the mistake this project
-   otherwise avoids.
+   The compose line is UTF-8 aware: it renders by translating first and taking the
+   tail of the *translated* text, so a cut cannot land inside a sequence; backspace
+   removes a whole code point; and the send path truncates on a code point
+   boundary. All three use `mesh::validUtf8PrefixLength`, which upstream already
+   has and tests. Two were live bugs — a byte-wise backspace left a dangling lead
+   byte, and the send truncation could put invalid UTF-8 on the air once the
+   capacity dropped below the composed length (compose a long DM, switch the target
+   to a channel).
 
-   **Next step is to read a number, not to write code.** SYSTEM now has a
-   `KEY HELD` row showing `heldKey()` and `heldPolls()`. Hold `a` on SYSTEM:
+   The character counter counts bytes, deliberately: MeshCore truncates at 160
+   bytes, so a Nordic character really does cost two.
 
-   - counter climbs → the repeat is real and `RIFT_LONGPRESS_POLLS` (5, ~500ms) is
-     simply too high; lower it to what the hardware actually reaches.
-   - counter stays 0, or hits 1 and drops → the keyboard reports a key once and
-     never again, there is no key-up either, and **long press does not exist as a
-     signal on this hardware**. The trigger has to become something else: a double
-     tap on the vowel, or a key combination that emits its own code, which
-     `LAST KEY` can now be used to hunt for.
+   **Still unconfirmed:** that a Nordic character survives the trip to another
+   client. Nothing local can check it — the panel would look identical whether the
+   wire carried UTF-8 or CP437. Send one to a phone and read it there.
 
    Sharpest trap, still: `ø` on the air must be UTF-8 `0xC3 0xB8`. `0x01` is a
    display-side placeholder only, and putting it in outgoing text sends a C0

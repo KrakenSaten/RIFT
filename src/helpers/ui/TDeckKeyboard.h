@@ -48,13 +48,11 @@ class TDeckKeyboard {
   uint8_t _seen_count;
   char _last_raw;        // previous raw read, for edge detection
   uint8_t _last_seen;    // last non-zero byte from the co-processor, incl. discarded ones
-  uint16_t _held_polls;  // consecutive polls returning the same key - see heldPolls()
 
   uint8_t scanBus();
 
 public:
-  TDeckKeyboard() : _present(false), _failures(0), _last_poll(0), _seen_count(0), _last_raw(0), _last_seen(0),
-                    _held_polls(0) { }
+  TDeckKeyboard() : _present(false), _failures(0), _last_poll(0), _seen_count(0), _last_raw(0), _last_seen(0) { }
 
   void begin();
 
@@ -69,17 +67,10 @@ public:
   // codes be discovered from the device instead of assumed
   uint8_t lastSeen() const { return _last_seen; }
 
-  // Which key is currently down, or 0. This is the co-processor's key repeat -
-  // it keeps returning the same byte while a key is held - which poll() otherwise
-  // only uses to suppress duplicates. Without exposing it there is no way at all
-  // to detect a long press on a keyboard key: the co-processor sends no key-up.
-  char heldKey() const { return _last_raw; }
-
-  // How many polls the current key has been held *beyond* the initial press, so 0
-  // means "just pressed". Multiply by KEYBOARD_POLL_MILLIS for a rough duration;
-  // it is a count rather than a timestamp because the poll rate is what actually
-  // bounds the resolution.
-  uint16_t heldPolls() const { return _held_polls; }
+  // NOTE: there is deliberately no heldKey()/isHeld() here. This keyboard reports
+  // one event per physical press and nothing at all while the key stays down -
+  // measured, see poll(). A long press cannot be detected. Do not add an API that
+  // implies otherwise.
 
   // returns the ASCII key value, or 0 if no key is available
   char poll();

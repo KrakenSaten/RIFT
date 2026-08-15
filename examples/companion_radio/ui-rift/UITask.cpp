@@ -66,11 +66,19 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 // constant for it - the raw byte is what the co-processor sends.
 #define RIFT_KEY_BACK       8
 
-// Polls a key must be held beyond the initial press before the Nordic picker
-// opens. KEYBOARD_POLL_MILLIS is 100, so this is roughly half a second - the
-// threshold phone keyboards use, and far enough above a normal keystroke that
-// ordinary typing never reaches it.
-#define RIFT_LONGPRESS_POLLS  5
+// How close together two presses of the same vowel must be to mean "offer me its
+// Nordic forms" rather than two letters.
+//
+// A double tap rather than a long press, because this keyboard cannot report one:
+// it sends a single event per press and nothing while the key is down. Measured,
+// not assumed - see TDeckKeyboard::poll().
+//
+// 400ms with a 100ms poll leaves room for a comfortable double tap. The cost is
+// that a genuine double vowel typed quickly opens the picker; backspace cancels
+// it and leaves the two letters as typed. Modern Norwegian has almost none - the
+// spelling reform turned "aa" into "å" - but proper names like Haakon and Aage
+// still do.
+#define RIFT_DOUBLETAP_MILLIS  400
 
 #define RIFT_MSG_LOG_SIZE  48
 #define RIFT_CHAR_W         6   // Adafruit GFX classic font cell at setTextSize(1)
@@ -936,22 +944,6 @@ public:
     display.drawTextLeftAlign(LX, y, "LAST KEY");
     display.setColor(rift_pal.fg);
     sprintf(tmp, "%d / %d", _task->lastKeyCode(), (int) rift_keyboard.lastSeen());
-    display.drawTextRightAlign(display.width() - 2, y, tmp);
-    y += RIFT_LINE_H;
-
-    // Whether this keyboard repeats a held key, and for how long. The long-press
-    // trigger depends on it entirely - the co-processor sends no key-up - and it
-    // was taken from a code comment rather than measured. Reads "a x7" while a is
-    // held if the repeat is real; stays "- x0" if the key is reported once and
-    // then dropped.
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "KEY HELD");
-    display.setColor(rift_pal.fg);
-    {
-      char k = rift_keyboard.heldKey();
-      sprintf(tmp, "%c x%u", (k >= 32 && k < 127) ? k : '-',
-                             (unsigned) rift_keyboard.heldPolls());
-    }
     display.drawTextRightAlign(display.width() - 2, y, tmp);
     y += RIFT_LINE_H;
 
@@ -2247,6 +2239,10 @@ class RiftCommsScreen : public RiftScreen, ContactVisitor {
   int _len;
   int _scroll;      // 0 = pinned to newest
 
+  // last printable key and when, for double-tap detection
+  char _last_key = 0;
+  unsigned long _last_key_ms = 0;
+
   // current send target: a group channel by index, or a contact by pubkey prefix
   bool _target_is_channel;
   uint8_t _target_channel_idx;
@@ -2854,6 +2850,23 @@ public:
     if (c >= 32 && c < 127 && _len < channelCapacity()) {
       _input[_len++] = c;
       _input[_len] = 0;
+
+      // Two presses of the same vowel in quick succession offer its Nordic forms.
+      // Both letters are inserted first and the picker replaces the pair, so
+      // cancelling leaves exactly what was typed - which is what makes a false
+      // trigger on a genuine double vowel cost one keypress rather than a word.
+      //
+      // millis() - _last_key_ms rather than a stored deadline: unsigned arithmetic
+      // is wrap-safe, a future deadline is not.
+      if (c == _last_key && _last_key_ms != 0
+          && millis() - _last_key_ms <= RIFT_DOUBLETAP_MILLIS) {
+        _last_key = 0;          // a third tap starts over rather than re-firing
+        _last_key_ms = 0;
+        _task->openNordicPicker(c);
+      } else {
+        _last_key = c;
+        _last_key_ms = millis();
+      }
       return true;
     }
     return false;
@@ -2971,13 +2984,16 @@ public:
     if (c == KEY_LEFT || c == KEY_PREV)  { _sel = (_sel + _count - 1) % _count; return true; }
 
     if (c == KEY_ENTER) {
-      // replace the base letter the initial press already inserted
+      // Both taps are already in the line - they were inserted as ordinary
+      // letters - so the variant replaces the pair.
       if (_comms != NULL) {
         _comms->deleteLastChar();
+        _comms->deleteLastChar();
         if (!_comms->insertUtf8(_variants[_sel])) {
-          // put the base back rather than silently losing a character
-          char base[2] = { _base, 0 };
-          _comms->insertUtf8(base);
+          // put back what was typed rather than silently losing characters. A
+          // two-byte variant can fail to fit where two one-byte letters did.
+          char pair[3] = { _base, _base, 0 };
+          _comms->insertUtf8(pair);
           _task->showAlert("No room for that character", 1200);
         }
       }
@@ -2985,7 +3001,8 @@ public:
       return true;
     }
 
-    // cancel keeps the base letter, which is what was typed
+    // cancel leaves both letters exactly as typed, which is what makes a false
+    // trigger on a real double vowel cost one keypress
     if (c == RIFT_KEY_BACK || c == KEY_CANCEL) {
       _task->dismissOverlay();
       return true;
@@ -3331,20 +3348,6 @@ void UITask::loop() {
     if (key != 0) c = checkDisplayOn(key);
   }
 
-  // Holding a base vowel offers its Nordic forms. The keyboard sends no key-up,
-  // so the co-processor's repeat is the only evidence a key is down; poll()
-  // suppresses those repeats for typing and counts them for this.
-  //
-  // Fires once per hold rather than on every poll past the threshold, and the
-  // base letter has already been inserted by the initial press - the picker
-  // replaces it. Typing normally must not feel delayed by a feature that only
-  // triggers when you keep holding.
-  if (rift_keyboard.heldPolls() == 0) {
-    _longpress_fired = false;
-  } else if (!_longpress_fired && rift_keyboard.heldPolls() >= RIFT_LONGPRESS_POLLS) {
-    _longpress_fired = true;
-    openNordicPicker(rift_keyboard.heldKey());
-  }
 #endif
   // The screen that was showing when the key was pressed. Touch is polled after
   // the keyboard and can navigate elsewhere, so dispatching to curr afterwards

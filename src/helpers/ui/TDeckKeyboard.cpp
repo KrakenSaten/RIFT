@@ -67,21 +67,21 @@ char TDeckKeyboard::poll() {
   // stock firmware reports 0x00 when idle; anything >127 is bogus
   if ((uint8_t) key > 127) key = 0;
 
-  // Edge detection: the co-processor keeps returning the same key while it is
-  // held, so report it only on the transition out of idle. Without this a
-  // single press fires repeatedly at our poll rate.
+  // Edge detection, reporting a key only on the transition out of idle.
+  //
+  // The comment here used to say the co-processor repeats a held key and that
+  // without this a single press would fire repeatedly at the poll rate. Measured
+  // on hardware, that is not true of this unit: holding a key produces exactly one
+  // event, and reads after it return 0 for as long as it stays down. Holding `a`
+  // in a text field types one `a` and nothing more, however long you hold.
+  //
+  // So this suppresses nothing today. It is kept because it costs one comparison
+  // and because a different keyboard firmware may well behave as the original
+  // comment described - but do not build on it. There is no key repeat and no
+  // key-up, which means **a long press cannot be detected on this hardware at
+  // all**; anything needing a second gesture has to use discrete presses, which is
+  // why the Nordic picker is on a double tap.
   char emit = (key != 0 && _last_raw == 0) ? key : 0;
-
-  // The repeats the line above discards are the only evidence a key is being
-  // held - this keyboard sends no key-up - so count them rather than throw them
-  // away. Saturates instead of wrapping: a key wedged down for two hours must
-  // not read as freshly pressed.
-  if (key != 0 && key == _last_raw) {
-    if (_held_polls < 0xFFFF) _held_polls++;
-  } else {
-    _held_polls = 0;
-  }
-
   _last_raw = key;
   return emit;
 }
