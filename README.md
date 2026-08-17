@@ -357,10 +357,8 @@ export, and took boot from 243 seconds to 5.1.
 
 Next, roughly by value:
 
-- A compose scheme for typing Nordic characters — long-pressing the base vowel,
-  which also needs the compose line to become UTF-8 aware
-- Persist message history across reboots
 - Hand-drawn glyphs for the emoji that still show as a block
+- Rebucket the NODES hop columns; on a real mesh nearly everything lands in `3+`
 - Per-contact detail view (paths, keys, last-heard history)
 
 [`HANDOFF.md`](HANDOFF.md) carries the full open-items list with the reasoning.
