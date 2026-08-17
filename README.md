@@ -360,7 +360,6 @@ Next, roughly by value:
 - A compose scheme for typing Nordic characters — long-pressing the base vowel,
   which also needs the compose line to become UTF-8 aware
 - Persist message history across reboots
-- Report the `Wire.begin()` ordering bug upstream
 - Hand-drawn glyphs for the emoji that still show as a block
 - Per-contact detail view (paths, keys, last-heard history)
 
