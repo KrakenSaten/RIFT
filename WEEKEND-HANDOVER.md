@@ -21,7 +21,7 @@ git checkout rift-nordic-input
 | Branch | State |
 |---|---|
 | `rift-tdeck` | `bd75511d`, tagged **v0.4.0**, released and published |
-| `rift-nordic-input` | 3 commits ahead, pushed, **not merged** — deliberately held back |
+| `rift-nordic-input` | 7 commits ahead, pushed, **not merged** — deliberately held back |
 
 Nothing on the feature branch is released. The published flasher serves 0.4.0.
 
@@ -36,31 +36,59 @@ knowledge — but the split write is not optional, see below.
 
 ---
 
-## The one open thread
+## When you next have the device
 
-**Message history persistence works, but the write blocks for 553ms.**
+Nothing here needs code first. **Four changes are built but unconfirmed, and two
+readings are what the remaining design work is waiting on** — all of it doable in
+one pass, which is why no further feature was started.
 
-That is the immediate next thing, and it needs a reading before it needs code.
+Flash the branch, then:
+
+| Where | What to look for |
+|---|---|
+| SYSTEM → `phases` | **The important one.** Four numbers: open / write / close / remove+rename |
+| SYSTEM → `HOPS` | `n` nodes, `max` hop count, `3+` beyond the third column |
+| COMMS and RADAR | Roll the trackball fast through both lists — it must not leave the screen |
+| NODES | `ENTER` on a repeater (`NO-2007 Kjeller R2`). Should refuse and say why; the detail bar should read `repeater`, not `ENTER: DM` |
+| RADAR | Toggle it off and on. `IDLE` should show, and vanish while scanning |
+| COMMS | Send `æøå` and confirm it still arrives intact elsewhere |
+
+### The 553ms write is the one real regression
+
+Message history now survives a reboot, but the write blocks for 553ms.
 
 There is no watchdog on the main loop and a blocking call silently starves the LoRa
 radio — `HANDOFF.md` calls this the most important constraint in the codebase. Half
-a second every time a conversation settles is not acceptable.
+a second every time a conversation settles is not acceptable, and it is the only
+known case of something working worse than before the feature landed.
 
-553ms with **four** messages in the log, so a few hundred bytes. Far too little
-data for the data to be the cause; the file operations are the suspect, and SPIFFS
-is known to be slow at creating and deleting files.
-
-**Next action:** SYSTEM shows `MSGLOG` (count and total) and `phases`
-(open / write / close / remove+rename). Send a message, wait 20 seconds for the
-debounced write, read the four numbers.
+553ms with **four** messages, so a few hundred bytes. Far too little data for the
+data to be the cause; the file operations are the suspect, and SPIFFS is known to be
+slow at creating and deleting files. The `phases` row splits the total so it can be
+attributed rather than guessed at.
 
 - Time in **open** and **swap** → metadata operations. Fix by opening the log once
   at boot, keeping the handle, and rewriting in place with `seek(0)`. That drops
   temp-and-rename, which only ever protected the log file from a torn write — the
-  log is not precious, a corrupt one is discarded on load. Cheap thing to trade for
-  half a second of radio time.
+  log is not precious, a corrupt one is discarded on load. A cheap thing to trade
+  for half a second of radio time.
 - Time in **write** → it really is the payload, and the write has to be split
   across loop iterations, or made rarer and smaller.
+
+### `HOPS` decides the NODES redesign
+
+NODES buckets into DIRECT / 1 / 2 / 3+, and on a real mesh nearly everything lands
+in the last column, so the layout spends three quarters of its width on the
+minority. The buckets were chosen before there was a mesh this size to look at —
+which is exactly how this happened, so the new ones should not be guessed either.
+`n`, `max` and `3+` are enough to pick them.
+
+### One decision that is yours
+
+**Where should the `HEARD` count go on NODES?** The request was to move it off the
+top line but did not say where. Candidates: beside the column headers, or in the
+detail bar at the bottom that already names the selected node. It is a taste
+question, not a technical one.
 
 ---
 
@@ -158,6 +186,35 @@ bugs.
 Confirmed end to end: æøå ÆØÅ arrive intact at another client, which is the only
 check that can tell UTF-8 from CP437 — the panel would look identical either way.
 
+### Four smaller things, built after the handover was first written
+
+**The trackball no longer walks off the screen it is scrolling.** Cause was in
+RIFT's own driver, found by reading it rather than guessing: `poll()` counted pulses
+per direction but only cleared the counter that reached its own threshold, or all
+four after a full second of total idleness. A continuous roll is never idle. The ball
+is a sphere against four mechanical switches, so rolling vertically pulses the side
+switches a little — unavoidably — and that trickle accumulated with nothing clearing
+it until it crossed the threshold and reported `KEY_LEFT`. At a 20% noise ratio,
+thirty vertical pulses give six horizontal: two spurious screen changes, which is
+what was reported. Reporting a direction now clears all four counters. The
+alternative explanation was ruled out first — every screen returns true on
+`KEY_UP`/`KEY_DOWN` even at its list limit, so none fall through to navigation.
+
+**NODES only offers a DM to nodes that can receive one.** Repeaters, rooms and
+sensors do not read messages, so the send went nowhere and reported nothing. The
+contact lookup was already there; it now checks `ContactInfo::type` too. The detail
+bar names the node type rather than just dropping the prompt — a missing affordance
+with no explanation reads as a bug, and the type is information the screen did not
+otherwise show, so it explains the absence by itself.
+
+**RADAR's heading drops `LIVE`**, which said nothing the moving device count did not
+already show. `IDLE` and `INITIALISING` stay, because those two are not obvious: one
+means the count is stale rather than zero, the other that the radios have not come
+up so an empty list means nothing yet.
+
+**SYSTEM reports the hop distribution**, temporarily, so the NODES redesign starts
+from a measurement.
+
 ### Documentation
 
 README went from 580 lines to 310, split into `BUILDING.md` and `ARCHITECTURE.md`.
@@ -193,6 +250,11 @@ nothing. `0x0D` is CP437's eighth note, and music mapped there vanished. Also
 an incoming smiley cannot use them. `riftNoGlyphAt()` states the rule and a test
 walks the whole table.
 
+**A trackball is a sphere against four switches, so a roll is never on one axis.**
+Cross-axis pulses have to be cleared by something, or a sustained roll eventually
+reports the perpendicular direction. Costs a screen change in the middle of
+scrolling, and the faster the roll the sooner it happens.
+
 **A single flash write over ~1.2MB fails.** Reproducibly, with the USB device
 dropping off the bus. Ruled out: a different cable, `upload_speed` (baud is a no-op
 on native USB CDC), and `--no-stub`. Splitting `firmware.bin` at `0xC0000` and
@@ -211,18 +273,18 @@ were rewritten before pushing.
 
 ## The queue
 
-Eight done, nine open. Nothing here is started.
+Eleven done, six open.
 
-| # | Item | Note |
+| # | Item | Blocked by |
 |---|---|---|
-| 10 | Hand-drawn glyphs for the emoji still showing as blocks | Limit is 6x8 pixels; the discard list is as much the deliverable as the glyphs |
-| 11 | meshcore.io in MeshCore's brand blue | Needs the real hex; site returns 403 to automated fetches |
-| 12 | Remove `LIVE` from the RADAR heading | Consider whether `IDLE`/`INITIALISING` stay, since they say something `LIVE` does not |
-| 13 | Move the `HEARD` count out of the NODES heading | **Ask where it should go** — the request did not say |
-| 14 | Redesign NODES: most nodes land in `3+ HOPS` | Get the real hop distribution first; guessing the buckets is what produced this |
-| 15 | Only offer DM to nodes that can receive one | Repeaters cannot; the NODES entry point bypasses the picker's filter |
-| 16 | Trackball scrolling should stop at the ends, not change screen | Find out first whether a fast roll emits LEFT/RIGHT, or a screen returns false at its limit |
-| 17 | Colour-code channels and own messages in COMMS | The accent is spoken for; count of usable colours falls out of the contrast check |
+| 13 | Move the `HEARD` count out of the NODES heading | **You** — the request did not say where |
+| 14 | Redesign NODES: most nodes land in `3+ HOPS` | The `HOPS` reading |
+| 17 | Colour-code channels and own messages in COMMS | Nothing. The accent is spoken for, so the count of usable colours falls out of a contrast check against both fields |
+| 10 | Hand-drawn glyphs for the emoji still showing as blocks | The 6x8 cell. The discard list is as much the deliverable as the glyphs |
+| 11 | meshcore.io in MeshCore's brand blue | The real hex; the site returns 403 to automated fetches |
+
+Do 13 and 14 together — both move rows on the same screen, and doing them
+separately means shifting the same layout twice.
 
 Also outstanding and not in the queue:
 
