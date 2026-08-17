@@ -55,6 +55,7 @@ Other documents in this repository:
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | How RIFT fits together, and why each awkward part is that way |
 | [`HANDOFF.md`](HANDOFF.md) | Working notes — hardware facts, protocol details, open items |
 | [`design/handoff.md`](design/handoff.md) | Screen design spec at 1:1 device coordinates |
+| [`WEEKEND-HANDOVER.md`](WEEKEND-HANDOVER.md) | Session log: what landed after 0.4.0, and what the next session starts with. Temporary — delete it once its open thread closes |
 
 ---
 
