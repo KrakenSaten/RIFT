@@ -1568,14 +1568,43 @@ public:
       }
       display.drawTextLeftAlign(2, 194, tmp);
 
-      if (rift_day_mode) {
-        display.setColor(rift_pal.accent);
-        display.fillRect(262, 193, 58, 10);
-        display.setColor(0xFFFF);
+      // Only a chat node can be sent a direct message. Rather than dropping the
+      // prompt on anything else - a missing affordance with no explanation reads
+      // as a bug - the slot names what the node is, which is information this
+      // screen does not otherwise show and which explains the absence by itself.
+      //
+      // The accent is reserved for the case you can actually act on.
+      ContactInfo* sel_contact = the_mesh.lookupContactByPubKey(
+          (uint8_t*) _paths[_sel].pubkey_prefix, 6);
+      const char* dm_label;
+      bool can_dm = false;
+      if (sel_contact == NULL) {
+        dm_label = "not a contact";
       } else {
-        display.setColor(rift_pal.accent);
+        switch (sel_contact->type) {
+          case ADV_TYPE_CHAT:     dm_label = "ENTER: DM"; can_dm = true; break;
+          case ADV_TYPE_REPEATER: dm_label = "repeater";   break;
+          case ADV_TYPE_ROOM:     dm_label = "room";       break;
+          case ADV_TYPE_SENSOR:   dm_label = "sensor";     break;
+          default:                dm_label = "no DM";      break;
+        }
       }
-      display.drawTextRightAlign(display.width() - 2, 194, "ENTER: DM");
+
+      if (can_dm) {
+        // width follows the label rather than being hardcoded, so the day-mode
+        // fill cannot end up shorter or longer than the text it reverses out
+        int lw = (int) strlen(dm_label) * RIFT_CHAR_W + 4;
+        if (rift_day_mode) {
+          display.setColor(rift_pal.accent);
+          display.fillRect(display.width() - 2 - lw, 193, lw, 10);
+          display.setColor(0xFFFF);
+        } else {
+          display.setColor(rift_pal.accent);
+        }
+      } else {
+        display.setColor(rift_pal.mid);
+      }
+      display.drawTextRightAlign(display.width() - 2, 194, dm_label);
     }
 
     renderNavBar(display, RIFT_NAV_NODES);
@@ -1613,8 +1642,16 @@ public:
       // an advert can be heard from a node that is not in the contact book, and
       // then there is nothing to send to - say so rather than opening a compose
       // box whose message could never leave
-      if (the_mesh.lookupContactByPubKey((uint8_t*) key, 6) == NULL) {
+      ContactInfo* contact = the_mesh.lookupContactByPubKey((uint8_t*) key, 6);
+      if (contact == NULL) {
         _task->showAlert("Not a contact yet", 1400);
+        return true;
+      }
+      // Repeaters and sensors do not read messages, so a DM to one goes nowhere
+      // and reports nothing. COMMS' target picker already filters them out; this
+      // screen reaches setDirectTarget() directly and bypassed that.
+      if (contact->type != ADV_TYPE_CHAT) {
+        _task->showAlert("Repeaters can't receive a DM", 1600);
         return true;
       }
       _task->startDirectMessage(key);
