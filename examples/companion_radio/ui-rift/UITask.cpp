@@ -81,6 +81,17 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 #define RIFT_DOUBLETAP_MILLIS  400
 
 #define RIFT_MSG_LOG_SIZE  48
+
+// Where the message history lives, and how long a burst is allowed to settle
+// before it is written.
+//
+// 20 seconds coalesces a conversation into one write while keeping the loss
+// window on a power cut to something a user would describe as "the last thing I
+// said" rather than "this evening". A clean shutdown flushes immediately, so the
+// window only applies to power being pulled.
+#define RIFT_MSGLOG_PATH         "/rift_msgs.dat"
+#define RIFT_MSGLOG_TMP          "/rift_msgs.new"
+#define RIFT_MSGLOG_FLUSH_MILLIS 20000
 #define RIFT_CHAR_W         6   // Adafruit GFX classic font cell at setTextSize(1)
 #define RIFT_LINE_H        12   // row pitch used throughout this codebase
 
@@ -111,6 +122,7 @@ struct RiftMsgLog {
   int head = RIFT_MSG_LOG_SIZE - 1;   // index of newest entry
 
   Entry* add(uint32_t timestamp, const char* origin, const char* msg, bool outgoing) {
+    markDirty();
     head = (head + 1) % RIFT_MSG_LOG_SIZE;
     if (count < RIFT_MSG_LOG_SIZE) count++;
 
@@ -135,6 +147,7 @@ struct RiftMsgLog {
       if (p->expected_ack == ack_hash && !p->delivered) {
         p->delivered = true;
         p->trip_ms = trip_ms;
+        markDirty();
         return;
       }
     }
@@ -144,6 +157,150 @@ struct RiftMsgLog {
   const Entry* peek(int back) const {
     if (back < 0 || back >= count) return NULL;
     return &entries[(head - back + RIFT_MSG_LOG_SIZE * 2) % RIFT_MSG_LOG_SIZE];
+  }
+
+  // ------------------------------------------------------------- persistence
+  //
+  // MeshCore stores no messages, so losing the log on every reboot was the
+  // largest gap a field user actually noticed.
+  //
+  // Three things shape how this is written, and the first is not about wear:
+  //
+  // SPIFFS is also where the private identity lives, and RIFT disables key
+  // export, so a corrupted filesystem costs the node identity permanently with
+  // no way to recover it. That is why the write is atomic - a temporary file
+  // replaced over the real one - so a power cut mid-write can never take the
+  // working file with it.
+  //
+  // It is debounced rather than written per message: a conversation arrives as a
+  // burst, and coalescing a burst into one write is most of the wear saving
+  // available. The cost is a loss window, stated plainly in RIFT_MSGLOG_FLUSH.
+  //
+  // And it blocks. There is no watchdog on the main loop and a blocking call
+  // silently starves the radio, so the duration is measured rather than assumed
+  // and shown on SYSTEM as `msglog:`.
+
+  bool dirty = false;
+  unsigned long dirty_at = 0;   // when, so the write can wait for the burst to end
+  uint32_t last_save_ms = 0;    // how long the last write took, for SYSTEM
+  // Phase breakdown, because the total came out at 553ms for four messages - far
+  // too much data for the data to be the cause, and long enough to starve LoRa.
+  // Which phase costs decides the fix: metadata operations point at keeping one
+  // file handle open, payload time points at splitting the write.
+  uint32_t t_open = 0, t_write = 0, t_close = 0, t_swap = 0;
+
+  void markDirty() { dirty = true; dirty_at = millis(); }
+
+  // Layout: "RMSG", version, count, then records oldest-first. Strings are
+  // length-prefixed rather than fixed - a typical message is a fraction of the
+  // 160-byte maximum, and the file is ~3KB instead of ~12KB because of it.
+  //
+  // Version is checked on load and a mismatch discards rather than guesses.
+  static const uint8_t FILE_VERSION = 1;
+
+  bool save(const char* path, const char* tmp_path) {
+#if defined(ESP32)
+    unsigned long began = millis();
+
+    File f = SPIFFS.open(tmp_path, "w");
+    t_open = (uint32_t) (millis() - began);
+    if (!f) return false;
+    unsigned long t0 = millis();
+
+    uint8_t hdr[6] = { 'R', 'M', 'S', 'G', FILE_VERSION, (uint8_t) count };
+    if (f.write(hdr, sizeof(hdr)) != sizeof(hdr)) { f.close(); SPIFFS.remove(tmp_path); return false; }
+
+    // oldest first, so loading can just replay add()
+    for (int i = count - 1; i >= 0; i--) {
+      const Entry* p = peek(i);
+      if (p == NULL) continue;
+
+      uint8_t olen = (uint8_t) strnlen(p->origin, sizeof(p->origin) - 1);
+      uint8_t mlen = (uint8_t) strnlen(p->msg, sizeof(p->msg) - 1);
+      uint8_t flags = (p->outgoing ? 1 : 0) | (p->delivered ? 2 : 0);
+
+      uint8_t rec[11];
+      memcpy(&rec[0], &p->timestamp, 4);
+      rec[4] = flags;
+      memcpy(&rec[5], &p->trip_ms, 4);
+      rec[9] = olen;
+      rec[10] = mlen;
+
+      if (f.write(rec, sizeof(rec)) != sizeof(rec)
+          || f.write((const uint8_t*) p->origin, olen) != olen
+          || f.write((const uint8_t*) p->msg, mlen) != mlen) {
+        f.close();
+        SPIFFS.remove(tmp_path);
+        return false;
+      }
+    }
+    t_write = (uint32_t) (millis() - t0);
+    t0 = millis();
+    f.close();
+    t_close = (uint32_t) (millis() - t0);
+    t0 = millis();
+
+    // replace atomically - rename over the live file only once the new one is
+    // complete and closed
+    SPIFFS.remove(path);
+    if (!SPIFFS.rename(tmp_path, path)) { SPIFFS.remove(tmp_path); return false; }
+    t_swap = (uint32_t) (millis() - t0);
+
+    last_save_ms = (uint32_t) (millis() - began);
+    dirty = false;
+    return true;
+#else
+    (void) path; (void) tmp_path;
+    return false;
+#endif
+  }
+
+  void load(const char* path) {
+#if defined(ESP32)
+    File f = SPIFFS.open(path, "r");
+    if (!f) return;
+
+    uint8_t hdr[6];
+    if (f.read(hdr, sizeof(hdr)) != sizeof(hdr)
+        || hdr[0] != 'R' || hdr[1] != 'M' || hdr[2] != 'S' || hdr[3] != 'G'
+        || hdr[4] != FILE_VERSION) {
+      f.close();
+      return;   // absent, truncated or a format we do not know - start empty
+    }
+
+    int n = hdr[5];
+    if (n > RIFT_MSG_LOG_SIZE) n = RIFT_MSG_LOG_SIZE;
+
+    for (int i = 0; i < n; i++) {
+      uint8_t rec[11];
+      if (f.read(rec, sizeof(rec)) != sizeof(rec)) break;   // truncated: keep what we have
+
+      uint32_t ts, trip;
+      memcpy(&ts, &rec[0], 4);
+      memcpy(&trip, &rec[5], 4);
+      uint8_t flags = rec[4], olen = rec[9], mlen = rec[10];
+
+      char origin[62], msg[MAX_TEXT_LEN + 1];
+      if (olen >= sizeof(origin) || mlen >= sizeof(msg)) break;   // corrupt length
+      if (f.read((uint8_t*) origin, olen) != olen) break;
+      if (f.read((uint8_t*) msg, mlen) != mlen) break;
+      origin[olen] = 0;
+      msg[mlen] = 0;
+
+      Entry* p = add(ts, origin, msg, (flags & 1) != 0);
+      // Delivery state that survives: whether it landed, and how long it took.
+      // expected_ack, sent_at_ms and timeout_ms are millis-based and meaningless
+      // now, so they stay zero - which reads as "no ack expected" rather than as
+      // a send still waiting. A message that was pending when the power went is
+      // something this device can no longer know the fate of, and saying "..."
+      // forever would be a claim it cannot support.
+      p->delivered = (flags & 2) != 0;
+      p->trip_ms = trip;
+    }
+    f.close();
+#else
+    (void) path;
+#endif
   }
 };
 
@@ -996,6 +1153,26 @@ public:
     display.drawTextRightAlign(display.width() - 2, y, tmp);
     y += RIFT_LINE_H;
 #endif
+
+    // How long the last message-log write blocked for, and how many messages it
+    // held. There is no watchdog on the main loop, so a blocking call starves the
+    // radio silently - this is the number that says whether the debounce is
+    // enough or whether the write has to be broken up.
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "MSGLOG");
+    display.setColor(rift_pal.fg);
+    sprintf(tmp, "%d msg %ums", msg_log.count, (unsigned) msg_log.last_save_ms);
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
+
+    // open / write / close / remove+rename, so the 553ms can be attributed
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "  phases");
+    display.setColor(rift_pal.fg);
+    sprintf(tmp, "%u %u %u %u", (unsigned) msg_log.t_open, (unsigned) msg_log.t_write,
+                                (unsigned) msg_log.t_close, (unsigned) msg_log.t_swap);
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
 
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(LX, y, "FREE HEAP");
@@ -3054,6 +3231,11 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   ui_started_at = millis();
   _alert_expiry = 0;
 
+  // Before any screen exists, so COMMS and the popup open with the history
+  // already in place rather than filling in a moment later.
+  msg_log.load(RIFT_MSGLOG_PATH);
+  RIFT_MARK("msgs");
+
   splash = new RiftSplashScreen(this);
   msg_preview = new RiftMsgPreviewScreen(this);
   nav_screens[RIFT_NAV_MESH] = new RiftMeshScreen(this, node_prefs);
@@ -3245,6 +3427,11 @@ void UITask::gotoCommsScreen() {
 */
 void UITask::shutdown(bool restart){
 
+  // A clean shutdown has no reason to lose the last few messages, so the
+  // debounce is skipped here. This is also the only path that makes the loss
+  // window in RIFT_MSGLOG_FLUSH_MILLIS apply solely to power being pulled.
+  if (msg_log.dirty) msg_log.save(RIFT_MSGLOG_PATH, RIFT_MSGLOG_TMP);
+
   #ifdef PIN_BUZZER
   buzzer.shutdown();
   uint32_t buzzer_timer = millis();
@@ -3424,6 +3611,15 @@ void UITask::loop() {
 
   if (curr) curr->poll();
   if (_overlay != NULL) _overlay->poll();
+
+  // Debounced write of the message history. Deliberately not on every message:
+  // a conversation arrives as a burst, this collapses the burst into one write,
+  // and the filesystem being written to is the one holding the unrecoverable
+  // private key. The timer restarts on each new message, so it fires once the
+  // traffic settles rather than every 20 seconds during it.
+  if (msg_log.dirty && millis() - msg_log.dirty_at >= RIFT_MSGLOG_FLUSH_MILLIS) {
+    msg_log.save(RIFT_MSGLOG_PATH, RIFT_MSGLOG_TMP);
+  }
 
   if (_display != NULL && _display->isOn()) {
     if (millis() >= _next_refresh && curr) {
