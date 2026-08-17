@@ -89,6 +89,19 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 // window on a power cut to something a user would describe as "the last thing I
 // said" rather than "this evening". A clean shutdown flushes immediately, so the
 // window only applies to power being pulled.
+// How many heard nodes NODES can hold, and how many hop columns it draws. Up here
+// rather than beside that screen because SYSTEM's diagnostics read them too, and
+// SYSTEM is defined first.
+#define RIFT_CONST_MAX 16
+#define RIFT_HOP_COLS  4
+
+// AdvertPath::path_len is Packet's raw encoding, not a hop count: bits 6-7 carry
+// the hash size minus one and bits 0-5 the number of hops (Mesh.cpp:449). Reading
+// it as a plain count worked only while path_hash_mode was 0 - at 2-byte hashes a
+// two-hop route reads as 66 hops.
+static inline uint8_t riftHopCount(uint8_t path_len) { return mesh::Packet::pathHashCount(path_len); }
+static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::pathHashSize(path_len); }
+
 #define RIFT_MSGLOG_PATH         "/rift_msgs.dat"
 #define RIFT_MSGLOG_TMP          "/rift_msgs.new"
 #define RIFT_MSGLOG_FLUSH_MILLIS 20000
@@ -1154,6 +1167,33 @@ public:
     y += RIFT_LINE_H;
 #endif
 
+    // Hop distribution of everything currently heard. Temporary: NODES buckets
+    // into DIRECT / 1 / 2 / 3+, and the report is that almost everything lands in
+    // the last column on a real mesh, which makes the layout spend three quarters
+    // of its width on the minority. Rebucketing needs the actual distribution
+    // rather than another guess - the buckets were guessed once already.
+    //
+    // n = nodes heard, max = furthest hop count seen, 3+ = how many are beyond the
+    // third column. Remove this row once the columns are redesigned.
+    {
+      AdvertPath paths[RIFT_CONST_MAX];
+      int n = the_mesh.getRecentlyHeard(paths, RIFT_CONST_MAX);
+      int live = 0, maxhop = 0, beyond = 0;
+      for (int i = 0; i < n; i++) {
+        if (paths[i].recv_timestamp == 0 || paths[i].name[0] == 0) break;
+        live++;
+        int h = (int) riftHopCount(paths[i].path_len);
+        if (h > maxhop) maxhop = h;
+        if (h >= RIFT_HOP_COLS - 1) beyond++;
+      }
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(LX, y, "HOPS");
+      display.setColor(rift_pal.fg);
+      sprintf(tmp, "n%d max%d 3+%d", live, maxhop, beyond);
+      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      y += RIFT_LINE_H;
+    }
+
     // How long the last message-log write blocked for, and how many messages it
     // held. There is no watchdog on the main loop, so a blocking call starves the
     // radio silently - this is the number that says whether the debounce is
@@ -1338,17 +1378,8 @@ public:
 // Note there is no per-node RSSI here: adverts are cached without signal
 // strength, so brightness encodes recency (how long since we last heard the
 // node) rather than link quality.
-#define RIFT_CONST_MAX 16
-#define RIFT_HOP_COLS 4
 #define RIFT_HOP_ROWS 3
 #define RIFT_NODE_NAME_MAX 10
-
-// AdvertPath::path_len is Packet's raw encoding, not a hop count: bits 6-7 carry
-// the hash size minus one and bits 0-5 the number of hops (Mesh.cpp:449). Reading
-// it as a plain count worked only while path_hash_mode was 0 - at 2-byte hashes a
-// two-hop route reads as 66 hops.
-static inline uint8_t riftHopCount(uint8_t path_len) { return mesh::Packet::pathHashCount(path_len); }
-static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::pathHashSize(path_len); }
 
 class RiftConstellationScreen : public RiftScreen {
   UITask* _task;
@@ -2140,10 +2171,16 @@ public:
   int render(DisplayDriver& display) override {
     if (_view == VIEW_WATERFALL) return renderWaterfall(display);
 
-    const char* status = "LIVE";
-    if (_state == OFF) status = "IDLE";
-    else if (!_wifi_up && !_ble_up) status = "INITIALISING";
-    renderHeading(display, status);
+    // No heading while scanning. `LIVE` said nothing the screen did not already
+    // show - the device count below it is the evidence that scanning is happening,
+    // and it moves. The two states that are *not* obvious keep their heading:
+    // `IDLE` means the count is stale rather than zero, and `INITIALISING` means
+    // the radios have not come up yet, so an empty list means nothing yet.
+    //
+    // The heading therefore appears exactly when there is something to say. That
+    // is deliberate rather than a flicker.
+    if (_state == OFF) renderHeading(display, "IDLE");
+    else if (!_wifi_up && !_ble_up) renderHeading(display, "INITIALISING");
 
     // snapshot under the lock, then draw without holding it
     RfContact snap[RIFT_RF_MAX];
