@@ -320,25 +320,23 @@ confusing the wire form with the display form is this feature's sharpest trap.
    Sharpest trap, still: `ø` on the air must be UTF-8 `0xC3 0xB8`. `0x01` is a
    display-side placeholder only, and putting it in outgoing text sends a C0
    control byte that other clients may mangle or truncate.
-3. **Report the I²C bus issue upstream.** It costs every T-Deck user four minutes
-   of boot. Measurements are in commit `3528d80a`.
-4. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning the version
+3. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning the version
    is only partial — the `?module` form resolves its dependencies from the CDN at
    load time. Real self-hosting needs an npm build step.
-5. **`.github/actions/setup-build-environment`** is upstream's and still refers to
+4. **`.github/actions/setup-build-environment`** is upstream's and still refers to
    two actions by tag. Pinning there would change their workflows too.
-6. **`QUIET` has never been seen on hardware.** It needs a quarter of an hour of
+5. **`QUIET` has never been seen on hardware.** It needs a quarter of an hour of
    silence, so only the threshold is covered, by native test. `NO SIGNAL` and
    `IDLE` were both confirmed on device.
-7. **Should an idle COMMS accept message popups?** `RiftCommsScreen::isModal()`
+6. **Should an idle COMMS accept message popups?** `RiftCommsScreen::isModal()`
    returns true unconditionally, which preserves the behaviour that predates the
    lifecycle work: COMMS was exempt from popups outright, because the message is
    already in the history there and a popup would drop a half-typed line. The
    honest answer is `_picking || _len > 0`. Changing it is a design decision, and
    was deliberately kept out of the refactor.
-8. **Why a single flash write over ~1.2 MB fails.** Section 1 has a working split
+7. **Why a single flash write over ~1.2 MB fails.** Section 1 has a working split
    write and what was ruled out, but not a cause.
-9. **Emoji still show as blocks past the mapped set**, and the user reports that
+8. **Emoji still show as blocks past the mapped set**, and the user reports that
    as too many for current message traffic. The limit is now fundamental rather
    than a gap in the table: CP437 has no emoji, and what remains has no honest
    ASCII synonym — mapping it anyway would put a claim on screen the sender did
@@ -347,7 +345,7 @@ confusing the wire form with the display form is this feature's sharpest trap.
    antialiasing, so the list has to be chosen for shapes that survive that size.
    An unrecognisable custom glyph is worse than a block: a block admits it cannot
    draw the thing, a vague shape looks like it means something specific.
-10. **The design renderings in `design/screens/` show the old chrome.** They still
+9. **The design renderings in `design/screens/` show the old chrome.** They still
     match `design/handoff.md` as originally written, which is why both are marked
     superseded rather than rewritten, but the README now has to caveat them. Either
     redraw them or accept the caveat permanently.
