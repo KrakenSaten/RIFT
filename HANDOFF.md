@@ -135,7 +135,9 @@ than any amount of code reading.
   datasheet's track-id-first layout. Calibration: display top-left = raw (228, 8),
   bottom-right = raw (6, 310). Status register 0x814E, bit 7 = data ready, and it
   must be written back to 0 or the controller stops reporting.
-- **Keyboard** is I²C 0x55, polled at 100 ms.
+- **Keyboard** is I²C 0x55, polled at 20 ms - `KEYBOARD_POLL_MILLIS` in the rift
+  environment. The 100 ms in `TDeckKeyboard.h` is only the fallback for a build
+  that does not set it; at 100 ms keystrokes were being missed.
 - **There is no key repeat and no key-up, so a long press cannot be detected.**
   Measured: holding a key produces exactly one event, and every read after it
   returns 0 for as long as the key stays down. Holding `a` in a text field types
