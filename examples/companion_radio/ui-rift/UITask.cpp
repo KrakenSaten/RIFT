@@ -570,6 +570,8 @@ static const RiftPalette RIFT_DAY = {
 RiftPalette rift_pal = RIFT_NIGHT;
 bool rift_day_mode = false;
 bool rift_screen_always_on = false;
+uint16_t rift_msg_wakes = 0;
+uint32_t rift_last_wake_ms = 0;
 
 // Four bytes on SPIFFS: magic, version, flags. Small enough that the write cost
 // that dominates the message log does not apply, and it only happens when a
@@ -1404,6 +1406,20 @@ public:
     display.setColor(rift_pal.fg);
     sprintf(tmp, "%s %umV", board.isExternalPowered() ? "yes" : "no",
             (unsigned) _task->getBattMilliVolts());
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
+
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "MSG WAKE");
+    display.setColor(rift_pal.fg);
+    if (rift_msg_wakes == 0) {
+      strcpy(tmp, "none yet");
+    } else {
+      uint32_t age = (uint32_t) millis() - rift_last_wake_ms;
+      if (age < 60000u)        sprintf(tmp, "%u, %us ago", rift_msg_wakes, (unsigned) (age / 1000u));
+      else if (age < 3600000u) sprintf(tmp, "%u, %um ago", rift_msg_wakes, (unsigned) (age / 60000u));
+      else                     sprintf(tmp, "%u, %uh ago", rift_msg_wakes, (unsigned) (age / 3600000u));
+    }
     display.drawTextRightAlign(display.width() - 2, y, tmp);
     y += RIFT_LINE_H;
 
@@ -3618,8 +3634,14 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   }
 
   if (_display != NULL) {
+    // The only notification this board has. There is no sounder and no vibration
+    // motor in this variant, so a message arriving while the screen is dark has
+    // exactly one way to announce itself. Suppressed only when a companion app is
+    // attached, because then the phone is doing the notifying.
     if (!_display->isOn() && !hasConnection()) {
       _display->turnOn();
+      if (rift_msg_wakes < 0xFFFF) rift_msg_wakes++;
+      rift_last_wake_ms = (uint32_t) millis();
     }
     if (_display->isOn()) {
       _auto_off = millis() + AUTO_OFF_MILLIS;

@@ -38,6 +38,14 @@ extern bool rift_day_mode;
 // KEEP_DISPLAY_ON_USB cannot see it - this is the switch that needs no detection.
 extern bool rift_screen_always_on;
 
+// The screen coming on IS the notification on this board - there is no buzzer or
+// vibration motor wired in this variant, so notify() compiles to nothing. That
+// makes the wake a feature rather than a side effect, and these two exist so a
+// report of "it did not notify me" can be checked instead of guessed at: whether
+// the code fired, and how long ago.
+extern uint16_t rift_msg_wakes;
+extern uint32_t rift_last_wake_ms;
+
 // Both of the above survive a reboot in a small RIFT-owned file. NodePrefs is
 // upstream's and serialised, so adding fields there would reach every build.
 void riftLoadSettings();

@@ -122,6 +122,30 @@ The UI is selected purely by build flags. `ui-new`, `ui-orig`, `ui-tiny` and
 
 ---
 
+## 2b. The screen coming on is the notification
+
+Stated as a requirement rather than left as an implementation detail, because it
+is easy to mistake for one and remove.
+
+**This board has no sounder and no vibration motor.** `PIN_BUZZER` and
+`PIN_VIBRATION` are not defined for the T-Deck variant, so `UITask::notify()`
+compiles to nothing at all - even though `MyMesh` calls it correctly for both
+contact and channel messages. The whole notification path exists in software with
+no output device at the end of it.
+
+So a message arriving while the display is dark has exactly one way to announce
+itself: `newMsg()` calls `turnOn()`. That line is the notification. It is
+suppressed only when a companion app is attached, because then the phone is doing
+the notifying.
+
+`MSG WAKE` on SYSTEM shows how many times it has fired and how long ago, so a
+report of "it did not notify me" can be checked rather than reasoned about - the
+alternative being three plausible explanations and no way to choose between them.
+
+Audio through the ES8311 codec is the only route to an audible alert and is
+deliberately deferred: it needs I2S and codec bring-up, which is real work rather
+than a flag.
+
 ## 3. Hardware facts that cost time
 
 Every one of these was wrong on the first assumption and only settled by putting
