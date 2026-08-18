@@ -25,6 +25,7 @@ import subprocess
 import sys
 
 APP_OFFSET = 0x10000
+APP_END = 0x650000         # app0 is 6400 KB; app1 starts here (partition table)
 SPLIT_AT = 786432          # 0xC0000, sector-aligned
 CHIP = "esp32s3"
 
@@ -61,6 +62,19 @@ def main():
 
     image = open(args.firmware, "rb").read()
     print("firmware: %s (%d bytes, %.2f MB)" % (args.firmware, len(image), len(image) / 1048576.0))
+
+    # Refuse before touching the device rather than half-writing something wrong.
+    # 0xE9 is the ESP image magic - the same check that caught a 404 page being
+    # served as a firmware binary from the flasher page.
+    if not image or image[0] != 0xE9:
+        sys.exit("not an ESP32 image: first byte is 0x%02X, expected 0xE9"
+                 % (image[0] if image else 0))
+    end = APP_OFFSET + len(image)
+    if end > APP_END:
+        sys.exit("image ends at 0x%X, past the app partition at 0x%X - %d bytes too big"
+                 % (end, APP_END, end - APP_END))
+    print("fits app0: 0x%X..0x%X of 0x%X (%.0f%% used)"
+          % (APP_OFFSET, end, APP_END, 100.0 * len(image) / (APP_END - APP_OFFSET)))
 
     if args.single or len(image) <= SPLIT_AT:
         chunks = [(APP_OFFSET, image)]

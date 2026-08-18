@@ -5,6 +5,15 @@
 #include "../MyMesh.h"
 #include "target.h"
 
+// RiftLogic.h mirrors these so it can be compiled without MeshCore for the native
+// tests. If upstream ever renumbers them, fail here rather than silently applying
+// the wrong policy.
+static_assert(RIFT_ADV_CHAT == ADV_TYPE_CHAT, "advert type drift");
+static_assert(RIFT_ADV_REPEATER == ADV_TYPE_REPEATER, "advert type drift");
+static_assert(RIFT_ADV_ROOM == ADV_TYPE_ROOM, "advert type drift");
+static_assert(RIFT_ADV_SENSOR == ADV_TYPE_SENSOR, "advert type drift");
+
+
 #ifdef RIFT_RADAR
   #include <WiFi.h>
   #include <BLEDevice.h>
@@ -211,7 +220,32 @@ struct RiftMsgLog {
   // Version is checked on load and a mismatch discards rather than guesses.
   static const uint8_t FILE_VERSION = 1;
 
+  // Retry accounting. save() leaves dirty set when it fails, and the flush
+  // condition is "dirty and the debounce has elapsed" - which stays true forever
+  // once it has. A persistent SPIFFS failure therefore retried on every single
+  // loop iteration, at ~553ms a go, which is a device that does nothing but
+  // hammer flash and starve the radio. Back off instead, and show the count.
+  uint8_t save_failures = 0;
+  unsigned long retry_at = 0;
+
+  // both in RiftLogic.h, so the backoff is tested without a filesystem
+  bool dueToSave(unsigned long now) const {
+    return riftShouldFlush(dirty, (uint32_t) now, (uint32_t) dirty_at,
+                           RIFT_MSGLOG_FLUSH_MILLIS, save_failures, (uint32_t) retry_at);
+  }
+
   bool save(const char* path, const char* tmp_path) {
+    bool ok = saveInner(path, tmp_path);
+    if (ok) {
+      save_failures = 0;
+    } else if (save_failures < 255) {
+      save_failures++;
+      retry_at = millis() + riftSaveBackoffMillis(save_failures);
+    }
+    return ok;
+  }
+
+  bool saveInner(const char* path, const char* tmp_path) {
 #if defined(ESP32)
     unsigned long began = millis();
 
@@ -300,7 +334,7 @@ struct RiftMsgLog {
       origin[olen] = 0;
       msg[mlen] = 0;
 
-      Entry* p = add(ts, origin, msg, (flags & 1) != 0);
+      Entry* p = add(ts, origin, msg, (flags & 1) != 0);   // clears dirty below
       // Delivery state that survives: whether it landed, and how long it took.
       // expected_ack, sent_at_ms and timeout_ms are millis-based and meaningless
       // now, so they stay zero - which reads as "no ack expected" rather than as
@@ -311,6 +345,12 @@ struct RiftMsgLog {
       p->trip_ms = trip;
     }
     f.close();
+
+    // Restoring is not a change. add() marks the log dirty because that is what
+    // it means for a new message, and load() reuses it - so a history just read
+    // back correctly was written out again twenty seconds after every boot.
+    dirty = false;
+    dirty_at = 0;
 #else
     (void) path;
 #endif
@@ -1599,7 +1639,9 @@ public:
       }
       display.drawTextLeftAlign(2, 194, tmp);
 
-      // Only a chat node can be sent a direct message. Rather than dropping the
+      // Only some node types can be sent a direct message - riftCanDirectMessage()
+      // is the one place that decides, shared with the COMMS picker, which used to
+      // disagree with this screen. Rather than dropping the
       // prompt on anything else - a missing affordance with no explanation reads
       // as a bug - the slot names what the node is, which is information this
       // screen does not otherwise show and which explains the absence by itself.
@@ -1612,13 +1654,8 @@ public:
       if (sel_contact == NULL) {
         dm_label = "not a contact";
       } else {
-        switch (sel_contact->type) {
-          case ADV_TYPE_CHAT:     dm_label = "ENTER: DM"; can_dm = true; break;
-          case ADV_TYPE_REPEATER: dm_label = "repeater";   break;
-          case ADV_TYPE_ROOM:     dm_label = "room";       break;
-          case ADV_TYPE_SENSOR:   dm_label = "sensor";     break;
-          default:                dm_label = "no DM";      break;
-        }
+        can_dm = riftCanDirectMessage(sel_contact->type);
+        dm_label = can_dm ? "ENTER: DM" : riftAdvertTypeName(sel_contact->type);
       }
 
       if (can_dm) {
@@ -1681,7 +1718,7 @@ public:
       // Repeaters and sensors do not read messages, so a DM to one goes nowhere
       // and reports nothing. COMMS' target picker already filters them out; this
       // screen reaches setDirectTarget() directly and bypassed that.
-      if (contact->type != ADV_TYPE_CHAT) {
+      if (!riftCanDirectMessage(contact->type)) {
         _task->showAlert("Repeaters can't receive a DM", 1600);
         return true;
       }
@@ -2662,7 +2699,7 @@ private:
 
     // only nodes that can actually receive a text message - repeaters and
     // sensors have no one reading them
-    if (contact.type != ADV_TYPE_CHAT && contact.type != ADV_TYPE_ROOM) return;
+    if (!riftCanDirectMessage(contact.type)) return;
 
     // the list is finite; say so instead of dropping contacts silently. Only
     // reachable contacts count, so the warning does not fire for repeaters.
@@ -3691,7 +3728,7 @@ void UITask::loop() {
   // and the filesystem being written to is the one holding the unrecoverable
   // private key. The timer restarts on each new message, so it fires once the
   // traffic settles rather than every 20 seconds during it.
-  if (msg_log.dirty && millis() - msg_log.dirty_at >= RIFT_MSGLOG_FLUSH_MILLIS) {
+  if (msg_log.dueToSave(millis())) {
     msg_log.save(RIFT_MSGLOG_PATH, RIFT_MSGLOG_TMP);
   }
 

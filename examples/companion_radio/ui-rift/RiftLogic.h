@@ -397,3 +397,57 @@ static inline void riftFormatAge(uint32_t millis_since, char* buf, size_t len) {
     else           snprintf(buf, len, "%ud", (unsigned) days);
   }
 }
+
+// Who can actually receive a direct message.
+//
+// NODES allowed ADV_TYPE_CHAT only while the COMMS picker allowed CHAT and ROOM,
+// so a room you could message from one screen was refused from the other with an
+// explanation that sounded authoritative. One rule, in one place, used by both.
+//
+// Rooms are included: a room server receives and stores messages, which is the
+// whole point of it. Repeaters and sensors do not read, so a send to one goes
+// nowhere and reports nothing.
+//
+// The values mirror AdvertDataHelpers.h so this header stays free of MeshCore and
+// can be tested natively; UITask.cpp static_asserts that they still agree.
+#define RIFT_ADV_NONE      0
+#define RIFT_ADV_CHAT      1
+#define RIFT_ADV_REPEATER  2
+#define RIFT_ADV_ROOM      3
+#define RIFT_ADV_SENSOR    4
+
+static inline bool riftCanDirectMessage(uint8_t advert_type) {
+  return advert_type == RIFT_ADV_CHAT || advert_type == RIFT_ADV_ROOM;
+}
+
+// What to call it on screen when it cannot. A missing affordance with no reason
+// reads as a bug, and the type is information the screen does not otherwise show.
+static inline const char* riftAdvertTypeName(uint8_t advert_type) {
+  switch (advert_type) {
+    case RIFT_ADV_CHAT:     return "chat";
+    case RIFT_ADV_REPEATER: return "repeater";
+    case RIFT_ADV_ROOM:     return "room";
+    case RIFT_ADV_SENSOR:   return "sensor";
+    default:                return "unknown";
+  }
+}
+
+// When the message log may next be written.
+//
+// save() leaves the log dirty when it fails, and the flush condition is "dirty
+// and the debounce elapsed" - which stays true once it has. A persistent SPIFFS
+// failure therefore retried every loop iteration at ~553ms a go. These two are
+// the decision, extracted so the backoff can be tested without a filesystem.
+static inline uint32_t riftSaveBackoffMillis(uint8_t failures) {
+  if (failures <= 1) return 5000u;
+  if (failures == 2) return 15000u;
+  return 60000u;
+}
+
+static inline bool riftShouldFlush(bool dirty, uint32_t now, uint32_t dirty_at,
+                                   uint32_t debounce, uint8_t failures, uint32_t retry_at) {
+  if (!dirty) return false;
+  if (now - dirty_at < debounce) return false;          // burst has not settled
+  if (failures > 0 && (int32_t) (now - retry_at) < 0) return false;   // backing off
+  return true;
+}

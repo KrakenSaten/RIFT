@@ -417,6 +417,79 @@ TEST(FormatAge, DegenerateBufferIsNotWritten) {
     riftFormatAge(1000, NULL, sizeof(buf));   // must not crash
 }
 
+// ------------------------------------------------------------ DM capability
+
+TEST(CanDirectMessage, ChatAndRoomsReceive) {
+    EXPECT_TRUE(riftCanDirectMessage(RIFT_ADV_CHAT));
+    EXPECT_TRUE(riftCanDirectMessage(RIFT_ADV_ROOM));   // a room server stores messages
+}
+
+TEST(CanDirectMessage, RepeatersAndSensorsDoNot) {
+    EXPECT_FALSE(riftCanDirectMessage(RIFT_ADV_REPEATER));
+    EXPECT_FALSE(riftCanDirectMessage(RIFT_ADV_SENSOR));
+    EXPECT_FALSE(riftCanDirectMessage(RIFT_ADV_NONE));
+    EXPECT_FALSE(riftCanDirectMessage(200));            // unknown type
+}
+
+// The whole reason this is one function: NODES allowed chat only while the COMMS
+// picker allowed chat and rooms, so a room was offered on one screen and refused
+// on the other.
+TEST(CanDirectMessage, OneAnswerForEveryType) {
+    for (int t = 0; t < 256; t++) {
+        bool a = riftCanDirectMessage((uint8_t) t);
+        bool b = riftCanDirectMessage((uint8_t) t);
+        EXPECT_EQ(a, b);
+        if (!a) EXPECT_STRNE("", riftAdvertTypeName((uint8_t) t));   // always explainable
+    }
+}
+
+// ------------------------------------------------------------ message log flush
+
+TEST(ShouldFlush, WaitsForTheBurstToSettle) {
+    EXPECT_FALSE(riftShouldFlush(true, 1000, 1000, 20000, 0, 0));
+    EXPECT_FALSE(riftShouldFlush(true, 20999, 1000, 20000, 0, 0));
+    EXPECT_TRUE (riftShouldFlush(true, 21000, 1000, 20000, 0, 0));
+}
+
+TEST(ShouldFlush, CleanLogIsNeverWritten) {
+    EXPECT_FALSE(riftShouldFlush(false, 999999, 0, 20000, 0, 0));
+}
+
+// The bug: a failed save left the log dirty with an old timestamp, so the
+// condition stayed true and the save was retried every loop iteration - at
+// ~553ms each, on the same loop as the radio.
+TEST(ShouldFlush, AFailedSaveDoesNotRetryImmediately) {
+    uint32_t now = 100000;
+    uint32_t retry = now + riftSaveBackoffMillis(1);
+    EXPECT_FALSE(riftShouldFlush(true, now + 1, 0, 20000, 1, retry));
+    EXPECT_FALSE(riftShouldFlush(true, retry - 1, 0, 20000, 1, retry));
+    EXPECT_TRUE (riftShouldFlush(true, retry, 0, 20000, 1, retry));
+}
+
+TEST(ShouldFlush, BackoffGrowsAndThenHolds) {
+    EXPECT_EQ(5000u,  riftSaveBackoffMillis(1));
+    EXPECT_EQ(15000u, riftSaveBackoffMillis(2));
+    EXPECT_EQ(60000u, riftSaveBackoffMillis(3));
+    EXPECT_EQ(60000u, riftSaveBackoffMillis(50));
+    EXPECT_EQ(60000u, riftSaveBackoffMillis(255));
+}
+
+TEST(ShouldFlush, SurvivesTheMillisWrap) {
+    // Retry deadline computed just before the wrap, now just after it. dirty_at
+    // has to be before the wrap too, or the debounce is what blocks rather than
+    // the backoff - which is what the first draft of this test actually measured.
+    uint32_t dirty_at = 0xFFFF0000u;
+    uint32_t retry = 0xFFFFFF00u + 5000u;      // wraps to 0x00001288
+    EXPECT_FALSE(riftShouldFlush(true, 0xFFFFFF00u, dirty_at, 20000, 1, retry));
+    EXPECT_TRUE (riftShouldFlush(true, retry, dirty_at, 20000, 1, retry));
+    EXPECT_TRUE (riftShouldFlush(true, retry + 1000, dirty_at, 20000, 1, retry));
+
+    // and the debounce itself has to survive the wrap independently: 10s after
+    // dirty_at is not yet due, and a now that has wrapped past it is
+    EXPECT_FALSE(riftShouldFlush(true, dirty_at + 10000u, dirty_at, 20000, 0, 0));
+    EXPECT_TRUE (riftShouldFlush(true, retry, dirty_at, 20000, 0, 0));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
