@@ -5,7 +5,7 @@ front page; this is the working notes. Everything here was learned by doing, and
 several items cost hours the first time.
 
 **Repo:** https://github.com/KrakenSaten/RIFT — default branch `rift-tdeck`
-**Current:** v0.4.0
+**Current:** v0.5.0
 **Hardware:** original LilyGO T-Deck (ESP32-S3, 320×240 ST7789, QWERTY, trackball,
 GT911 touch, SX1262 LoRa)
 
@@ -323,8 +323,14 @@ confusing the wire form with the display form is this feature's sharpest trap.
 
 ### Open items
 
-1. **Message history does not survive reboot.** RAM-only by design; persisting it
-   means new code and flash wear.
+1. **The `HOPS` distribution has never been read on a live mesh.** SYSTEM reports
+   `n` nodes / `max` hop count / `3+` beyond the third column. It reads `n0` on a
+   node that has heard nothing, so it fills itself in use rather than on demand.
+   Two things wait on it: moving the `HEARD` count out of the NODES heading, and
+   rebucketing the NODES hop columns — the report is that almost everything lands
+   in `3+`, which spends three quarters of the width on the minority. Do both
+   together; separately they shift the same layout twice. The buckets were guessed
+   once already, which is why this waits for a number.
 2. **Nordic character input — done, one thing left to confirm.**
 
    Double-tapping a base vowel in COMMS opens a picker: `a` offers æ å ä, `o`
@@ -363,12 +369,11 @@ confusing the wire form with the display form is this feature's sharpest trap.
 5. **`QUIET` has never been seen on hardware.** It needs a quarter of an hour of
    silence, so only the threshold is covered, by native test. `NO SIGNAL` and
    `IDLE` were both confirmed on device.
-6. **Should an idle COMMS accept message popups?** `RiftCommsScreen::isModal()`
-   returns true unconditionally, which preserves the behaviour that predates the
-   lifecycle work: COMMS was exempt from popups outright, because the message is
-   already in the history there and a popup would drop a half-typed line. The
-   honest answer is `_picking || _len > 0`. Changing it is a design decision, and
-   was deliberately kept out of the refactor.
+6. **Report the I²C bug upstream.** Measurements are in commit `3528d80a`. The
+   fix took this device's boot from 243 s to 5.1 s; every other T-Deck user on
+   MeshCore is still paying the four minutes and does not know why. It is the
+   largest effect available outside this repo. Outward-facing, so it needs an
+   explicit go-ahead — asked for and deferred as of 0.5.0, not declined.
 7. **Why a long flash write fails at all.** Now known to be the transfer length
    rather than the address - see section 1 - but not *why* the transport gives up
    there. Section 1 has a working split
@@ -382,7 +387,13 @@ confusing the wire form with the display form is this feature's sharpest trap.
    antialiasing, so the list has to be chosen for shapes that survive that size.
    An unrecognisable custom glyph is worse than a block: a block admits it cannot
    draw the thing, a vague shape looks like it means something specific.
-9. **The design renderings in `design/screens/` show the old chrome.** They still
+9. **Channels are not colour-coded in COMMS.** The analysis is done and is in
+   `design/channel-colours.md`: with the accent already spoken for, the usable
+   colours fall out of a contrast check against both the night and day fields, and
+   at 4.5:1 against both the luminance band is L 0.175-0.183 — narrow, but 2187
+   candidates clear 3:1. Hue is free; lightness is not. The implementation has not
+   been written.
+10. **The design renderings in `design/screens/` show the old chrome.** They still
     match `design/handoff.md` as originally written, which is why both are marked
     superseded rather than rewritten, but the README now has to caveat them. Either
     redraw them or accept the caveat permanently.

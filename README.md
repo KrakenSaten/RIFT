@@ -54,8 +54,8 @@ Other documents in this repository:
 | [`BUILDING.md`](BUILDING.md) | Toolchain, environment traps, commands, CI, supply chain |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | How RIFT fits together, and why each awkward part is that way |
 | [`HANDOFF.md`](HANDOFF.md) | Working notes — hardware facts, protocol details, open items |
+| [`WEEKEND-HANDOVER.md`](WEEKEND-HANDOVER.md) | Session log from the machine this moved to over a weekend. Superseded by `HANDOFF.md` for open items; kept for the measurements and the two dead ends it records |
 | [`design/handoff.md`](design/handoff.md) | Screen design spec at 1:1 device coordinates |
-| [`WEEKEND-HANDOVER.md`](WEEKEND-HANDOVER.md) | Session log: what landed after 0.4.0, and what the next session starts with. Temporary — delete it once its open thread closes |
 
 ---
 
@@ -327,7 +327,7 @@ Boot is now 5.1 seconds. Why the probe does that is still not established — se
 
 ## Status
 
-**Current release: 0.4.0** — set by the `RIFT_VERSION` build flag and shown on the
+**Current release: 0.5.0** — set by the `RIFT_VERSION` build flag and shown on the
 boot screen and SYSTEM, alongside the MeshCore version it is built on. Deliberately
 0.x: it works and is verified on hardware, but it has had no external users and the
 limitations above are real.
@@ -337,7 +337,40 @@ over the companion protocol next to `FIRMWARE_VER_CODE`.
 
 Every screen from the original design concept is implemented and verified on
 physical hardware. Resource use: ~50 % of internal static RAM, ~25 % of the 6.5 MB
-app partition. 91 native tests.
+app partition. 110 native tests across eight suites.
+
+**0.5.0** is a correctness release. Nothing on screen moved except the bottom of
+SYSTEM, and everything that changed was something that would have gone wrong
+quietly.
+
+The message log no longer writes through a temporary file. The swap it performed
+was never atomic — `remove` and `rename` are two operations, with a window between
+them holding no log at all — and it cost four filesystem operations to buy a
+guarantee it did not deliver. The write is now one buffered call per 512 bytes
+instead of three per message, in place, and `load()` is what makes that safe: it
+keeps the records that arrived and discards the rest. A save that is interrupted
+costs the newest messages rather than the file. SYSTEM still reports what the write
+cost, because that number is the only evidence the main loop is not being starved.
+
+Every `millis()` deadline is wrap-safe. The one that mattered was the render
+interval: for the last interval before the 49.7-day wrap it would have redrawn the
+whole screen on every pass through the main loop, contending with the radio on the
+shared SPI bus, with no watchdog to notice the mesh going quiet. Fixing it exposed
+a second trap — `_next_refresh = 0` meant "redraw now" only because the comparison
+was naive, and under a wrap-safe one it would have been ignored for 25 days of
+every cycle. "Due now" is written relative to now.
+
+Two input bugs. Choosing a Nordic form deleted two characters on the assumption
+that two had just been typed; typing `Hei`, then `a`, backspace, `a` produced
+`Heæ`. The pair is now a fact read from the buffer rather than inferred from
+keypress history. And a keystroke arriving in the same loop iteration as a tap that
+navigated away is dropped rather than delivered to a screen the user can no longer
+see.
+
+The UTF-8 decoder rejects overlong forms, surrogates and anything above U+10FFFF.
+Only the overlong forms had a consequence: they decode into the ASCII range and
+were then dropped as control characters, so a sender could put bytes on the wire
+that this display silently swallowed while other clients rendered them.
 
 **0.4.0** answers a different question on the home screen and reworks the chrome.
 It headlines mesh receive activity — whether this radio is somewhere with a live

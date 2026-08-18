@@ -112,6 +112,7 @@ static inline uint8_t riftHopCount(uint8_t path_len) { return mesh::Packet::path
 static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::pathHashSize(path_len); }
 
 #define RIFT_MSGLOG_PATH         "/rift_msgs.dat"
+// no longer written; kept so a stale one from an older build can be removed
 #define RIFT_MSGLOG_TMP          "/rift_msgs.new"
 #define RIFT_MSGLOG_FLUSH_MILLIS 20000
 #define RIFT_CHAR_W         6   // Adafruit GFX classic font cell at setTextSize(1)
@@ -190,9 +191,15 @@ struct RiftMsgLog {
   //
   // SPIFFS is also where the private identity lives, and RIFT disables key
   // export, so a corrupted filesystem costs the node identity permanently with
-  // no way to recover it. That is why the write is atomic - a temporary file
-  // replaced over the real one - so a power cut mid-write can never take the
-  // working file with it.
+  // no way to recover it. This used to be the argument for writing to a
+  // temporary file and renaming it over the real one. It was the wrong
+  // conclusion twice over: the swap was not atomic, because SPIFFS.remove and
+  // SPIFFS.rename are two operations with a window between them in which no log
+  // exists at all - and guarding a filesystem against a power cut by performing
+  // five write operations instead of two increases the exposure it was supposed
+  // to reduce. The log is written in place, and load() is what makes that safe:
+  // it keeps whatever records arrived and discards the rest, so an interrupted
+  // write costs the newest messages rather than the file.
   //
   // It is debounced rather than written per message: a conversation arrives as a
   // burst, and coalescing a burst into one write is most of the wear saving
@@ -205,11 +212,12 @@ struct RiftMsgLog {
   bool dirty = false;
   unsigned long dirty_at = 0;   // when, so the write can wait for the burst to end
   uint32_t last_save_ms = 0;    // how long the last write took, for SYSTEM
-  // Phase breakdown, because the total came out at 553ms for four messages - far
-  // too much data for the data to be the cause, and long enough to starve LoRa.
-  // Which phase costs decides the fix: metadata operations point at keeping one
-  // file handle open, payload time points at splitting the write.
-  uint32_t t_open = 0, t_write = 0, t_close = 0, t_swap = 0;
+  // Phase breakdown - open / write / close. The total came out at 553ms for four
+  // messages, which is about 200 bytes: far too little data for the volume to be
+  // the cause, and long enough to starve LoRa. The cost was the number of
+  // operations. Kept on SYSTEM because it is the only evidence of whether
+  // removing four of them was enough.
+  uint32_t t_open = 0, t_write = 0, t_close = 0;
 
   void markDirty() { dirty = true; dirty_at = millis(); }
 
@@ -234,8 +242,8 @@ struct RiftMsgLog {
                            RIFT_MSGLOG_FLUSH_MILLIS, save_failures, (uint32_t) retry_at);
   }
 
-  bool save(const char* path, const char* tmp_path) {
-    bool ok = saveInner(path, tmp_path);
+  bool save(const char* path) {
+    bool ok = saveInner(path);
     if (ok) {
       save_failures = 0;
     } else if (save_failures < 255) {
@@ -245,17 +253,29 @@ struct RiftMsgLog {
     return ok;
   }
 
-  bool saveInner(const char* path, const char* tmp_path) {
+  bool saveInner(const char* path) {
 #if defined(ESP32)
     unsigned long began = millis();
 
-    File f = SPIFFS.open(tmp_path, "w");
+    File f = SPIFFS.open(path, "w");
     t_open = (uint32_t) (millis() - began);
     if (!f) return false;
     unsigned long t0 = millis();
 
-    uint8_t hdr[6] = { 'R', 'M', 'S', 'G', FILE_VERSION, (uint8_t) count };
-    if (f.write(hdr, sizeof(hdr)) != sizeof(hdr)) { f.close(); SPIFFS.remove(tmp_path); return false; }
+    // Staged rather than written field by field. Every f.write() crosses the VFS
+    // and SPIFFS layers, and the old shape made three calls per record - so a
+    // 200-byte file cost 13 calls. One call per bufferful costs 1.
+    uint8_t buf[512];
+    size_t used = 0;
+    bool ok = true;
+    // The flush below assumes a whole record always fits in an empty buffer, so
+    // a record is never split across two writes.
+    static_assert(11 + sizeof(Entry::origin) + sizeof(Entry::msg) <= sizeof(buf),
+                  "staging buffer cannot hold one record");
+
+    const uint8_t hdr[6] = { 'R', 'M', 'S', 'G', FILE_VERSION, (uint8_t) count };
+    memcpy(buf, hdr, sizeof(hdr));
+    used = sizeof(hdr);
 
     // oldest first, so loading can just replay add()
     for (int i = count - 1; i >= 0; i--) {
@@ -266,38 +286,42 @@ struct RiftMsgLog {
       uint8_t mlen = (uint8_t) strnlen(p->msg, sizeof(p->msg) - 1);
       uint8_t flags = (p->outgoing ? 1 : 0) | (p->delivered ? 2 : 0);
 
-      uint8_t rec[11];
-      memcpy(&rec[0], &p->timestamp, 4);
-      rec[4] = flags;
-      memcpy(&rec[5], &p->trip_ms, 4);
-      rec[9] = olen;
-      rec[10] = mlen;
-
-      if (f.write(rec, sizeof(rec)) != sizeof(rec)
-          || f.write((const uint8_t*) p->origin, olen) != olen
-          || f.write((const uint8_t*) p->msg, mlen) != mlen) {
-        f.close();
-        SPIFFS.remove(tmp_path);
-        return false;
+      size_t need = 11 + (size_t) olen + (size_t) mlen;
+      if (used + need > sizeof(buf)) {
+        if (f.write(buf, used) != used) { ok = false; break; }
+        used = 0;
       }
+
+      uint8_t* r = buf + used;
+      memcpy(&r[0], &p->timestamp, 4);
+      r[4] = flags;
+      memcpy(&r[5], &p->trip_ms, 4);
+      r[9] = olen;
+      r[10] = mlen;
+      memcpy(&r[11], p->origin, olen);
+      memcpy(&r[11 + olen], p->msg, mlen);
+      used += need;
     }
+    if (ok && used > 0 && f.write(buf, used) != used) ok = false;
     t_write = (uint32_t) (millis() - t0);
+
     t0 = millis();
     f.close();
     t_close = (uint32_t) (millis() - t0);
-    t0 = millis();
 
-    // replace atomically - rename over the live file only once the new one is
-    // complete and closed
-    SPIFFS.remove(path);
-    if (!SPIFFS.rename(tmp_path, path)) { SPIFFS.remove(tmp_path); return false; }
-    t_swap = (uint32_t) (millis() - t0);
+    if (!ok) {
+      // load() would read this happily and keep the records that made it, but the
+      // header claims a count the file does not hold, and leaving it would make
+      // the next boot quietly short of messages with nothing to explain it.
+      SPIFFS.remove(path);
+      return false;
+    }
 
     last_save_ms = (uint32_t) (millis() - began);
     dirty = false;
     return true;
 #else
-    (void) path; (void) tmp_path;
+    (void) path;
     return false;
 #endif
   }
@@ -705,7 +729,7 @@ public:
   }
 
   void poll() override {
-    if (millis() >= dismiss_after) {
+    if (riftDue((uint32_t) millis(), dismiss_after)) {
       RIFT_MARK("home");
       _task->gotoHomeScreen();
     }
@@ -1385,12 +1409,12 @@ public:
     display.drawTextRightAlign(display.width() - 2, y, tmp);
     y += RIFT_LINE_H;
 
-    // open / write / close / remove+rename, so the 553ms can be attributed
+    // open / write / close, so the 553ms can be attributed rather than guessed
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(LX, y, "  phases");
     display.setColor(rift_pal.fg);
-    sprintf(tmp, "%u %u %u %u", (unsigned) msg_log.t_open, (unsigned) msg_log.t_write,
-                                (unsigned) msg_log.t_close, (unsigned) msg_log.t_swap);
+    sprintf(tmp, "%u %u %u", (unsigned) msg_log.t_open, (unsigned) msg_log.t_write,
+                             (unsigned) msg_log.t_close);
     display.drawTextRightAlign(display.width() - 2, y, tmp);
     y += RIFT_LINE_H;
 
@@ -2732,15 +2756,20 @@ public:
     _picking = false;
   }
 
-  // Unconditional, which preserves exactly the behaviour this replaced: newMsg()
-  // exempted COMMS from popups outright, on the grounds that the message is
-  // already in the history right there and a popup would drop a half-typed line.
+  // Unconditional, and this is the right answer rather than a compromise.
   //
-  // The honest answer is `_picking || _len > 0` - COMMS is only really busy while
-  // composing or choosing a target. Changing it would mean a message arriving at
-  // an idle history view now raises a popup, where today it never does. That is a
-  // design decision, not a refactor, so it is left alone deliberately; the
-  // half-typed-line argument holds either way but the idle case is arguable.
+  // It was left as an open question here, on the reading that `_picking || _len > 0`
+  // was the honest condition and that an idle history view had no business
+  // suppressing a popup. That reading assumed the popup would add something. It
+  // does not: the history loop in render() walks the whole message log without
+  // filtering by channel or contact, so an arriving message is already on screen,
+  // at the bottom of the list, on the refresh that newMsg() forces. A popup would
+  // cover the view that is showing the message.
+  //
+  // So both cases point the same way. While composing or picking, a popup would
+  // cost a half-typed line; while idle, it would obscure and duplicate. If the
+  // history is ever filtered per target, this has to be revisited - that is the
+  // change that would make an idle COMMS screen able to miss something.
   bool isModal() const override { return true; }
 private:
   char _target_name[32];
@@ -2989,6 +3018,12 @@ private:
     _input[0] = 0;
     _len = 0;
     _scroll = 0;
+    // Otherwise a send followed by the same letter within the double-tap window
+    // opened the picker over a buffer that no longer holds the first press. The
+    // buffer check above already refuses that case; clearing here means the two
+    // conditions cannot disagree, rather than one covering for the other.
+    _last_key = 0;
+    _last_key_ms = 0;
   }
 
   void send() {
@@ -3111,8 +3146,11 @@ public:
        _target_is_channel(true), _target_channel_idx(RIFT_PUBLIC_CHANNEL_IDX),
        _picking(false), _pick_idx(0), _pick_scroll(0), _pick_count(0),
        _pick_truncated(false),
-       _tab_count(0), _tab_scroll(0), _tab_w(0),
+       // in declaration order: members are initialised in the order they are
+       // declared regardless of how they are listed here, so a list in a
+       // different order reads as a sequence the compiler will not honour
        _tabs_y(0), _hist_top(0), _tab_visible(TAB_VISIBLE),
+       _tab_count(0), _tab_scroll(0), _tab_w(0),
        _last_tabs_refresh(0), _tabs_refreshed_once(false) {
     _input[0] = 0;
     _target_name[0] = 0;
@@ -3331,7 +3369,18 @@ public:
       //
       // millis() - _last_key_ms rather than a stored deadline: unsigned arithmetic
       // is wrap-safe, a future deadline is not.
+      //
+      // The buffer is checked as well as the keypress history, and that is not
+      // belt-and-braces: the picker deletes two characters when a form is chosen,
+      // so it must only open when two are actually there. _last_key alone did not
+      // guarantee it, because backspace does not clear it - typing "Hei", then a,
+      // backspace, a, opened the picker over a buffer holding one a, and choosing
+      // a form deleted the i as well and produced "Heæ". Requiring the character
+      // before the one just inserted to match makes the pair a fact rather than an
+      // inference. _input[_len - 1] is c by construction, so only _len - 2 is
+      // worth testing.
       if (c == _last_key && _last_key_ms != 0
+          && _len >= 2 && _input[_len - 2] == c
           && millis() - _last_key_ms <= RIFT_DOUBLETAP_MILLIS) {
         _last_key = 0;          // a third tap starts over rather than re-firing
         _last_key_ms = 0;
@@ -3526,11 +3575,16 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
   ui_started_at = millis();
   _alert_expiry = 0;
+  _alert[0] = 0;      // the text is what says whether an alert is live
 
   // Before any screen exists, so COMMS and the popup open with the history
   // already in place rather than filling in a moment later.
   riftLoadSettings();   // before the first render, so the palette is right at boot
   msg_log.load(RIFT_MSGLOG_PATH);
+  // Builds before 0.5.0 wrote to a temporary and renamed it over the live file.
+  // A device interrupted mid-save still has that temporary occupying a
+  // filesystem which also holds the identity and has little room to spare.
+  if (SPIFFS.exists(RIFT_MSGLOG_TMP)) SPIFFS.remove(RIFT_MSGLOG_TMP);
   RIFT_MARK("msgs");
 
   splash = new RiftSplashScreen(this);
@@ -3653,14 +3707,14 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
     }
     if (_display->isOn()) {
       _auto_off = millis() + AUTO_OFF_MILLIS;
-      _next_refresh = 100;
+      refreshNow();
     }
   }
 }
 
 void UITask::msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) {
   ((RiftCommsScreen *) nav_screens[RIFT_NAV_COMMS])->onDelivered(ack_hash, trip_time_millis);
-  _next_refresh = 100;   // reflect the new delivery state promptly
+  refreshNow();   // reflect the new delivery state promptly
 }
 
 void UITask::userLedHandler() {
@@ -3702,7 +3756,7 @@ void UITask::setCurrScreen(RiftScreen* c) {
   curr = c;
   if (xn & RIFT_XN_ENTER) c->onEnter();
 
-  _next_refresh = 100;
+  refreshNow();
 }
 
 // A popup over the current screen. curr and nav_idx are untouched, so there is
@@ -3711,12 +3765,12 @@ void UITask::setCurrScreen(RiftScreen* c) {
 void UITask::pushOverlay(RiftScreen* o) {
   if (o == NULL) return;
   _overlay = o;
-  _next_refresh = 100;
+  refreshNow();
 }
 
 void UITask::dismissOverlay() {
   _overlay = NULL;
-  _next_refresh = 100;
+  refreshNow();
 }
 
 void UITask::gotoCommsScreen() {
@@ -3733,7 +3787,7 @@ void UITask::shutdown(bool restart){
   // A clean shutdown has no reason to lose the last few messages, so the
   // debounce is skipped here. This is also the only path that makes the loss
   // window in RIFT_MSGLOG_FLUSH_MILLIS apply solely to power being pulled.
-  if (msg_log.dirty) msg_log.save(RIFT_MSGLOG_PATH, RIFT_MSGLOG_TMP);
+  if (msg_log.dirty) msg_log.save(RIFT_MSGLOG_PATH);
 
   #ifdef PIN_BUZZER
   buzzer.shutdown();
@@ -3848,6 +3902,14 @@ void UITask::loop() {
   // same reason curr was: touch is polled below and can navigate, so resolving
   // the target afterwards delivered the keystroke to something else.
   RiftScreen* key_target = (_overlay != NULL) ? _overlay : curr;
+  // Captured alongside it so the dispatch below can tell whether touch handling
+  // moved the ground underneath the keystroke. Capturing key_target stopped a key
+  // being delivered to a screen the tap had just navigated *to*; it did not stop
+  // the mirror case, where a nav-bar tap calls dismissOverlay() and the keystroke
+  // is then handed to an overlay the user can no longer see - so an ENTER meant
+  // for the popup, or for the new screen, is silently eaten by a dismissed one.
+  RiftScreen* key_overlay_before = _overlay;
+  RiftScreen* key_curr_before = curr;
 
 #ifdef RIFT_INPUT_TOUCH
   {
@@ -3872,17 +3934,17 @@ void UITask::loop() {
       } else if (_overlay != NULL) {
         _overlay->handleTouch(tx, ty);
         _auto_off = millis() + AUTO_OFF_MILLIS;
-        _next_refresh = 100;
+        refreshNow();
       } else if (curr) {
         curr->handleTouch(tx, ty);
         _auto_off = millis() + AUTO_OFF_MILLIS;
-        _next_refresh = 100;
+        refreshNow();
       }
     }
   }
 #endif
 #if defined(BACKLIGHT_BTN)
-  if (millis() > next_backlight_btn_check) {
+  if (riftDue((uint32_t) millis(), next_backlight_btn_check)) {
     bool touch_state = digitalRead(PIN_BUTTON2);
 #if defined(DISP_BACKLIGHT)
     digitalWrite(DISP_BACKLIGHT, !touch_state);
@@ -3894,10 +3956,19 @@ void UITask::loop() {
 #endif
 
   if (c != 0) _last_key = (int) (unsigned char) c;
-  if (c != 0 && key_target) {
+  // Dropped rather than delivered if touch changed what is on screen during this
+  // same iteration. The keystroke was aimed at what the user was looking at, and
+  // that is now gone; neither the old target nor the new one can be said to be
+  // what they meant. Losing one keypress in a window of a few milliseconds costs
+  // less than performing its action on the wrong screen - and the SYSTEM readout
+  // still records it, so a key that vanishes this way is not invisible.
+  bool nav_moved = (_overlay != key_overlay_before) || (curr != key_curr_before);
+  if (c != 0 && key_target && !nav_moved) {
     key_target->handleInput(c);
     _auto_off = millis() + AUTO_OFF_MILLIS;
-    _next_refresh = 100;
+    refreshNow();
+  } else if (c != 0 && nav_moved) {
+    refreshNow();   // the tap that moved us still deserves an immediate repaint
   }
 
   userLedHandler();
@@ -3921,11 +3992,11 @@ void UITask::loop() {
   // private key. The timer restarts on each new message, so it fires once the
   // traffic settles rather than every 20 seconds during it.
   if (msg_log.dueToSave(millis())) {
-    msg_log.save(RIFT_MSGLOG_PATH, RIFT_MSGLOG_TMP);
+    msg_log.save(RIFT_MSGLOG_PATH);
   }
 
   if (_display != NULL && _display->isOn()) {
-    if (millis() >= _next_refresh && curr) {
+    if (riftDue((uint32_t) millis(), _next_refresh) && curr) {
       // Once per frame, for the nav bar to draw. The title bar used to read the
       // ADC inside its own render, so this is no more work - just in one place.
       {
@@ -3942,7 +4013,12 @@ void UITask::loop() {
         int od = _overlay->render(*_display);
         if (od > 0) delay_millis = od;
       }
-      if (millis() < _alert_expiry) {
+      // _alert[0] rather than _alert_expiry != 0. Zero was the "no alert"
+      // sentinel, and a wrap-safe difference cannot express it: !riftDue(now, 0)
+      // is false for the first half of the millis cycle and true for the second,
+      // so past day 24.8 the box would have drawn with no alert to show. The
+      // text is the state, and it is cleared below once the deadline passes.
+      if (_alert[0] != 0 && !riftDue((uint32_t) millis(), _alert_expiry)) {
         // Same panel language as the message overlay: bg fill, accent border. It
         // used to fill with UIColor::popup_bkg, which riftApplyPalette points at
         // rift_pal.bar - the title-bar band, two percent from its own background
@@ -3969,6 +4045,7 @@ void UITask::loop() {
         _display->drawTextCentered(_display->width() / 2, by + 14, _alert);
         _next_refresh = _alert_expiry;
       } else {
+        _alert[0] = 0;   // expired, or never set: stop testing a stale deadline
         _next_refresh = millis() + delay_millis;
       }
       _display->endFrame();
@@ -3986,7 +4063,7 @@ void UITask::loop() {
     if (rift_screen_always_on) {
       _auto_off = millis() + AUTO_OFF_MILLIS;
     }
-    if (millis() > _auto_off) {
+    if (riftDue((uint32_t) millis(), _auto_off)) {
       _display->turnOff();
     }
 #endif
@@ -3997,7 +4074,7 @@ void UITask::loop() {
 #endif
 
 #ifdef AUTO_SHUTDOWN_MILLIVOLTS
-  if (millis() > next_batt_chck) {
+  if (riftDue((uint32_t) millis(), next_batt_chck)) {
     uint16_t milliVolts = getBattMilliVolts();
     if (milliVolts > 0 && milliVolts < AUTO_SHUTDOWN_MILLIVOLTS) {
       if(!board.isExternalPowered()) {
@@ -4025,7 +4102,7 @@ char UITask::checkDisplayOn(char c) {
       c = 0;
     }
     _auto_off = millis() + AUTO_OFF_MILLIS;
-    _next_refresh = 0;
+    refreshNow();
   }
   return c;
 }
@@ -4089,7 +4166,7 @@ void UITask::toggleGPS() {
         }
         the_mesh.savePrefs();
         showAlert(_node_prefs->gps_enabled ? "GPS: Enabled" : "GPS: Disabled", 800);
-        _next_refresh = 0;
+        refreshNow();
         break;
       }
     }
@@ -4107,6 +4184,6 @@ void UITask::toggleBuzzer() {
   _node_prefs->buzzer_quiet = buzzer.isQuiet();
   the_mesh.savePrefs();
   showAlert(buzzer.isQuiet() ? "Buzzer: OFF" : "Buzzer: ON", 800);
-  _next_refresh = 0;
+  refreshNow();
 #endif
 }

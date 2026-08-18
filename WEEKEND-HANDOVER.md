@@ -1,5 +1,19 @@
 # Weekend handover — 0.4.0, and where the next session starts
 
+> **Superseded as of 0.5.0.** `HANDOFF.md` is the live list of open items; where
+> the two disagree, that one is right. What 0.5.0 closed from here: the four-minute
+> boot (fixed, and the item struck at the user's instruction), the `phases`
+> question — the temporary-file swap was removed on the argument rather than the
+> measurement, since it bought a guarantee it did not deliver either way — and the
+> single-flash-write mystery, now narrowed to the transfer length rather than the
+> address. Still live and moved into `HANDOFF.md`: the `HOPS` reading and the two
+> NODES changes waiting on it, and the upstream I²C report, asked for and deferred.
+> Still live and only here: colour-coding channels in COMMS, where the analysis in
+> `design/channel-colours.md` is done and the implementation is not.
+>
+> Kept rather than deleted because the measurements in it are not recorded anywhere
+> else, and because two of them are dead ends worth not repeating.
+
 Written to move between machines. **This is a session log, not a reference.**
 [`HANDOFF.md`](HANDOFF.md) is the durable working notes and stays authoritative;
 if the two ever disagree, believe that one. Delete this file once the open thread

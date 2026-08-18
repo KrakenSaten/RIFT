@@ -121,6 +121,18 @@ class UITask : public AbstractUITask {
   GenericVibration vibration;
 #endif
   unsigned long _next_refresh, _auto_off;
+
+  // "redraw on the next pass through the loop". This used to be written as
+  // _next_refresh = 0 (or 100), which worked only because the comparison was
+  // millis() > _next_refresh and millis() is always far past a small constant.
+  // The comparison is now wrap-safe - riftDue(), a signed difference - and under
+  // that rule a fixed small constant stops meaning "already past" once millis()
+  // crosses 2^31. A forced redraw would then have been ignored from day 24.8 to
+  // day 49.7: a 25-day window in which keystrokes did not repaint the screen,
+  // which is far worse than the wrap glitch the change was made to remove.
+  //
+  // "Due now" has to be expressed relative to now.
+  void refreshNow() { _next_refresh = (unsigned long) millis(); }
   NodePrefs* _node_prefs;
   char _alert[80];
   unsigned long _alert_expiry;
@@ -130,7 +142,11 @@ class UITask : public AbstractUITask {
   int _companion_backlog = 0;
   int _last_key = 0;
   unsigned long ui_started_at, next_batt_chck;
-  int next_backlight_btn_check = 0;
+  // uint32_t, not int: this holds millis() + 300, and a signed int overflows at
+  // day 24.8 - undefined behaviour, and negative long before the millis wrap that
+  // riftDue() exists to handle. Zero is safe as the initial value because it is
+  // only ever read after construction, when millis() is still small.
+  uint32_t next_backlight_btn_check = 0;
 #ifdef PIN_STATUS_LED
   int led_state = 0;
   int next_led_change = 0;

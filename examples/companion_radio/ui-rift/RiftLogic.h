@@ -78,23 +78,62 @@ static inline int riftChannelCapacity(int max_text_len, const char* sender_name)
 // the code point to *cp, or returns 0 for anything malformed - a bad lead byte,
 // a missing or invalid continuation byte, or a sequence that would run past the
 // terminator. Callers advance one byte on 0 so a corrupt stream cannot stall.
+// ------------------------------------------------------------ millis deadlines
+//
+// A plain millis() > deadline comparison is not wrap-safe. millis() wraps at
+// 49.7 days, and a deadline computed as millis() + interval wraps first - so for
+// the last interval before the wrap the deadline is a small number while millis()
+// is still large, and every deadline reads as long past.
+//
+// The consequences ranged from cosmetic to not: an alert that never appeared, a
+// popup that dismissed instantly, and - the one that matters - a render interval
+// that would have redrawn the whole screen on every pass through the main loop,
+// contending with the SX1262 on the shared HSPI bus, with no watchdog to notice
+// the radio going quiet.
+//
+// The subtraction is unsigned, which wraps correctly, and the result is read as
+// signed. Valid for any interval below 2^31 ms - 24.8 days - which every interval
+// in this firmware is by a very wide margin.
+static inline bool riftDue(uint32_t now, uint32_t deadline) {
+  return (int32_t) (now - deadline) >= 0;
+}
+
 static inline int riftUtf8Decode(const char* s, uint32_t* cp) {
   unsigned char c = (unsigned char) s[0];
   int len;
   uint32_t v;
 
   if (c < 0x80)        { *cp = c; return 1; }
-  else if (c < 0xC0)   return 0;                 // stray continuation byte
+  else if (c < 0xC2)   return 0;                 // stray continuation byte, plus C0
+                                                 // and C1, which can only ever begin
+                                                 // an overlong two-byte sequence
   else if (c < 0xE0)   { len = 2; v = c & 0x1F; }
   else if (c < 0xF0)   { len = 3; v = c & 0x0F; }
-  else if (c < 0xF8)   { len = 4; v = c & 0x07; }
-  else                 return 0;
+  else if (c < 0xF5)   { len = 4; v = c & 0x07; }
+  else                 return 0;                 // F5..FF cannot begin a code point
+                                                 // at or below U+10FFFF
 
   for (int i = 1; i < len; i++) {
     unsigned char n = (unsigned char) s[i];
     if ((n & 0xC0) != 0x80) return 0;            // also catches the terminator
     v = (v << 6) | (n & 0x3F);
   }
+
+  // Three classes decode arithmetically but are not valid UTF-8. Rejecting them
+  // here sends them down the caller's malformed path, which draws one block - the
+  // same treatment an unmappable character gets - so the screen says "something was
+  // here" rather than showing nothing.
+  //
+  // The overlong forms are the ones with a consequence. C0 80 and E0 80 80 both
+  // decode to U+0000, which riftTranslateUTF8 then drops as a control character, so
+  // a sender could hide bytes from this display that every other client renders.
+  // The surrogate range and anything above U+10FFFF are rejected for the reason
+  // upstream's validUtf8PrefixLength rejects them: they are not characters. Those
+  // two were already drawn as blocks, so this only makes the decoder agree with
+  // the validator rather than changing what appears.
+  if (v < (len == 2 ? 0x80u : (len == 3 ? 0x800u : 0x10000u))) return 0;
+  if (v >= 0xD800u && v <= 0xDFFFu) return 0;
+  if (v > 0x10FFFFu) return 0;
 
   *cp = v;
   return len;

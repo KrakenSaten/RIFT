@@ -490,6 +490,117 @@ TEST(ShouldFlush, SurvivesTheMillisWrap) {
     EXPECT_TRUE (riftShouldFlush(true, retry, dirty_at, 20000, 0, 0));
 }
 
+// ---------------------------------------------------------- millis deadlines
+
+TEST(Due, OrdinaryCase) {
+    EXPECT_FALSE(riftDue(1000, 2000));
+    EXPECT_TRUE (riftDue(2000, 2000));    // at the deadline counts as due
+    EXPECT_TRUE (riftDue(2001, 2000));
+}
+
+TEST(Due, SurvivesTheWrap) {
+    // the case the old millis() > deadline comparison got wrong: a deadline set
+    // shortly before the wrap lands on a small number while now is still large
+    const uint32_t before = 0xFFFFFF00u;
+    const uint32_t deadline = before + 0x200u;    // wraps to 0x00000100
+    EXPECT_FALSE(riftDue(before, deadline));      // not yet - the old form said yes
+    EXPECT_FALSE(riftDue(0xFFFFFFFFu, deadline));
+    EXPECT_FALSE(riftDue(0x000000FFu, deadline)); // one tick short, after the wrap
+    EXPECT_TRUE (riftDue(0x00000100u, deadline)); // and now it is due
+    EXPECT_TRUE (riftDue(0x00000101u, deadline));
+}
+
+TEST(Due, HalfTheRangeIsTheLimit) {
+    // Valid while the interval is under 2^31. Documented rather than guarded,
+    // because every interval in this firmware is seconds - but this is the reason
+    // "_next_refresh = 0" had to become "= millis()": under a signed difference a
+    // fixed small constant is not "long past" for the whole cycle.
+    EXPECT_TRUE (riftDue(0x7FFFFFFFu, 0));   // still reads as past
+    EXPECT_FALSE(riftDue(0x80000000u, 0));   // and here it stops
+}
+
+// ------------------------------------------------------------- UTF-8 decoding
+//
+// The decoder used to accept three classes of sequence that are arithmetically
+// decodable but are not valid UTF-8. Only the overlong forms had a consequence:
+// they decode to a code point in the ASCII range, which riftTranslateUTF8 then
+// drops as a control character, so a sender could put bytes on the wire that this
+// display silently swallowed while other clients rendered them.
+//
+// The sequences are byte arrays rather than string escapes. Written as escapes in
+// this file they were transformed on the way in - "0xC0" became the character
+// U+00C0 and reached the decoder as 0xC3 0x80 - so the first version of these
+// tests failed while testing something other than what it claimed to.
+
+static const unsigned char U8_OVERLONG_NUL2[]  = { 0xC0, 0x80, 0 };
+static const unsigned char U8_OVERLONG_7F[]    = { 0xC1, 0xBF, 0 };
+static const unsigned char U8_OVERLONG_NUL3[]  = { 0xE0, 0x80, 0x80, 0 };
+static const unsigned char U8_OVERLONG_7FF[]   = { 0xE0, 0x9F, 0xBF, 0 };
+static const unsigned char U8_OVERLONG_NUL4[]  = { 0xF0, 0x80, 0x80, 0x80, 0 };
+static const unsigned char U8_OVERLONG_FFFF[]  = { 0xF0, 0x8F, 0xBF, 0xBF, 0 };
+static const unsigned char U8_SURROGATE_LO[]   = { 0xED, 0xA0, 0x80, 0 };   // U+D800
+static const unsigned char U8_SURROGATE_HI[]   = { 0xED, 0xBF, 0xBF, 0 };   // U+DFFF
+static const unsigned char U8_ABOVE_MAX[]      = { 0xF4, 0x90, 0x80, 0x80, 0 }; // U+110000
+static const unsigned char U8_LEAD_F5[]        = { 0xF5, 0x80, 0x80, 0x80, 0 };
+static const unsigned char U8_FIVE_BYTE[]      = { 0xF8, 0x80, 0x80, 0x80, 0 };
+
+static const unsigned char U8_MIN_2[]  = { 0xC2, 0x80, 0 };              // U+0080
+static const unsigned char U8_MIN_3[]  = { 0xE0, 0xA0, 0x80, 0 };        // U+0800
+static const unsigned char U8_MIN_4[]  = { 0xF0, 0x90, 0x80, 0x80, 0 };  // U+10000
+static const unsigned char U8_MAX_4[]  = { 0xF4, 0x8F, 0xBF, 0xBF, 0 };  // U+10FFFF
+static const unsigned char U8_AE[]     = { 0xC3, 0xA6, 0 };
+static const unsigned char U8_OE[]     = { 0xC3, 0xB8, 0 };
+static const unsigned char U8_AA[]     = { 0xC3, 0xA5, 0 };
+
+#define RIFT_DECODE(bytes, cp)  riftUtf8Decode((const char*) (bytes), (cp))
+
+TEST(Utf8Decode, RejectsOverlongForms) {
+    uint32_t cp = 0xFFFF;
+    EXPECT_EQ(0, RIFT_DECODE(U8_OVERLONG_NUL2, &cp));
+    EXPECT_EQ(0, RIFT_DECODE(U8_OVERLONG_7F,   &cp));
+    EXPECT_EQ(0, RIFT_DECODE(U8_OVERLONG_NUL3, &cp));
+    EXPECT_EQ(0, RIFT_DECODE(U8_OVERLONG_7FF,  &cp));
+    EXPECT_EQ(0, RIFT_DECODE(U8_OVERLONG_NUL4, &cp));
+    EXPECT_EQ(0, RIFT_DECODE(U8_OVERLONG_FFFF, &cp));
+}
+
+TEST(Utf8Decode, RejectsSurrogatesAndOutOfRange) {
+    uint32_t cp = 0xFFFF;
+    EXPECT_EQ(0, RIFT_DECODE(U8_SURROGATE_LO, &cp));
+    EXPECT_EQ(0, RIFT_DECODE(U8_SURROGATE_HI, &cp));
+    EXPECT_EQ(0, RIFT_DECODE(U8_ABOVE_MAX,    &cp));
+    EXPECT_EQ(0, RIFT_DECODE(U8_LEAD_F5,      &cp));
+    EXPECT_EQ(0, RIFT_DECODE(U8_FIVE_BYTE,    &cp));
+}
+
+TEST(Utf8Decode, StillAcceptsTheBoundaries) {
+    uint32_t cp = 0;
+    // the shortest legal form at each length, and the last legal code point - the
+    // values the overlong rule has to let through
+    EXPECT_EQ(2, RIFT_DECODE(U8_MIN_2, &cp)); EXPECT_EQ(0x80u,     cp);
+    EXPECT_EQ(3, RIFT_DECODE(U8_MIN_3, &cp)); EXPECT_EQ(0x800u,    cp);
+    EXPECT_EQ(4, RIFT_DECODE(U8_MIN_4, &cp)); EXPECT_EQ(0x10000u,  cp);
+    EXPECT_EQ(4, RIFT_DECODE(U8_MAX_4, &cp)); EXPECT_EQ(0x10FFFFu, cp);
+    // and the three letters this firmware exists to carry
+    EXPECT_EQ(2, RIFT_DECODE(U8_AE, &cp)); EXPECT_EQ(0xE6u, cp);
+    EXPECT_EQ(2, RIFT_DECODE(U8_OE, &cp)); EXPECT_EQ(0xF8u, cp);
+    EXPECT_EQ(2, RIFT_DECODE(U8_AA, &cp)); EXPECT_EQ(0xE5u, cp);
+}
+
+TEST(Utf8Decode, OverlongNullShowsAsABlockRatherThanVanishing) {
+    // the point of the change. Before it, C0 80 decoded to U+0000 and was dropped
+    // as a control character, so the message read "AB" here and something else
+    // as a control character, so the message read "AB" here and something else
+    // malformed path, and one block says a character was present.
+    const unsigned char src[] = { 'A', 0xC0, 0x80, 'B', 0 };
+    char out[32];
+    riftTranslateUTF8(out, (const char*) src, sizeof(out));
+    ASSERT_EQ(3u, strlen(out));
+    EXPECT_EQ('A', out[0]);
+    EXPECT_EQ((char) RIFT_GLYPH_BLOCK, out[1]);
+    EXPECT_EQ('B', out[2]);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
