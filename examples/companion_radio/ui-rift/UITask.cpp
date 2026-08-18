@@ -1466,18 +1466,26 @@ public:
       y += RIFT_LINE_H;
     }
 
-    // ---- footer ----
+    // ---- footer, left column only ----
+    // This was a full-width band with a rule at y=178. The diagnostics column
+    // has grown to fifteen rows, which puts its last row at y=188, so BOOT and
+    // SLOWEST were drawn underneath the footer text and neither was readable.
+    // The footer only ever described the left column, so it moves there, into
+    // the space below the note, and the right column gets the full height.
     display.setColor(rift_pal.rule);
-    display.fillRect(0, 178, display.width(), 1);
+    display.fillRect(0, 162, 158, 1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 184, "PRIVATE KEY EXPORT");
+    // shortened from "PRIVATE KEY EXPORT": that plus "DISABLED" is 156px and the
+    // column is 158 wide, which left no gap between the two at all
+    display.drawTextLeftAlign(2, 168, "KEY EXPORT");
     display.setColor(rift_pal.ok);
-    display.drawTextRightAlign(display.width() - 2, 184, "DISABLED");
+    display.drawTextRightAlign(156, 168, "DISABLED");
     display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(2, 196, "up/down select, ENTER activates");
+    display.drawTextLeftAlign(2, 182, "up/down select,");
+    display.drawTextLeftAlign(2, 194, "ENTER activates");
     display.setColor(rift_pal.mid);
     sprintf(tmp, "v%s", RIFT_VERSION);
-    display.drawTextRightAlign(display.width() - 2, 196, tmp);
+    display.drawTextRightAlign(156, 194, tmp);
 
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
