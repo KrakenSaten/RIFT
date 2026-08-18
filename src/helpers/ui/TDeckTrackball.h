@@ -25,6 +25,7 @@ class TDeckTrackball {
   uint8_t _count_up, _count_down, _count_left, _count_right;
 
   bool pulse(int8_t pin, bool& prev, unsigned long& last);
+  void clearCounts() { _count_up = _count_down = _count_left = _count_right = 0; }
 
 public:
   TDeckTrackball(int8_t up, int8_t down, int8_t left, int8_t right)

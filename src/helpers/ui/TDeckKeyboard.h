@@ -67,6 +67,11 @@ public:
   // codes be discovered from the device instead of assumed
   uint8_t lastSeen() const { return _last_seen; }
 
+  // NOTE: there is deliberately no heldKey()/isHeld() here. This keyboard reports
+  // one event per physical press and nothing at all while the key stays down -
+  // measured, see poll(). A long press cannot be detected. Do not add an API that
+  // implies otherwise.
+
   // returns the ASCII key value, or 0 if no key is available
   char poll();
 };

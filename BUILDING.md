@@ -87,6 +87,28 @@ What does not help: a different cable, and `upload_speed`. Baud is a no-op here 
 this is native USB CDC, so lowering it changes nothing and the run takes exactly
 as long. `--no-stub` only moved the failure earlier.
 
+`tools/rift-flash.py` does the split, so it does not have to be a local script
+that gets rebuilt by hand on the next machine:
+
+```bash
+python tools/rift-flash.py --port COM5 --parts 4
+```
+
+**Use `--parts 4`.** Two halves stopped being enough: writes began failing about
+638 KB into a transfer, at flash address `0x000ac0e1`, three times in a row. The
+same address then wrote through without complaint as part of a shorter transfer,
+which settles what was previously ambiguous - **it is the transfer length, not the
+address.** Both earlier failures started at `0x10000`, so "638 KB in" and "address
+0xAC0E1" were the same point and could not be told apart.
+
+Four parts of ~405 KB each complete in under four seconds apiece with every hash
+verified. Expect to need more parts as the firmware grows.
+
+`--dry-run` writes the chunks out and checks they cover the image without
+touching the device; `--single` forces one write, which is how to retest the
+workaround cheaply. The day `--single` succeeds, the script has outlived its
+purpose.
+
 Splitting the write works. The app is one image at `0x10000`, so cut
 `firmware.bin` at a sector-aligned offset and write the halves separately.
 786432 (`0xC0000`) has been used, giving `0x10000` and `0xD0000`; each half

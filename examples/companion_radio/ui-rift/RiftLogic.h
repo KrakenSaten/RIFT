@@ -277,6 +277,33 @@ static inline void riftTranslateUTF8(char* dest, const char* src, size_t dest_si
   dest[j] = 0;
 }
 
+// --------------------------------------------------------- Nordic characters
+
+// What a long press on a base vowel offers. The T-Deck keyboard is a US QWERTY
+// with no Nordic keys, and SYM is not free - it is a working symbol layer that
+// emits the characters printed on the keys. Holding the base letter is the
+// remaining trigger, and it is the one every phone keyboard already uses.
+//
+// UTF-8, because this goes into the compose buffer and the compose buffer is what
+// goes on the air. The CP437 codes are for drawing only: o-slash displays as 0x01,
+// which on the wire would be a C0 control byte that other clients may mangle or
+// drop the message over.
+//
+// Covers Norwegian, Swedish and Danish. Ordered by how often each is wanted for
+// the language this device is used in, so the first is one press away.
+#define RIFT_NORDIC_MAX_VARIANTS  3
+
+static inline int riftNordicVariants(char base, const char* out[RIFT_NORDIC_MAX_VARIANTS]) {
+  if (out == NULL) return 0;
+  switch (base) {
+    case 'a': out[0] = "\xC3\xA6"; out[1] = "\xC3\xA5"; out[2] = "\xC3\xA4"; return 3;  // ae a-ring a-uml
+    case 'A': out[0] = "\xC3\x86"; out[1] = "\xC3\x85"; out[2] = "\xC3\x84"; return 3;
+    case 'o': out[0] = "\xC3\xB8"; out[1] = "\xC3\xB6"; return 2;                       // o-slash o-uml
+    case 'O': out[0] = "\xC3\x98"; out[1] = "\xC3\x96"; return 2;
+  }
+  return 0;
+}
+
 // -------------------------------------------------------- screen transitions
 
 // Which lifecycle hooks a screen change should fire. Both bugs this encodes were
@@ -369,4 +396,58 @@ static inline void riftFormatAge(uint32_t millis_since, char* buf, size_t len) {
     if (days > 99) snprintf(buf, len, ">99d");
     else           snprintf(buf, len, "%ud", (unsigned) days);
   }
+}
+
+// Who can actually receive a direct message.
+//
+// NODES allowed ADV_TYPE_CHAT only while the COMMS picker allowed CHAT and ROOM,
+// so a room you could message from one screen was refused from the other with an
+// explanation that sounded authoritative. One rule, in one place, used by both.
+//
+// Rooms are included: a room server receives and stores messages, which is the
+// whole point of it. Repeaters and sensors do not read, so a send to one goes
+// nowhere and reports nothing.
+//
+// The values mirror AdvertDataHelpers.h so this header stays free of MeshCore and
+// can be tested natively; UITask.cpp static_asserts that they still agree.
+#define RIFT_ADV_NONE      0
+#define RIFT_ADV_CHAT      1
+#define RIFT_ADV_REPEATER  2
+#define RIFT_ADV_ROOM      3
+#define RIFT_ADV_SENSOR    4
+
+static inline bool riftCanDirectMessage(uint8_t advert_type) {
+  return advert_type == RIFT_ADV_CHAT || advert_type == RIFT_ADV_ROOM;
+}
+
+// What to call it on screen when it cannot. A missing affordance with no reason
+// reads as a bug, and the type is information the screen does not otherwise show.
+static inline const char* riftAdvertTypeName(uint8_t advert_type) {
+  switch (advert_type) {
+    case RIFT_ADV_CHAT:     return "chat";
+    case RIFT_ADV_REPEATER: return "repeater";
+    case RIFT_ADV_ROOM:     return "room";
+    case RIFT_ADV_SENSOR:   return "sensor";
+    default:                return "unknown";
+  }
+}
+
+// When the message log may next be written.
+//
+// save() leaves the log dirty when it fails, and the flush condition is "dirty
+// and the debounce elapsed" - which stays true once it has. A persistent SPIFFS
+// failure therefore retried every loop iteration at ~553ms a go. These two are
+// the decision, extracted so the backoff can be tested without a filesystem.
+static inline uint32_t riftSaveBackoffMillis(uint8_t failures) {
+  if (failures <= 1) return 5000u;
+  if (failures == 2) return 15000u;
+  return 60000u;
+}
+
+static inline bool riftShouldFlush(bool dirty, uint32_t now, uint32_t dirty_at,
+                                   uint32_t debounce, uint8_t failures, uint32_t retry_at) {
+  if (!dirty) return false;
+  if (now - dirty_at < debounce) return false;          // burst has not settled
+  if (failures > 0 && (int32_t) (now - retry_at) < 0) return false;   // backing off
+  return true;
 }

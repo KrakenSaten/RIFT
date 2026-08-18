@@ -82,9 +82,18 @@ What does not help: a different cable, and `upload_speed`. Baud is a no-op here;
 this is native USB CDC, so lowering it changes nothing and the run takes exactly
 as long. `--no-stub` only moved the failure earlier.
 
+**Two halves is no longer enough - use `tools/rift-flash.py --parts 4`.** Writes
+began failing about 638 KB into a transfer, at flash address `0x000ac0e1`, three
+times running. That looked address-specific until you notice both transfers
+started at `0x10000`, so "638 KB in" and "0xAC0E1" were the same point. Four parts
+wrote that same address straight through as part of a shorter transfer, every hash
+verified - **so it is the transfer length.** Expect to need more parts as the
+firmware grows.
+
 What works is splitting the write. The app is one image at `0x10000`, so cut
-`firmware.bin` at a sector-aligned offset and write the halves separately —
-786432 (`0xC0000`) has been used, giving `0x10000` and `0xD0000`. Each half
+`firmware.bin` at a sector-aligned offset and write the pieces separately —
+786432 (`0xC0000`) was used while two halves still worked, giving `0x10000` and
+`0xD0000`. Each half
 completes in under five seconds with its hash verified, and esptool verifies per
 chunk, so the two together cover the whole image.
 
@@ -122,6 +131,30 @@ The UI is selected purely by build flags. `ui-new`, `ui-orig`, `ui-tiny` and
 
 ---
 
+## 2b. The screen coming on is the notification
+
+Stated as a requirement rather than left as an implementation detail, because it
+is easy to mistake for one and remove.
+
+**This board has no sounder and no vibration motor.** `PIN_BUZZER` and
+`PIN_VIBRATION` are not defined for the T-Deck variant, so `UITask::notify()`
+compiles to nothing at all - even though `MyMesh` calls it correctly for both
+contact and channel messages. The whole notification path exists in software with
+no output device at the end of it.
+
+So a message arriving while the display is dark has exactly one way to announce
+itself: `newMsg()` calls `turnOn()`. That line is the notification. It is
+suppressed only when a companion app is attached, because then the phone is doing
+the notifying.
+
+`MSG WAKE` on SYSTEM shows how many times it has fired and how long ago, so a
+report of "it did not notify me" can be checked rather than reasoned about - the
+alternative being three plausible explanations and no way to choose between them.
+
+Audio through the ES8311 codec is the only route to an audible alert and is
+deliberately deferred: it needs I2S and codec bring-up, which is real work rather
+than a flag.
+
 ## 3. Hardware facts that cost time
 
 Every one of these was wrong on the first assumption and only settled by putting
@@ -135,10 +168,18 @@ than any amount of code reading.
   datasheet's track-id-first layout. Calibration: display top-left = raw (228, 8),
   bottom-right = raw (6, 310). Status register 0x814E, bit 7 = data ready, and it
   must be written back to 0 or the controller stops reporting.
-- **Keyboard** is I²C 0x55, polled. The co-processor repeats held keys, so edge
-  detection is required or one Enter fires several times. That repeat is also the
-  only signal available for a long-press on a keyboard key — the driver currently
-  throws it away.
+- **Keyboard** is I²C 0x55, polled at 20 ms - `KEYBOARD_POLL_MILLIS` in the rift
+  environment. The 100 ms in `TDeckKeyboard.h` is only the fallback for a build
+  that does not set it; at 100 ms keystrokes were being missed.
+- **There is no key repeat and no key-up, so a long press cannot be detected.**
+  Measured: holding a key produces exactly one event, and every read after it
+  returns 0 for as long as the key stays down. Holding `a` in a text field types
+  one `a`, however long you hold. The comment in `TDeckKeyboard::poll()` used to
+  claim the opposite — that a held key repeats and edge detection is needed to
+  suppress it — and a whole trigger design was built on that before anyone put the
+  number on screen. It now says what was measured. Anything needing a second
+  gesture has to be built from discrete presses; the Nordic picker uses a double
+  tap for exactly this reason.
 - **`SYM` emits nothing on its own, and is not a spare key.** `SYM`+letter emits
   the symbol printed on the key, as plain ASCII well under 127, so it already
   reaches the app: `SYM`+a is 42 `*`, +o is 43 `+`, +e is 50 `2`. It is a working
@@ -273,28 +314,45 @@ if the tag and `RIFT_VERSION` disagree.
 compiles clean. `-Werror` is off while ~210 warnings in shared MeshCore code are
 not ours to fix.
 
-**91 native tests**, all runnable locally. They cover the six places that have
+**95 native tests**, all runnable locally. They cover the places that have
 actually been wrong: base64 key validation, `path_len` decoding, hash collision
-resolution, the mesh-activity thresholds, screen-transition hooks, and the UTF-8
-to CP437 translation.
+resolution, the mesh-activity thresholds, screen-transition hooks, the UTF-8 to
+CP437 translation, and the Nordic variant table — including an assertion that
+every variant is two-byte UTF-8 with a glyph the panel can draw back, since
+confusing the wire form with the display form is this feature's sharpest trap.
 
 ### Open items
 
 1. **Message history does not survive reboot.** RAM-only by design; persisting it
    means new code and flash wear.
-2. **Nordic character input.** Reading works; writing does not. The trigger
-   question is settled — see section 3: `SYM` is a working symbol layer, not a
-   spare key, so it cannot host a picker. Long-pressing the base vowel is the
-   plan, using the co-processor's key repeat that the driver currently discards.
+2. **Nordic character input — done, one thing left to confirm.**
 
-   The larger half is the COMMS compose line, which prints `_input` raw. That
-   works only because every keystroke is currently single-byte ASCII. Storing
-   UTF-8 is right for what goes on the air, but then the display needs translating,
-   tail-scrolling has to count characters rather than bytes and never slice
-   mid-sequence, and backspace has to delete a whole code point. The comment above
-   `RiftTextInput` warns against touching that component for good reason.
+   Double-tapping a base vowel in COMMS opens a picker: `a` offers æ å ä, `o`
+   offers ø ö, and the uppercase forms follow. Verified on hardware in both cases.
+   Both taps are inserted as ordinary letters first and the picker replaces the
+   pair, so cancelling leaves exactly what was typed — which is what makes a false
+   trigger on a genuine double vowel (Haakon, Aage) cost one keypress.
 
-   Sharpest trap: `ø` on the air must be UTF-8 `0xC3 0xB8`. `0x01` is a
+   A double tap rather than a long press because a long press cannot be detected
+   at all — see section 3. That was measured only after building the wrong thing.
+
+   The compose line is UTF-8 aware: it renders by translating first and taking the
+   tail of the *translated* text, so a cut cannot land inside a sequence; backspace
+   removes a whole code point; and the send path truncates on a code point
+   boundary. All three use `mesh::validUtf8PrefixLength`, which upstream already
+   has and tests. Two were live bugs — a byte-wise backspace left a dangling lead
+   byte, and the send truncation could put invalid UTF-8 on the air once the
+   capacity dropped below the composed length (compose a long DM, switch the target
+   to a channel).
+
+   The character counter counts bytes, deliberately: MeshCore truncates at 160
+   bytes, so a Nordic character really does cost two.
+
+   **Still unconfirmed:** that a Nordic character survives the trip to another
+   client. Nothing local can check it — the panel would look identical whether the
+   wire carried UTF-8 or CP437. Send one to a phone and read it there.
+
+   Sharpest trap, still: `ø` on the air must be UTF-8 `0xC3 0xB8`. `0x01` is a
    display-side placeholder only, and putting it in outgoing text sends a C0
    control byte that other clients may mangle or truncate.
 3. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning the version
@@ -311,7 +369,9 @@ to CP437 translation.
    already in the history there and a popup would drop a half-typed line. The
    honest answer is `_picking || _len > 0`. Changing it is a design decision, and
    was deliberately kept out of the refactor.
-7. **Why a single flash write over ~1.2 MB fails.** Section 1 has a working split
+7. **Why a long flash write fails at all.** Now known to be the transfer length
+   rather than the address - see section 1 - but not *why* the transport gives up
+   there. Section 1 has a working split
    write and what was ruled out, but not a cause.
 8. **Emoji still show as blocks past the mapped set**, and the user reports that
    as too many for current message traffic. The limit is now fundamental rather

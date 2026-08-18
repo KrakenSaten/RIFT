@@ -1,8 +1,18 @@
 #include "UITask.h"
 #include "RiftLogic.h"
 #include <helpers/TxtDataHelpers.h>
+#include <helpers/UTF8Helpers.h>
 #include "../MyMesh.h"
 #include "target.h"
+
+// RiftLogic.h mirrors these so it can be compiled without MeshCore for the native
+// tests. If upstream ever renumbers them, fail here rather than silently applying
+// the wrong policy.
+static_assert(RIFT_ADV_CHAT == ADV_TYPE_CHAT, "advert type drift");
+static_assert(RIFT_ADV_REPEATER == ADV_TYPE_REPEATER, "advert type drift");
+static_assert(RIFT_ADV_ROOM == ADV_TYPE_ROOM, "advert type drift");
+static_assert(RIFT_ADV_SENSOR == ADV_TYPE_SENSOR, "advert type drift");
+
 
 #ifdef RIFT_RADAR
   #include <WiFi.h>
@@ -65,7 +75,45 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 // constant for it - the raw byte is what the co-processor sends.
 #define RIFT_KEY_BACK       8
 
+// How close together two presses of the same vowel must be to mean "offer me its
+// Nordic forms" rather than two letters.
+//
+// A double tap rather than a long press, because this keyboard cannot report one:
+// it sends a single event per press and nothing while the key is down. Measured,
+// not assumed - see TDeckKeyboard::poll().
+//
+// 400ms with a 100ms poll leaves room for a comfortable double tap. The cost is
+// that a genuine double vowel typed quickly opens the picker; backspace cancels
+// it and leaves the two letters as typed. Modern Norwegian has almost none - the
+// spelling reform turned "aa" into "å" - but proper names like Haakon and Aage
+// still do.
+#define RIFT_DOUBLETAP_MILLIS  400
+
 #define RIFT_MSG_LOG_SIZE  48
+
+// Where the message history lives, and how long a burst is allowed to settle
+// before it is written.
+//
+// 20 seconds coalesces a conversation into one write while keeping the loss
+// window on a power cut to something a user would describe as "the last thing I
+// said" rather than "this evening". A clean shutdown flushes immediately, so the
+// window only applies to power being pulled.
+// How many heard nodes NODES can hold, and how many hop columns it draws. Up here
+// rather than beside that screen because SYSTEM's diagnostics read them too, and
+// SYSTEM is defined first.
+#define RIFT_CONST_MAX 16
+#define RIFT_HOP_COLS  4
+
+// AdvertPath::path_len is Packet's raw encoding, not a hop count: bits 6-7 carry
+// the hash size minus one and bits 0-5 the number of hops (Mesh.cpp:449). Reading
+// it as a plain count worked only while path_hash_mode was 0 - at 2-byte hashes a
+// two-hop route reads as 66 hops.
+static inline uint8_t riftHopCount(uint8_t path_len) { return mesh::Packet::pathHashCount(path_len); }
+static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::pathHashSize(path_len); }
+
+#define RIFT_MSGLOG_PATH         "/rift_msgs.dat"
+#define RIFT_MSGLOG_TMP          "/rift_msgs.new"
+#define RIFT_MSGLOG_FLUSH_MILLIS 20000
 #define RIFT_CHAR_W         6   // Adafruit GFX classic font cell at setTextSize(1)
 #define RIFT_LINE_H        12   // row pitch used throughout this codebase
 
@@ -96,6 +144,7 @@ struct RiftMsgLog {
   int head = RIFT_MSG_LOG_SIZE - 1;   // index of newest entry
 
   Entry* add(uint32_t timestamp, const char* origin, const char* msg, bool outgoing) {
+    markDirty();
     head = (head + 1) % RIFT_MSG_LOG_SIZE;
     if (count < RIFT_MSG_LOG_SIZE) count++;
 
@@ -120,6 +169,7 @@ struct RiftMsgLog {
       if (p->expected_ack == ack_hash && !p->delivered) {
         p->delivered = true;
         p->trip_ms = trip_ms;
+        markDirty();
         return;
       }
     }
@@ -129,6 +179,181 @@ struct RiftMsgLog {
   const Entry* peek(int back) const {
     if (back < 0 || back >= count) return NULL;
     return &entries[(head - back + RIFT_MSG_LOG_SIZE * 2) % RIFT_MSG_LOG_SIZE];
+  }
+
+  // ------------------------------------------------------------- persistence
+  //
+  // MeshCore stores no messages, so losing the log on every reboot was the
+  // largest gap a field user actually noticed.
+  //
+  // Three things shape how this is written, and the first is not about wear:
+  //
+  // SPIFFS is also where the private identity lives, and RIFT disables key
+  // export, so a corrupted filesystem costs the node identity permanently with
+  // no way to recover it. That is why the write is atomic - a temporary file
+  // replaced over the real one - so a power cut mid-write can never take the
+  // working file with it.
+  //
+  // It is debounced rather than written per message: a conversation arrives as a
+  // burst, and coalescing a burst into one write is most of the wear saving
+  // available. The cost is a loss window, stated plainly in RIFT_MSGLOG_FLUSH.
+  //
+  // And it blocks. There is no watchdog on the main loop and a blocking call
+  // silently starves the radio, so the duration is measured rather than assumed
+  // and shown on SYSTEM as `msglog:`.
+
+  bool dirty = false;
+  unsigned long dirty_at = 0;   // when, so the write can wait for the burst to end
+  uint32_t last_save_ms = 0;    // how long the last write took, for SYSTEM
+  // Phase breakdown, because the total came out at 553ms for four messages - far
+  // too much data for the data to be the cause, and long enough to starve LoRa.
+  // Which phase costs decides the fix: metadata operations point at keeping one
+  // file handle open, payload time points at splitting the write.
+  uint32_t t_open = 0, t_write = 0, t_close = 0, t_swap = 0;
+
+  void markDirty() { dirty = true; dirty_at = millis(); }
+
+  // Layout: "RMSG", version, count, then records oldest-first. Strings are
+  // length-prefixed rather than fixed - a typical message is a fraction of the
+  // 160-byte maximum, and the file is ~3KB instead of ~12KB because of it.
+  //
+  // Version is checked on load and a mismatch discards rather than guesses.
+  static const uint8_t FILE_VERSION = 1;
+
+  // Retry accounting. save() leaves dirty set when it fails, and the flush
+  // condition is "dirty and the debounce has elapsed" - which stays true forever
+  // once it has. A persistent SPIFFS failure therefore retried on every single
+  // loop iteration, at ~553ms a go, which is a device that does nothing but
+  // hammer flash and starve the radio. Back off instead, and show the count.
+  uint8_t save_failures = 0;
+  unsigned long retry_at = 0;
+
+  // both in RiftLogic.h, so the backoff is tested without a filesystem
+  bool dueToSave(unsigned long now) const {
+    return riftShouldFlush(dirty, (uint32_t) now, (uint32_t) dirty_at,
+                           RIFT_MSGLOG_FLUSH_MILLIS, save_failures, (uint32_t) retry_at);
+  }
+
+  bool save(const char* path, const char* tmp_path) {
+    bool ok = saveInner(path, tmp_path);
+    if (ok) {
+      save_failures = 0;
+    } else if (save_failures < 255) {
+      save_failures++;
+      retry_at = millis() + riftSaveBackoffMillis(save_failures);
+    }
+    return ok;
+  }
+
+  bool saveInner(const char* path, const char* tmp_path) {
+#if defined(ESP32)
+    unsigned long began = millis();
+
+    File f = SPIFFS.open(tmp_path, "w");
+    t_open = (uint32_t) (millis() - began);
+    if (!f) return false;
+    unsigned long t0 = millis();
+
+    uint8_t hdr[6] = { 'R', 'M', 'S', 'G', FILE_VERSION, (uint8_t) count };
+    if (f.write(hdr, sizeof(hdr)) != sizeof(hdr)) { f.close(); SPIFFS.remove(tmp_path); return false; }
+
+    // oldest first, so loading can just replay add()
+    for (int i = count - 1; i >= 0; i--) {
+      const Entry* p = peek(i);
+      if (p == NULL) continue;
+
+      uint8_t olen = (uint8_t) strnlen(p->origin, sizeof(p->origin) - 1);
+      uint8_t mlen = (uint8_t) strnlen(p->msg, sizeof(p->msg) - 1);
+      uint8_t flags = (p->outgoing ? 1 : 0) | (p->delivered ? 2 : 0);
+
+      uint8_t rec[11];
+      memcpy(&rec[0], &p->timestamp, 4);
+      rec[4] = flags;
+      memcpy(&rec[5], &p->trip_ms, 4);
+      rec[9] = olen;
+      rec[10] = mlen;
+
+      if (f.write(rec, sizeof(rec)) != sizeof(rec)
+          || f.write((const uint8_t*) p->origin, olen) != olen
+          || f.write((const uint8_t*) p->msg, mlen) != mlen) {
+        f.close();
+        SPIFFS.remove(tmp_path);
+        return false;
+      }
+    }
+    t_write = (uint32_t) (millis() - t0);
+    t0 = millis();
+    f.close();
+    t_close = (uint32_t) (millis() - t0);
+    t0 = millis();
+
+    // replace atomically - rename over the live file only once the new one is
+    // complete and closed
+    SPIFFS.remove(path);
+    if (!SPIFFS.rename(tmp_path, path)) { SPIFFS.remove(tmp_path); return false; }
+    t_swap = (uint32_t) (millis() - t0);
+
+    last_save_ms = (uint32_t) (millis() - began);
+    dirty = false;
+    return true;
+#else
+    (void) path; (void) tmp_path;
+    return false;
+#endif
+  }
+
+  void load(const char* path) {
+#if defined(ESP32)
+    File f = SPIFFS.open(path, "r");
+    if (!f) return;
+
+    uint8_t hdr[6];
+    if (f.read(hdr, sizeof(hdr)) != sizeof(hdr)
+        || hdr[0] != 'R' || hdr[1] != 'M' || hdr[2] != 'S' || hdr[3] != 'G'
+        || hdr[4] != FILE_VERSION) {
+      f.close();
+      return;   // absent, truncated or a format we do not know - start empty
+    }
+
+    int n = hdr[5];
+    if (n > RIFT_MSG_LOG_SIZE) n = RIFT_MSG_LOG_SIZE;
+
+    for (int i = 0; i < n; i++) {
+      uint8_t rec[11];
+      if (f.read(rec, sizeof(rec)) != sizeof(rec)) break;   // truncated: keep what we have
+
+      uint32_t ts, trip;
+      memcpy(&ts, &rec[0], 4);
+      memcpy(&trip, &rec[5], 4);
+      uint8_t flags = rec[4], olen = rec[9], mlen = rec[10];
+
+      char origin[62], msg[MAX_TEXT_LEN + 1];
+      if (olen >= sizeof(origin) || mlen >= sizeof(msg)) break;   // corrupt length
+      if (f.read((uint8_t*) origin, olen) != olen) break;
+      if (f.read((uint8_t*) msg, mlen) != mlen) break;
+      origin[olen] = 0;
+      msg[mlen] = 0;
+
+      Entry* p = add(ts, origin, msg, (flags & 1) != 0);   // clears dirty below
+      // Delivery state that survives: whether it landed, and how long it took.
+      // expected_ack, sent_at_ms and timeout_ms are millis-based and meaningless
+      // now, so they stay zero - which reads as "no ack expected" rather than as
+      // a send still waiting. A message that was pending when the power went is
+      // something this device can no longer know the fate of, and saying "..."
+      // forever would be a claim it cannot support.
+      p->delivered = (flags & 2) != 0;
+      p->trip_ms = trip;
+    }
+    f.close();
+
+    // Restoring is not a change. add() marks the log dirty because that is what
+    // it means for a new message, and load() reuses it - so a history just read
+    // back correctly was written out again twenty seconds after every boot.
+    dirty = false;
+    dirty_at = 0;
+#else
+    (void) path;
+#endif
   }
 };
 
@@ -344,6 +569,43 @@ static const RiftPalette RIFT_DAY = {
 
 RiftPalette rift_pal = RIFT_NIGHT;
 bool rift_day_mode = false;
+bool rift_screen_always_on = false;
+uint16_t rift_msg_wakes = 0;
+uint32_t rift_last_wake_ms = 0;
+
+// Four bytes on SPIFFS: magic, version, flags. Small enough that the write cost
+// that dominates the message log does not apply, and it only happens when a
+// setting is actually changed.
+#define RIFT_SETTINGS_PATH "/rift.cfg"
+#define RIFT_SETTINGS_MAGIC0 'R'
+#define RIFT_SETTINGS_MAGIC1 'S'
+#define RIFT_SETTINGS_VERSION 1
+
+void riftLoadSettings() {
+#if defined(ESP32)
+  File f = SPIFFS.open(RIFT_SETTINGS_PATH, "r");
+  if (!f) return;
+  uint8_t b[4];
+  if (f.read(b, sizeof(b)) == sizeof(b)
+      && b[0] == RIFT_SETTINGS_MAGIC0 && b[1] == RIFT_SETTINGS_MAGIC1
+      && b[2] == RIFT_SETTINGS_VERSION) {
+    riftApplyPalette((b[3] & 1) != 0);
+    rift_screen_always_on = (b[3] & 2) != 0;
+  }
+  f.close();
+#endif
+}
+
+void riftSaveSettings() {
+#if defined(ESP32)
+  File f = SPIFFS.open(RIFT_SETTINGS_PATH, "w");
+  if (!f) return;
+  uint8_t b[4] = { RIFT_SETTINGS_MAGIC0, RIFT_SETTINGS_MAGIC1, RIFT_SETTINGS_VERSION,
+                   (uint8_t) ((rift_day_mode ? 1 : 0) | (rift_screen_always_on ? 2 : 0)) };
+  f.write(b, sizeof(b));
+  f.close();
+#endif
+}
 int rift_nav_unread = 0;
 int rift_nav_batt_pct = 0;
 
@@ -584,8 +846,10 @@ class RiftSystemScreen : public RiftScreen {
 
   // A small action menu rather than hidden letter shortcuts - discoverable, and
   // it leaves the printable keys free for the text fields.
-  enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY };
-  enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_PATHMODE, IT_DAYMODE, IT_COUNT };
+  enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
+              CH_DELETE, CH_DELETE_CONFIRM };
+  enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_DELCHANNEL,
+              IT_PATHMODE, IT_SCREEN, IT_DAYMODE, IT_COUNT };
 
   // most labels are fixed; the path-mode row shows its current value
   void itemLabel(int i, char* buf, size_t len) {
@@ -594,8 +858,14 @@ class RiftSystemScreen : public RiftScreen {
       "Send advert (whole mesh)",
       "Edit node name",
       "Add channel",
+      "Delete channel",
     };
-    if (i == IT_DAYMODE) {
+    if (i == IT_SCREEN) {
+      // A charger that does not enumerate as a USB host reads as battery, so the
+      // display cannot tell it is powered. This is the switch that does not
+      // depend on detecting anything.
+      snprintf(buf, len, "Screen: %s", rift_screen_always_on ? "always on" : "auto");
+    } else if (i == IT_DAYMODE) {
       // the design binds this to backlight level; this panel's backlight is on or
       // off with no level to read, so it is an explicit choice instead
       snprintf(buf, len, "Display: %s", rift_day_mode ? "day" : "night");
@@ -623,6 +893,9 @@ private:
   RiftTextInput _edit;
   char _ch_name[32];       // held while the key is being chosen
   char _ch_key[48];        // generated key, shown so it can be typed elsewhere
+  int  _del_sel = 0;       // index into _del_idx while choosing what to delete
+  int  _del_count = 0;
+  uint8_t _del_idx[MAX_GROUP_CHANNELS];   // slot numbers, so the list can skip gaps
 public:
   // Called when the user navigates away. Leaving by trackball or keyboard went
   // through this screen's own handling, but a tap on the nav bar changes screen
@@ -675,7 +948,20 @@ private:
 
       case IT_DAYMODE:
         riftApplyPalette(!rift_day_mode);
+        riftSaveSettings();
         _task->showAlert(rift_day_mode ? "Day mode" : "Night mode", 1200);
+        break;
+
+      case IT_SCREEN:
+        rift_screen_always_on = !rift_screen_always_on;
+        riftSaveSettings();
+        _task->showAlert(rift_screen_always_on ? "Screen stays on" : "Screen sleeps", 1400);
+        break;
+
+      case IT_DELCHANNEL:
+        _del_sel = 0;
+        collectDeletable();
+        _mode = CH_DELETE;
         break;
 
       case IT_NAME:
@@ -798,6 +1084,83 @@ private:
     return 1000;
   }
 
+  // Slot 0 is Public and is not offered - see MyMesh::removeChannel().
+  void collectDeletable() {
+    _del_count = 0;
+    for (int i = 1; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails ch;
+      if (!the_mesh.getChannel(i, ch) || ch.name[0] == 0) continue;
+      _del_idx[_del_count++] = (uint8_t) i;
+    }
+    if (_del_sel >= _del_count) _del_sel = _del_count > 0 ? _del_count - 1 : 0;
+  }
+
+  int renderDeleteList(DisplayDriver& display) {
+    renderHeading(display, "DELETE CHANNEL");
+    display.setTextSize(1);
+
+    if (_del_count == 0) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(4, 40, "No channels to delete.");
+      display.drawTextLeftAlign(4, 64, "Public cannot be removed - it is the");
+      display.drawTextLeftAlign(4, 76, "only channel a new node can talk on.");
+      display.drawTextLeftAlign(4, 100, "BACKSPACE back");
+      renderNavBar(display, RIFT_NAV_SYSTEM);
+      return 1000;
+    }
+
+    int y = 34;
+    for (int i = 0; i < _del_count && y < 180; i++, y += RIFT_LINE_H) {
+      ChannelDetails ch;
+      if (!the_mesh.getChannel(_del_idx[i], ch)) continue;
+      char nm[sizeof(ch.name)];
+      riftTranslateUTF8(nm, ch.name, sizeof(nm));
+
+      if (i == _del_sel) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y - 2, display.width(), 12);
+        display.setColor(0xFFFF);
+      } else {
+        display.setColor(rift_pal.fg);
+      }
+      display.drawTextLeftAlign(4, y, nm);
+    }
+
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(4, 196, "up/down choose, ENTER delete, BACKSPACE back");
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
+  int renderDeleteConfirm(DisplayDriver& display) {
+    renderHeading(display, "DELETE CHANNEL");
+    display.setTextSize(1);
+
+    ChannelDetails ch;
+    char nm[sizeof(ch.name)] = "";
+    if (_del_sel < _del_count && the_mesh.getChannel(_del_idx[_del_sel], ch)) {
+      riftTranslateUTF8(nm, ch.name, sizeof(nm));
+    }
+
+    display.setColor(rift_pal.fg);
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "Delete \"%s\"?", nm);
+    display.drawTextLeftAlign(4, 44, tmp);
+
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(4, 70, "Messages already received stay in the");
+    display.drawTextLeftAlign(4, 82, "history. The key is gone from this");
+    display.drawTextLeftAlign(4, 94, "device - rejoining needs it again.");
+
+    display.setColor(rift_pal.accent);
+    display.drawTextLeftAlign(4, 124, "ENTER deletes");
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(4, 140, "BACKSPACE cancels");
+
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
   int renderShowKey(DisplayDriver& display) {
     renderHeading(display, "CHANNEL ADDED");
     display.setTextSize(1);
@@ -854,6 +1217,8 @@ public:
       case CH_KEY_CHOICE:  return renderKeyChoice(display);
       case CH_KEY_ENTRY:   return renderKeyEntry(display);
       case CH_SHOW_KEY:    return renderShowKey(display);
+      case CH_DELETE:      return renderDeleteList(display);
+      case CH_DELETE_CONFIRM: return renderDeleteConfirm(display);
       default: break;
     }
 
@@ -982,6 +1347,53 @@ public:
     y += RIFT_LINE_H;
 #endif
 
+    // Hop distribution of everything currently heard. Temporary: NODES buckets
+    // into DIRECT / 1 / 2 / 3+, and the report is that almost everything lands in
+    // the last column on a real mesh, which makes the layout spend three quarters
+    // of its width on the minority. Rebucketing needs the actual distribution
+    // rather than another guess - the buckets were guessed once already.
+    //
+    // n = nodes heard, max = furthest hop count seen, 3+ = how many are beyond the
+    // third column. Remove this row once the columns are redesigned.
+    {
+      AdvertPath paths[RIFT_CONST_MAX];
+      int n = the_mesh.getRecentlyHeard(paths, RIFT_CONST_MAX);
+      int live = 0, maxhop = 0, beyond = 0;
+      for (int i = 0; i < n; i++) {
+        if (paths[i].recv_timestamp == 0 || paths[i].name[0] == 0) break;
+        live++;
+        int h = (int) riftHopCount(paths[i].path_len);
+        if (h > maxhop) maxhop = h;
+        if (h >= RIFT_HOP_COLS - 1) beyond++;
+      }
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(LX, y, "HOPS");
+      display.setColor(rift_pal.fg);
+      sprintf(tmp, "n%d max%d 3+%d", live, maxhop, beyond);
+      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      y += RIFT_LINE_H;
+    }
+
+    // How long the last message-log write blocked for, and how many messages it
+    // held. There is no watchdog on the main loop, so a blocking call starves the
+    // radio silently - this is the number that says whether the debounce is
+    // enough or whether the write has to be broken up.
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "MSGLOG");
+    display.setColor(rift_pal.fg);
+    sprintf(tmp, "%d msg %ums", msg_log.count, (unsigned) msg_log.last_save_ms);
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
+
+    // open / write / close / remove+rename, so the 553ms can be attributed
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "  phases");
+    display.setColor(rift_pal.fg);
+    sprintf(tmp, "%u %u %u %u", (unsigned) msg_log.t_open, (unsigned) msg_log.t_write,
+                                (unsigned) msg_log.t_close, (unsigned) msg_log.t_swap);
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
+
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(LX, y, "FREE HEAP");
     display.setColor(rift_pal.fg);
@@ -994,6 +1406,20 @@ public:
     display.setColor(rift_pal.fg);
     sprintf(tmp, "%s %umV", board.isExternalPowered() ? "yes" : "no",
             (unsigned) _task->getBattMilliVolts());
+    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    y += RIFT_LINE_H;
+
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "MSG WAKE");
+    display.setColor(rift_pal.fg);
+    if (rift_msg_wakes == 0) {
+      strcpy(tmp, "none yet");
+    } else {
+      uint32_t age = (uint32_t) millis() - rift_last_wake_ms;
+      if (age < 60000u)        sprintf(tmp, "%u, %us ago", rift_msg_wakes, (unsigned) (age / 1000u));
+      else if (age < 3600000u) sprintf(tmp, "%u, %um ago", rift_msg_wakes, (unsigned) (age / 60000u));
+      else                     sprintf(tmp, "%u, %uh ago", rift_msg_wakes, (unsigned) (age / 3600000u));
+    }
     display.drawTextRightAlign(display.width() - 2, y, tmp);
     y += RIFT_LINE_H;
 
@@ -1040,18 +1466,26 @@ public:
       y += RIFT_LINE_H;
     }
 
-    // ---- footer ----
+    // ---- footer, left column only ----
+    // This was a full-width band with a rule at y=178. The diagnostics column
+    // has grown to fifteen rows, which puts its last row at y=188, so BOOT and
+    // SLOWEST were drawn underneath the footer text and neither was readable.
+    // The footer only ever described the left column, so it moves there, into
+    // the space below the note, and the right column gets the full height.
     display.setColor(rift_pal.rule);
-    display.fillRect(0, 178, display.width(), 1);
+    display.fillRect(0, 162, 158, 1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 184, "PRIVATE KEY EXPORT");
+    // shortened from "PRIVATE KEY EXPORT": that plus "DISABLED" is 156px and the
+    // column is 158 wide, which left no gap between the two at all
+    display.drawTextLeftAlign(2, 168, "KEY EXPORT");
     display.setColor(rift_pal.ok);
-    display.drawTextRightAlign(display.width() - 2, 184, "DISABLED");
+    display.drawTextRightAlign(156, 168, "DISABLED");
     display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(2, 196, "up/down select, ENTER activates");
+    display.drawTextLeftAlign(2, 182, "up/down select,");
+    display.drawTextLeftAlign(2, 194, "ENTER activates");
     display.setColor(rift_pal.mid);
     sprintf(tmp, "v%s", RIFT_VERSION);
-    display.drawTextRightAlign(display.width() - 2, 196, tmp);
+    display.drawTextRightAlign(156, 194, tmp);
 
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
@@ -1116,6 +1550,29 @@ public:
       return true;
     }
 
+    if (_mode == CH_DELETE) {
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = MENU; return true; }
+      if (_del_count == 0) return true;
+      if (c == KEY_UP)   { _del_sel = (_del_sel + _del_count - 1) % _del_count; return true; }
+      if (c == KEY_DOWN) { _del_sel = (_del_sel + 1) % _del_count; return true; }
+      // deliberately a second screen rather than an immediate delete: the key is
+      // not recoverable from here and the list is one keypress from the menu
+      if (c == KEY_ENTER) { _mode = CH_DELETE_CONFIRM; return true; }
+      return true;
+    }
+
+    if (_mode == CH_DELETE_CONFIRM) {
+      if (c == KEY_ENTER) {
+        bool ok = (_del_sel < _del_count) && the_mesh.removeChannel(_del_idx[_del_sel]);
+        _task->showAlert(ok ? "Channel deleted" : "Delete failed", 1400);
+        collectDeletable();
+        _mode = _del_count > 0 ? CH_DELETE : MENU;
+        return true;
+      }
+      _mode = CH_DELETE;   // anything else backs out without deleting
+      return true;
+    }
+
     if (_mode == CH_SHOW_KEY) {
       if (c == KEY_ENTER || c == RIFT_KEY_BACK || c == KEY_CANCEL) {
         memset(_ch_key, 0, sizeof(_ch_key));   // acknowledged: gone now, not on leave
@@ -1146,17 +1603,8 @@ public:
 // Note there is no per-node RSSI here: adverts are cached without signal
 // strength, so brightness encodes recency (how long since we last heard the
 // node) rather than link quality.
-#define RIFT_CONST_MAX 16
-#define RIFT_HOP_COLS 4
 #define RIFT_HOP_ROWS 3
 #define RIFT_NODE_NAME_MAX 10
-
-// AdvertPath::path_len is Packet's raw encoding, not a hop count: bits 6-7 carry
-// the hash size minus one and bits 0-5 the number of hops (Mesh.cpp:449). Reading
-// it as a plain count worked only while path_hash_mode was 0 - at 2-byte hashes a
-// two-hop route reads as 66 hops.
-static inline uint8_t riftHopCount(uint8_t path_len) { return mesh::Packet::pathHashCount(path_len); }
-static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::pathHashSize(path_len); }
 
 class RiftConstellationScreen : public RiftScreen {
   UITask* _task;
@@ -1376,14 +1824,40 @@ public:
       }
       display.drawTextLeftAlign(2, 194, tmp);
 
-      if (rift_day_mode) {
-        display.setColor(rift_pal.accent);
-        display.fillRect(262, 193, 58, 10);
-        display.setColor(0xFFFF);
+      // Only some node types can be sent a direct message - riftCanDirectMessage()
+      // is the one place that decides, shared with the COMMS picker, which used to
+      // disagree with this screen. Rather than dropping the
+      // prompt on anything else - a missing affordance with no explanation reads
+      // as a bug - the slot names what the node is, which is information this
+      // screen does not otherwise show and which explains the absence by itself.
+      //
+      // The accent is reserved for the case you can actually act on.
+      ContactInfo* sel_contact = the_mesh.lookupContactByPubKey(
+          (uint8_t*) _paths[_sel].pubkey_prefix, 6);
+      const char* dm_label;
+      bool can_dm = false;
+      if (sel_contact == NULL) {
+        dm_label = "not a contact";
       } else {
-        display.setColor(rift_pal.accent);
+        can_dm = riftCanDirectMessage(sel_contact->type);
+        dm_label = can_dm ? "ENTER: DM" : riftAdvertTypeName(sel_contact->type);
       }
-      display.drawTextRightAlign(display.width() - 2, 194, "ENTER: DM");
+
+      if (can_dm) {
+        // width follows the label rather than being hardcoded, so the day-mode
+        // fill cannot end up shorter or longer than the text it reverses out
+        int lw = (int) strlen(dm_label) * RIFT_CHAR_W + 4;
+        if (rift_day_mode) {
+          display.setColor(rift_pal.accent);
+          display.fillRect(display.width() - 2 - lw, 193, lw, 10);
+          display.setColor(0xFFFF);
+        } else {
+          display.setColor(rift_pal.accent);
+        }
+      } else {
+        display.setColor(rift_pal.mid);
+      }
+      display.drawTextRightAlign(display.width() - 2, 194, dm_label);
     }
 
     renderNavBar(display, RIFT_NAV_NODES);
@@ -1421,8 +1895,16 @@ public:
       // an advert can be heard from a node that is not in the contact book, and
       // then there is nothing to send to - say so rather than opening a compose
       // box whose message could never leave
-      if (the_mesh.lookupContactByPubKey((uint8_t*) key, 6) == NULL) {
+      ContactInfo* contact = the_mesh.lookupContactByPubKey((uint8_t*) key, 6);
+      if (contact == NULL) {
         _task->showAlert("Not a contact yet", 1400);
+        return true;
+      }
+      // Repeaters and sensors do not read messages, so a DM to one goes nowhere
+      // and reports nothing. COMMS' target picker already filters them out; this
+      // screen reaches setDirectTarget() directly and bypassed that.
+      if (!riftCanDirectMessage(contact->type)) {
+        _task->showAlert("Repeaters can't receive a DM", 1600);
         return true;
       }
       _task->startDirectMessage(key);
@@ -1911,10 +2393,16 @@ public:
   int render(DisplayDriver& display) override {
     if (_view == VIEW_WATERFALL) return renderWaterfall(display);
 
-    const char* status = "LIVE";
-    if (_state == OFF) status = "IDLE";
-    else if (!_wifi_up && !_ble_up) status = "INITIALISING";
-    renderHeading(display, status);
+    // No heading while scanning. `LIVE` said nothing the screen did not already
+    // show - the device count below it is the evidence that scanning is happening,
+    // and it moves. The two states that are *not* obvious keep their heading:
+    // `IDLE` means the count is stale rather than zero, and `INITIALISING` means
+    // the radios have not come up yet, so an empty list means nothing yet.
+    //
+    // The heading therefore appears exactly when there is something to say. That
+    // is deliberate rather than a flicker.
+    if (_state == OFF) renderHeading(display, "IDLE");
+    else if (!_wifi_up && !_ble_up) renderHeading(display, "INITIALISING");
 
     // snapshot under the lock, then draw without holding it
     RfContact snap[RIFT_RF_MAX];
@@ -2224,6 +2712,10 @@ class RiftCommsScreen : public RiftScreen, ContactVisitor {
   int _len;
   int _scroll;      // 0 = pinned to newest
 
+  // last printable key and when, for double-tap detection
+  char _last_key = 0;
+  unsigned long _last_key_ms = 0;
+
   // current send target: a group channel by index, or a contact by pubkey prefix
   bool _target_is_channel;
   uint8_t _target_channel_idx;
@@ -2392,7 +2884,7 @@ private:
 
     // only nodes that can actually receive a text message - repeaters and
     // sensors have no one reading them
-    if (contact.type != ADV_TYPE_CHAT && contact.type != ADV_TYPE_ROOM) return;
+    if (!riftCanDirectMessage(contact.type)) return;
 
     // the list is finite; say so instead of dropping contacts silently. Only
     // reachable contacts count, so the warning does not fire for repeaters.
@@ -2441,8 +2933,14 @@ private:
     // BaseChatMesh prepends "<name>: " and then silently truncates the packet to
     // MAX_TEXT_LEN. Truncate here too, so the history shows what was transmitted
     // rather than what was typed.
+    // Cut on a code point boundary, not a byte. _len can exceed the capacity even
+    // though input is bounded, because the capacity moves: it depends on this
+    // node's name, and a DM allows the full MAX_TEXT_LEN where a channel does not.
+    // Compose a long direct message, switch the target to a channel, and the text
+    // is now over budget - a byte-wise cut there could split a two-byte character
+    // and put a dangling lead byte on the air.
     int cap = channelCapacity();
-    int sent_len = (_len > cap) ? cap : _len;
+    int sent_len = (int) mesh::validUtf8PrefixLength(_input, (size_t) cap);
     char sent[MAX_TEXT_LEN + 1];
     memcpy(sent, _input, sent_len);
     sent[sent_len] = 0;
@@ -2623,6 +3121,16 @@ public:
 
   bool isComposing() const { return _len > 0; }
 
+  // Whether a keystroke would reach the compose line at all. False while the
+  // target picker is up: handleInput() routes everything there instead, so the
+  // line is neither visible nor being typed into.
+  //
+  // The Nordic picker has to check this. Holding a vowel over the target picker
+  // would otherwise open it, and choosing a variant would replace the last
+  // character of a line the user cannot see - a character the held key never
+  // inserted, because the keystroke went to the picker.
+  bool acceptsText() const { return !_picking; }
+
   void onDelivered(uint32_t ack_hash, uint32_t trip_ms) {
     msg_log.markDelivered(ack_hash, trip_ms);
   }
@@ -2731,9 +3239,17 @@ public:
       display.drawTextRightAlign(display.width() - 2, INPUT_Y, cnt);
     }
 
+    // Translate first, then take the tail of the *translated* text. The compose
+    // buffer holds UTF-8, because that is what goes on the air, but CP437 output
+    // is one byte per code point - so slicing after translation cannot land
+    // inside a sequence. Slicing _input by byte could, and would draw a block or
+    // a stray glyph as soon as the line was long enough to scroll.
     int max_chars = (display.width() - 70) / RIFT_CHAR_W;
-    const char* shown = _input;
-    if (_len > max_chars) shown = _input + (_len - max_chars);
+    char filtered[sizeof(_input)];   // translation never outputs more bytes than it reads
+    riftTranslateUTF8(filtered, _input, sizeof(filtered));
+    int flen = (int) strlen(filtered);
+    const char* shown = filtered;
+    if (flen > max_chars) shown = filtered + (flen - max_chars);
 
     display.setColor(rift_pal.accent);
     display.setCursor(2, INPUT_Y);
@@ -2795,13 +3311,173 @@ public:
     // backspace deletes while composing; with nothing to delete this is
     // already the top level, so there is nowhere further back to go
     if (c == RIFT_KEY_BACK) {
-      if (_len > 0) _input[--_len] = 0;
+      // Delete a whole code point, not a byte. Dropping one byte of a two-byte
+      // character leaves a dangling lead byte, which is not valid UTF-8 and which
+      // the next backspace would then have to clean up. Truncating to _len-1
+      // without splitting a sequence is exactly what this helper does, so the
+      // walk is not reimplemented here.
+      deleteLastChar();
       return true;
     }
 
     if (c >= 32 && c < 127 && _len < channelCapacity()) {
       _input[_len++] = c;
       _input[_len] = 0;
+
+      // Two presses of the same vowel in quick succession offer its Nordic forms.
+      // Both letters are inserted first and the picker replaces the pair, so
+      // cancelling leaves exactly what was typed - which is what makes a false
+      // trigger on a genuine double vowel cost one keypress rather than a word.
+      //
+      // millis() - _last_key_ms rather than a stored deadline: unsigned arithmetic
+      // is wrap-safe, a future deadline is not.
+      if (c == _last_key && _last_key_ms != 0
+          && millis() - _last_key_ms <= RIFT_DOUBLETAP_MILLIS) {
+        _last_key = 0;          // a third tap starts over rather than re-firing
+        _last_key_ms = 0;
+        _task->openNordicPicker(c);
+      } else {
+        _last_key = c;
+        _last_key_ms = millis();
+      }
+      return true;
+    }
+    return false;
+  }
+
+public:
+  // Insert a character the keyboard cannot produce, as UTF-8. Used by the Nordic
+  // picker. Returns false if it would not fit - the caller should not silently
+  // drop it, since the user chose it deliberately.
+  //
+  // What goes in here is what goes on the air. CP437 codes must never be inserted:
+  // o-slash on the wire is 0xC3 0xB8, while 0x01 is a display-side placeholder
+  // that other clients would read as a C0 control byte.
+  bool insertUtf8(const char* utf8) {
+    if (utf8 == NULL) return false;
+    int n = (int) strlen(utf8);
+    if (n <= 0 || _len + n > channelCapacity()) return false;
+    memcpy(&_input[_len], utf8, n);
+    _len += n;
+    _input[_len] = 0;
+    return true;
+  }
+
+  // Remove one whole code point. Dropping a single byte of a two-byte character
+  // would leave a dangling lead byte, which is not valid UTF-8 and which the next
+  // backspace would have to clean up. Truncating to _len-1 without splitting a
+  // sequence is exactly what this helper does, so the walk is not reimplemented.
+  //
+  // Also used by the Nordic picker, which replaces the base letter the initial
+  // keypress inserted.
+  void deleteLastChar() {
+    if (_len <= 0) return;
+    _len = (int) mesh::validUtf8PrefixLength(_input, (size_t) (_len - 1));
+    _input[_len] = 0;
+  }
+private:
+};
+
+// Nordic character picker: a long press on a base vowel offers its forms.
+//
+// An overlay, not a screen - the third use of that mechanism and the reason it
+// exists. The compose line underneath keeps its half-typed text, stays on screen
+// while you choose, and is handed straight back on dismissal.
+//
+// The base letter is already in the buffer, because the initial press inserted it
+// normally - holding a key must not make ordinary typing feel delayed. Choosing a
+// variant therefore replaces that character rather than appending to it.
+class RiftNordicPickerScreen : public RiftScreen {
+  UITask* _task;
+  RiftCommsScreen* _comms;
+  const char* _variants[RIFT_NORDIC_MAX_VARIANTS];
+  int _count;
+  int _sel;
+  char _base;
+
+public:
+  RiftNordicPickerScreen(UITask* task, RiftCommsScreen* comms)
+     : _task(task), _comms(comms), _count(0), _sel(0), _base(0) {
+    for (int i = 0; i < RIFT_NORDIC_MAX_VARIANTS; i++) _variants[i] = NULL;
+  }
+
+  bool isOverlay() const override { return true; }
+
+  // returns false if this key has no variants, so the caller knows not to open
+  bool openFor(char base) {
+    _count = riftNordicVariants(base, _variants);
+    if (_count == 0) return false;
+    _base = base;
+    _sel = 0;
+    return true;
+  }
+
+  int render(DisplayDriver& display) override {
+    // Sits just above the compose line rather than centred, so it is next to the
+    // text it is about and does not cover the history being replied to.
+    const int cell = 26;
+    const int w = _count * cell + 12;
+    const int h = 40;
+    const int x = 2;
+    const int y = 158;
+
+    display.setColor(rift_pal.bg);
+    display.fillRect(x, y, w, h);
+    display.setColor(rift_pal.accent);
+    display.drawRect(x, y, w, h);
+
+    display.setTextSize(1);
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(x + 6, y + 4, "ENTER  BKSP");
+
+    for (int i = 0; i < _count; i++) {
+      int cx = x + 6 + i * cell;
+      if (i == _sel) {
+        // accent fill with the glyph reversed out - legal in both palettes, where
+        // accent as text is not
+        display.setColor(rift_pal.accent);
+        display.fillRect(cx - 2, y + 14, cell - 2, 22);
+        display.setColor(0xFFFF);
+      } else {
+        display.setColor(rift_pal.fg);
+      }
+      // the variant is UTF-8; translate it to draw it
+      char glyph[8];
+      riftTranslateUTF8(glyph, _variants[i], sizeof(glyph));
+      display.setTextSize(3);
+      display.drawTextLeftAlign(cx, y + 16, glyph);
+      display.setTextSize(1);
+    }
+
+    return 1000;
+  }
+
+  bool handleInput(char c) override {
+    if (c == KEY_RIGHT || c == KEY_NEXT) { _sel = (_sel + 1) % _count; return true; }
+    if (c == KEY_LEFT || c == KEY_PREV)  { _sel = (_sel + _count - 1) % _count; return true; }
+
+    if (c == KEY_ENTER) {
+      // Both taps are already in the line - they were inserted as ordinary
+      // letters - so the variant replaces the pair.
+      if (_comms != NULL) {
+        _comms->deleteLastChar();
+        _comms->deleteLastChar();
+        if (!_comms->insertUtf8(_variants[_sel])) {
+          // put back what was typed rather than silently losing characters. A
+          // two-byte variant can fail to fit where two one-byte letters did.
+          char pair[3] = { _base, _base, 0 };
+          _comms->insertUtf8(pair);
+          _task->showAlert("No room for that character", 1200);
+        }
+      }
+      _task->dismissOverlay();
+      return true;
+    }
+
+    // cancel leaves both letters exactly as typed, which is what makes a false
+    // trigger on a real double vowel cost one keypress
+    if (c == RIFT_KEY_BACK || c == KEY_CANCEL) {
+      _task->dismissOverlay();
       return true;
     }
     return false;
@@ -2851,6 +3527,12 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   ui_started_at = millis();
   _alert_expiry = 0;
 
+  // Before any screen exists, so COMMS and the popup open with the history
+  // already in place rather than filling in a moment later.
+  riftLoadSettings();   // before the first render, so the palette is right at boot
+  msg_log.load(RIFT_MSGLOG_PATH);
+  RIFT_MARK("msgs");
+
   splash = new RiftSplashScreen(this);
   msg_preview = new RiftMsgPreviewScreen(this);
   nav_screens[RIFT_NAV_MESH] = new RiftMeshScreen(this, node_prefs);
@@ -2860,10 +3542,26 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #else
   nav_screens[RIFT_NAV_RADAR] = new RiftPlaceholderScreen(this, RIFT_NAV_RADAR, "RF RADAR", "Wi-Fi / BLE / RF scan");
 #endif
-  nav_screens[RIFT_NAV_COMMS] = new RiftCommsScreen(this);
+  RiftCommsScreen* comms = new RiftCommsScreen(this);
+  nav_screens[RIFT_NAV_COMMS] = comms;
   nav_screens[RIFT_NAV_SYSTEM] = new RiftSystemScreen(this);
+  // holds the concrete type: the picker edits the compose line directly, which is
+  // the whole point of it
+  nordic_picker = new RiftNordicPickerScreen(this, comms);
   nav_idx = 0;
   setCurrScreen(splash);
+}
+
+// Raised by holding a base vowel while COMMS is composing. Returns quietly for
+// any other key, so the caller can offer every keypress without filtering first.
+void UITask::openNordicPicker(char base) {
+  if (nordic_picker == NULL || _overlay != NULL) return;
+  if (curr != nav_screens[RIFT_NAV_COMMS]) return;   // nowhere else has a text field
+  // and not while COMMS has the target picker up: the keystroke went there, not
+  // into the compose line, so there is no base letter to replace
+  if (!((RiftCommsScreen *) nav_screens[RIFT_NAV_COMMS])->acceptsText()) return;
+  if (!((RiftNordicPickerScreen *) nordic_picker)->openFor(base)) return;
+  pushOverlay(nordic_picker);
 }
 
 void UITask::cycleNavScreen(int dir) {
@@ -2944,8 +3642,14 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   }
 
   if (_display != NULL) {
+    // The only notification this board has. There is no sounder and no vibration
+    // motor in this variant, so a message arriving while the screen is dark has
+    // exactly one way to announce itself. Suppressed only when a companion app is
+    // attached, because then the phone is doing the notifying.
     if (!_display->isOn() && !hasConnection()) {
       _display->turnOn();
+      if (rift_msg_wakes < 0xFFFF) rift_msg_wakes++;
+      rift_last_wake_ms = (uint32_t) millis();
     }
     if (_display->isOn()) {
       _auto_off = millis() + AUTO_OFF_MILLIS;
@@ -3025,6 +3729,11 @@ void UITask::gotoCommsScreen() {
   hardware-agnostic pre-shutdown activity should be done here
 */
 void UITask::shutdown(bool restart){
+
+  // A clean shutdown has no reason to lose the last few messages, so the
+  // debounce is skipped here. This is also the only path that makes the loss
+  // window in RIFT_MSGLOG_FLUSH_MILLIS apply solely to power being pulled.
+  if (msg_log.dirty) msg_log.save(RIFT_MSGLOG_PATH, RIFT_MSGLOG_TMP);
 
   #ifdef PIN_BUZZER
   buzzer.shutdown();
@@ -3128,6 +3837,7 @@ void UITask::loop() {
     char key = rift_keyboard.poll();
     if (key != 0) c = checkDisplayOn(key);
   }
+
 #endif
   // The screen that was showing when the key was pressed. Touch is polled after
   // the keyboard and can navigate elsewhere, so dispatching to curr afterwards
@@ -3205,6 +3915,15 @@ void UITask::loop() {
   if (curr) curr->poll();
   if (_overlay != NULL) _overlay->poll();
 
+  // Debounced write of the message history. Deliberately not on every message:
+  // a conversation arrives as a burst, this collapses the burst into one write,
+  // and the filesystem being written to is the one holding the unrecoverable
+  // private key. The timer restarts on each new message, so it fires once the
+  // traffic settles rather than every 20 seconds during it.
+  if (msg_log.dueToSave(millis())) {
+    msg_log.save(RIFT_MSGLOG_PATH, RIFT_MSGLOG_TMP);
+  }
+
   if (_display != NULL && _display->isOn()) {
     if (millis() >= _next_refresh && curr) {
       // Once per frame, for the nav bar to draw. The title bar used to read the
@@ -3260,6 +3979,13 @@ void UITask::loop() {
       _auto_off = millis() + AUTO_OFF_MILLIS;
     }
 #endif
+    // isExternalPowered() is HWCDC::isPlugged(), which reports a USB *host*. A
+    // charger that never enumerates supplies power without being one, so the
+    // device reads as on battery while it is charging. This is the setting for
+    // exactly that case, and it needs nothing detected.
+    if (rift_screen_always_on) {
+      _auto_off = millis() + AUTO_OFF_MILLIS;
+    }
     if (millis() > _auto_off) {
       _display->turnOff();
     }

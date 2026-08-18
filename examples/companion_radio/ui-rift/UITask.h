@@ -32,6 +32,24 @@ struct RiftPalette {
 };
 extern RiftPalette rift_pal;
 extern bool rift_day_mode;
+
+// Keeps the display up regardless of the auto-off timer. A charger that does not
+// enumerate as a USB host reads as battery through isExternalPowered(), so
+// KEEP_DISPLAY_ON_USB cannot see it - this is the switch that needs no detection.
+extern bool rift_screen_always_on;
+
+// The screen coming on IS the notification on this board - there is no buzzer or
+// vibration motor wired in this variant, so notify() compiles to nothing. That
+// makes the wake a feature rather than a side effect, and these two exist so a
+// report of "it did not notify me" can be checked instead of guessed at: whether
+// the code fired, and how long ago.
+extern uint16_t rift_msg_wakes;
+extern uint32_t rift_last_wake_ms;
+
+// Both of the above survive a reboot in a small RIFT-owned file. NodePrefs is
+// upstream's and serialised, so adding fields there would reach every build.
+void riftLoadSettings();
+void riftSaveSettings();
 void riftApplyPalette(bool day);
 
 // Unread count mirrored out of UITask so the nav bar - a free function called
@@ -146,6 +164,9 @@ private:
   // underneath was never told it had been left.
   RiftScreen* _overlay;
 
+  // Nordic character picker, raised by double-tapping a base vowel on COMMS.
+  RiftScreen* nordic_picker;
+
   void userLedHandler();
 
   // Button action handlers
@@ -164,6 +185,7 @@ public:
     nav_idx = 0;
     curr = NULL;
     _overlay = NULL;
+    nordic_picker = NULL;
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
@@ -175,6 +197,10 @@ public:
   // the latter used to drop them on MESH wherever they actually were.
   void pushOverlay(RiftScreen* o);
   void dismissOverlay();
+
+  // Offer a held key to the Nordic picker. Does nothing unless COMMS is showing
+  // and the key actually has variants.
+  void openNordicPicker(char base);
 
   // Real navigation to COMMS, dismissing any popup on the way. The message
   // preview needs it: Enter there means "show me the full history", and the

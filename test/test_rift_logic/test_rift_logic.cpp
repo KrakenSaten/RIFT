@@ -253,6 +253,58 @@ TEST(Utf8Decode, ReportsLengthAndRejectsMalformed) {
     EXPECT_EQ(0, riftUtf8Decode("\xC3\x41", &cp));        // bad continuation
 }
 
+// ------------------------------------------------------------ Nordic variants
+
+TEST(NordicVariants, BaseVowelsOfferTheirForms) {
+    const char* v[RIFT_NORDIC_MAX_VARIANTS] = { NULL, NULL, NULL };
+
+    EXPECT_EQ(3, riftNordicVariants('a', v));
+    EXPECT_STREQ("\xC3\xA6", v[0]);   // ae
+    EXPECT_STREQ("\xC3\xA5", v[1]);   // a-ring
+    EXPECT_STREQ("\xC3\xA4", v[2]);   // a-umlaut
+
+    EXPECT_EQ(2, riftNordicVariants('o', v));
+    EXPECT_STREQ("\xC3\xB8", v[0]);   // o-slash
+    EXPECT_STREQ("\xC3\xB6", v[1]);   // o-umlaut
+}
+
+TEST(NordicVariants, CaseIsCarriedThrough) {
+    const char* v[RIFT_NORDIC_MAX_VARIANTS] = { NULL, NULL, NULL };
+    EXPECT_EQ(3, riftNordicVariants('A', v));
+    EXPECT_STREQ("\xC3\x86", v[0]);   // AE
+    EXPECT_EQ(2, riftNordicVariants('O', v));
+    EXPECT_STREQ("\xC3\x98", v[0]);   // O-slash
+}
+
+TEST(NordicVariants, OtherKeysOfferNothing) {
+    const char* v[RIFT_NORDIC_MAX_VARIANTS] = { NULL, NULL, NULL };
+    EXPECT_EQ(0, riftNordicVariants('e', v));
+    EXPECT_EQ(0, riftNordicVariants('z', v));
+    EXPECT_EQ(0, riftNordicVariants(' ', v));
+    EXPECT_EQ(0, riftNordicVariants(0, v));
+    EXPECT_EQ(0, riftNordicVariants('a', NULL));
+}
+
+// Every variant has to be UTF-8, because the compose buffer is what goes on the
+// air. A CP437 code here would send a control byte other clients cannot decode -
+// o-slash is 0x01 on the display and 0xC3 0xB8 on the wire, and confusing the two
+// is the sharpest trap in this feature.
+TEST(NordicVariants, EveryVariantIsValidTwoByteUtf8) {
+    static const char BASES[] = { 'a', 'A', 'o', 'O' };
+    for (size_t b = 0; b < sizeof(BASES); b++) {
+        const char* v[RIFT_NORDIC_MAX_VARIANTS] = { NULL, NULL, NULL };
+        int n = riftNordicVariants(BASES[b], v);
+        for (int i = 0; i < n; i++) {
+            ASSERT_NE(nullptr, v[i]);
+            EXPECT_EQ(2u, strlen(v[i])) << "variant " << i << " of " << BASES[b];
+            uint32_t cp = 0;
+            EXPECT_EQ(2, riftUtf8Decode(v[i], &cp));
+            // and it must be one the panel can actually draw back
+            EXPECT_NE(0, riftNordicToCP437(cp)) << "variant " << i << " has no glyph";
+        }
+    }
+}
+
 // ------------------------------------------------------------ screen transitions
 
 // Arguments are (same_screen, from_overlay, to_overlay).
@@ -363,6 +415,79 @@ TEST(FormatAge, DegenerateBufferIsNotWritten) {
     riftFormatAge(1000, buf, 0);
     EXPECT_STREQ("keep", buf);
     riftFormatAge(1000, NULL, sizeof(buf));   // must not crash
+}
+
+// ------------------------------------------------------------ DM capability
+
+TEST(CanDirectMessage, ChatAndRoomsReceive) {
+    EXPECT_TRUE(riftCanDirectMessage(RIFT_ADV_CHAT));
+    EXPECT_TRUE(riftCanDirectMessage(RIFT_ADV_ROOM));   // a room server stores messages
+}
+
+TEST(CanDirectMessage, RepeatersAndSensorsDoNot) {
+    EXPECT_FALSE(riftCanDirectMessage(RIFT_ADV_REPEATER));
+    EXPECT_FALSE(riftCanDirectMessage(RIFT_ADV_SENSOR));
+    EXPECT_FALSE(riftCanDirectMessage(RIFT_ADV_NONE));
+    EXPECT_FALSE(riftCanDirectMessage(200));            // unknown type
+}
+
+// The whole reason this is one function: NODES allowed chat only while the COMMS
+// picker allowed chat and rooms, so a room was offered on one screen and refused
+// on the other.
+TEST(CanDirectMessage, OneAnswerForEveryType) {
+    for (int t = 0; t < 256; t++) {
+        bool a = riftCanDirectMessage((uint8_t) t);
+        bool b = riftCanDirectMessage((uint8_t) t);
+        EXPECT_EQ(a, b);
+        if (!a) EXPECT_STRNE("", riftAdvertTypeName((uint8_t) t));   // always explainable
+    }
+}
+
+// ------------------------------------------------------------ message log flush
+
+TEST(ShouldFlush, WaitsForTheBurstToSettle) {
+    EXPECT_FALSE(riftShouldFlush(true, 1000, 1000, 20000, 0, 0));
+    EXPECT_FALSE(riftShouldFlush(true, 20999, 1000, 20000, 0, 0));
+    EXPECT_TRUE (riftShouldFlush(true, 21000, 1000, 20000, 0, 0));
+}
+
+TEST(ShouldFlush, CleanLogIsNeverWritten) {
+    EXPECT_FALSE(riftShouldFlush(false, 999999, 0, 20000, 0, 0));
+}
+
+// The bug: a failed save left the log dirty with an old timestamp, so the
+// condition stayed true and the save was retried every loop iteration - at
+// ~553ms each, on the same loop as the radio.
+TEST(ShouldFlush, AFailedSaveDoesNotRetryImmediately) {
+    uint32_t now = 100000;
+    uint32_t retry = now + riftSaveBackoffMillis(1);
+    EXPECT_FALSE(riftShouldFlush(true, now + 1, 0, 20000, 1, retry));
+    EXPECT_FALSE(riftShouldFlush(true, retry - 1, 0, 20000, 1, retry));
+    EXPECT_TRUE (riftShouldFlush(true, retry, 0, 20000, 1, retry));
+}
+
+TEST(ShouldFlush, BackoffGrowsAndThenHolds) {
+    EXPECT_EQ(5000u,  riftSaveBackoffMillis(1));
+    EXPECT_EQ(15000u, riftSaveBackoffMillis(2));
+    EXPECT_EQ(60000u, riftSaveBackoffMillis(3));
+    EXPECT_EQ(60000u, riftSaveBackoffMillis(50));
+    EXPECT_EQ(60000u, riftSaveBackoffMillis(255));
+}
+
+TEST(ShouldFlush, SurvivesTheMillisWrap) {
+    // Retry deadline computed just before the wrap, now just after it. dirty_at
+    // has to be before the wrap too, or the debounce is what blocks rather than
+    // the backoff - which is what the first draft of this test actually measured.
+    uint32_t dirty_at = 0xFFFF0000u;
+    uint32_t retry = 0xFFFFFF00u + 5000u;      // wraps to 0x00001288
+    EXPECT_FALSE(riftShouldFlush(true, 0xFFFFFF00u, dirty_at, 20000, 1, retry));
+    EXPECT_TRUE (riftShouldFlush(true, retry, dirty_at, 20000, 1, retry));
+    EXPECT_TRUE (riftShouldFlush(true, retry + 1000, dirty_at, 20000, 1, retry));
+
+    // and the debounce itself has to survive the wrap independently: 10s after
+    // dirty_at is not yet due, and a now that has wrapped past it is
+    EXPECT_FALSE(riftShouldFlush(true, dirty_at + 10000u, dirty_at, 20000, 0, 0));
+    EXPECT_TRUE (riftShouldFlush(true, retry, dirty_at, 20000, 0, 0));
 }
 
 int main(int argc, char** argv) {

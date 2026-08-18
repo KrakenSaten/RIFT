@@ -7,7 +7,8 @@ name: RIFT Build Check
 
 on:
   push:
-    branches: [rift-tdeck]
+    # feature work happens on rift-* branches and was getting no CI at all
+    branches: [rift-tdeck, 'rift-*']
     paths:
       - 'src/**'
       - 'examples/**'
@@ -15,7 +16,8 @@ on:
       - 'platformio.ini'
       - '.github/workflows/rift-build-check.yml'
   pull_request:
-    branches: [rift-tdeck]
+    # feature work happens on rift-* branches and was getting no CI at all
+    branches: [rift-tdeck, 'rift-*']
     paths:
       - 'src/**'
       - 'examples/**'
