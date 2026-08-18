@@ -71,3 +71,32 @@ before the sender name reads as a label rather than as emphasis.
 Where the marker sits, and whether the channel tabs pick up the same colour. Both
 are taste, and the strip already uses an accent fill for the active tab, so they
 interact.
+
+---
+
+# The meshcore.io blue
+
+Queue item #11 wanted `meshcore.io` on the home screen in MeshCore's brand blue,
+and was blocked because the site returns 403 to automated fetches. It does not to
+a real browser: the value is **`#2563EB`** — Tailwind `blue-600` — used on the
+site's call-to-action buttons and icons.
+
+Two other saturated colours on that page are not MeshCore's and should not be
+mistaken for it: `#5865F2` is Discord's and `#FF5700` is Reddit's, both on social
+links.
+
+It cannot be used unmodified:
+
+| | On black | On white |
+|---|---|---|
+| `#2563EB` as published | **3.9:1** | 5.4:1 |
+| `#3870E8`, same hue, +5% lightness | 4.7:1 | 4.5:1 |
+
+3.9:1 is below the text threshold, and night is the default mode — so the brand
+value as published is the one case where it is least readable. Lifting the
+lightness from 53% to 58% keeps the hue and clears both fields.
+
+Whether to use the exact brand value or the readable one is a judgement about
+which matters more. The precedent in this design is already set: the accent keeps
+its value and changes role instead, because the design would rather be honest
+about a contrast limit than quietly print something no one can read.
