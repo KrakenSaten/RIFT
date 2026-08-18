@@ -87,6 +87,18 @@ What does not help: a different cable, and `upload_speed`. Baud is a no-op here 
 this is native USB CDC, so lowering it changes nothing and the run takes exactly
 as long. `--no-stub` only moved the failure earlier.
 
+`tools/rift-flash.py` does the split, so it does not have to be a local script
+that gets rebuilt by hand on the next machine:
+
+```bash
+python tools/rift-flash.py --port COM5
+```
+
+`--dry-run` writes the chunks out and checks they cover the image without
+touching the device; `--single` forces one write, which is how to retest the
+workaround cheaply. The day `--single` succeeds, the script has outlived its
+purpose.
+
 Splitting the write works. The app is one image at `0x10000`, so cut
 `firmware.bin` at a sector-aligned offset and write the halves separately.
 786432 (`0xC0000`) has been used, giving `0x10000` and `0xD0000`; each half
