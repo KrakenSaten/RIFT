@@ -82,9 +82,18 @@ What does not help: a different cable, and `upload_speed`. Baud is a no-op here;
 this is native USB CDC, so lowering it changes nothing and the run takes exactly
 as long. `--no-stub` only moved the failure earlier.
 
+**Two halves is no longer enough - use `tools/rift-flash.py --parts 4`.** Writes
+began failing about 638 KB into a transfer, at flash address `0x000ac0e1`, three
+times running. That looked address-specific until you notice both transfers
+started at `0x10000`, so "638 KB in" and "0xAC0E1" were the same point. Four parts
+wrote that same address straight through as part of a shorter transfer, every hash
+verified - **so it is the transfer length.** Expect to need more parts as the
+firmware grows.
+
 What works is splitting the write. The app is one image at `0x10000`, so cut
-`firmware.bin` at a sector-aligned offset and write the halves separately —
-786432 (`0xC0000`) has been used, giving `0x10000` and `0xD0000`. Each half
+`firmware.bin` at a sector-aligned offset and write the pieces separately —
+786432 (`0xC0000`) was used while two halves still worked, giving `0x10000` and
+`0xD0000`. Each half
 completes in under five seconds with its hash verified, and esptool verifies per
 chunk, so the two together cover the whole image.
 
@@ -360,7 +369,9 @@ confusing the wire form with the display form is this feature's sharpest trap.
    already in the history there and a popup would drop a half-typed line. The
    honest answer is `_picking || _len > 0`. Changing it is a design decision, and
    was deliberately kept out of the refactor.
-7. **Why a single flash write over ~1.2 MB fails.** Section 1 has a working split
+7. **Why a long flash write fails at all.** Now known to be the transfer length
+   rather than the address - see section 1 - but not *why* the transport gives up
+   there. Section 1 has a working split
    write and what was ruled out, but not a cause.
 8. **Emoji still show as blocks past the mapped set**, and the user reports that
    as too many for current message traffic. The limit is now fundamental rather
