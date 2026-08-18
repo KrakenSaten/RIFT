@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <cmath>
 
 // Included by relative path on purpose: this keeps the native test environments
 // exactly as upstream has them. The header is standalone - stdint and string.h
@@ -488,6 +489,79 @@ TEST(ShouldFlush, SurvivesTheMillisWrap) {
     // dirty_at is not yet due, and a now that has wrapped past it is
     EXPECT_FALSE(riftShouldFlush(true, dirty_at + 10000u, dirty_at, 20000, 0, 0));
     EXPECT_TRUE (riftShouldFlush(true, retry, dirty_at, 20000, 0, 0));
+}
+
+// ------------------------------------------------------------ channel colours
+//
+// The contrast is computed here rather than taken from the design note, because
+// the design note had it wrong. It picked colours in 24-bit and checked them
+// there; quantising to RGB565 raises the luminance, and every candidate fell
+// below the 4.5:1 text threshold against white once the panel had rounded it -
+// one of them to 4.38. This asserts on the value the panel is actually given,
+// which is the only number that describes what a user sees.
+
+static void rgb565to888(uint16_t v, int* r, int* g, int* b) {
+    int r5 = (v >> 11) & 0x1F, g6 = (v >> 5) & 0x3F, b5 = v & 0x1F;
+    *r = (r5 << 3) | (r5 >> 2);      // replicate the high bits, as the panel does
+    *g = (g6 << 2) | (g6 >> 4);
+    *b = (b5 << 3) | (b5 >> 2);
+}
+
+static double srgbChannel(int c) {
+    double x = c / 255.0;
+    return x <= 0.04045 ? x / 12.92 : std::pow((x + 0.055) / 1.055, 2.4);
+}
+
+static double relativeLuminance(uint16_t v) {
+    int r, g, b;
+    rgb565to888(v, &r, &g, &b);
+    return 0.2126 * srgbChannel(r) + 0.7152 * srgbChannel(g) + 0.0722 * srgbChannel(b);
+}
+
+TEST(ChannelColour, EveryColourClears45OnBothFields) {
+    // A channel colour cannot swap between night and day mode without ceasing to
+    // be an identity, so one value has to be legible on both #000000 and #FFFFFF.
+    for (int slot = 1; slot <= 4; slot++) {
+        uint16_t c = riftChannelColour(slot);
+        ASSERT_NE(RIFT_CHAN_COL_NONE, c) << "slot " << slot << " has no colour";
+        double L = relativeLuminance(c);
+        EXPECT_GE((L + 0.05) / 0.05, 4.5) << "slot " << slot << " against black";
+        EXPECT_GE(1.05 / (L + 0.05), 4.5) << "slot " << slot << " against white";
+    }
+}
+
+TEST(ChannelColour, TheBandIsWhereTheAnalysisSaysItIs) {
+    // L 0.175 to 0.1833 is the whole window in which both fields clear 4.5:1.
+    // Asserted so that a future edit to the table cannot drift out of it while
+    // still happening to pass the ratios above by rounding.
+    for (int slot = 1; slot <= 4; slot++) {
+        double L = relativeLuminance(riftChannelColour(slot));
+        EXPECT_GE(L, 0.1750) << "slot " << slot << " too dark for white";
+        EXPECT_LE(L, 0.1834) << "slot " << slot << " too light for black";
+    }
+}
+
+TEST(ChannelColour, PublicAndUnassignedSlotsGetNone) {
+    // slot 0 is the public channel: the default every node shares, so marking it
+    // would read as one of the user's own
+    EXPECT_EQ(RIFT_CHAN_COL_NONE, riftChannelColour(0));
+    // beyond four, no colour rather than a repeat - two channels that look
+    // identical can be mistaken for each other, two with no marker cannot
+    EXPECT_EQ(RIFT_CHAN_COL_NONE, riftChannelColour(5));
+    EXPECT_EQ(RIFT_CHAN_COL_NONE, riftChannelColour(39));
+    EXPECT_EQ(RIFT_CHAN_COL_NONE, riftChannelColour(-1));
+}
+
+TEST(ChannelColour, AllFourAreDistinctAndNotTheAccent) {
+    uint16_t seen[4];
+    for (int slot = 1; slot <= 4; slot++) {
+        uint16_t c = riftChannelColour(slot);
+        for (int j = 0; j < slot - 1; j++) {
+            EXPECT_NE(seen[j], c) << "slots " << (j + 1) << " and " << slot << " share a colour";
+        }
+        seen[slot - 1] = c;
+        EXPECT_NE(0xFA00, c) << "slot " << slot << " is the accent";
+    }
 }
 
 // ---------------------------------------------------------- millis deadlines

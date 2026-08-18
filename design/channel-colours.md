@@ -23,19 +23,48 @@ every channel colour must be about equally dark, so they can only differ by hue.
 
 That rules out the obvious instinct of a light colour and a dark one.
 
-## Six that clear 4.6:1 on both
+## Correction: the first table was computed in the wrong colour space
 
-Found by sweeping hue and lightness, quantising to RGB565 as the panel will, and
-rejecting anything within perceptual distance of the accent or the status green.
+The table that was here listed six hues at 4.6:1 on both fields. It was wrong.
+Contrast was computed on the 24-bit source hex, not on the RGB565 value the panel
+actually shows. Quantising to 5-6-5 raises the luminance, and every one of the six
+fell below the 4.5:1 text threshold against white once rounded:
 
-| Hue | Hex | RGB565 | On black | On white |
+| Source | RGB565 | Rounds to | On black | On white |
 |---|---|---|---|---|
-| 345 | `#C84868` | `0xCA4D` | 4.6:1 | 4.6:1 |
-| 245 | `#7068D0` | `0x735A` | 4.6:1 | 4.6:1 |
-| 65 | `#707C10` | `0x73E2` | 4.6:1 | 4.6:1 |
-| 300 | `#D000D0` | `0xD01A` | 4.6:1 | 4.6:1 |
-| 175 | `#008478` | `0x042F` | 4.6:1 | 4.6:1 |
-| 210 | `#0074E8` | `0x03BD` | 4.7:1 | 4.5:1 |
+| `#C84868` | `0xCA4D` | `#CE496B` | 4.79 | **4.38** |
+| `#707C10` | `0x73E2` | `#737D10` | 4.67 | **4.50** |
+| `#008478` | `0x042F` | `#00867B` | 4.70 | **4.47** |
+| `#7068D0` | `0x735A` | `#7369D6` | 4.72 | **4.45** |
+
+The band is L 0.175–0.1833 and quantisation moves L by enough to leave it, so a
+colour has to be *chosen* in RGB565 rather than converted into it. The lesson is
+narrow but it generalises to every colour in this firmware: the panel is the
+authority on what a value is, not the source file.
+
+## Four, chosen by sweeping RGB565 directly
+
+All 65536 values, contrast computed on the quantised colour: **1091 clear 4.5:1
+against both fields.** From those, requiring at least 45° from the accent (hue 15)
+and 35° from the status green (hue 103), and a saturation above 0.55 so the marker
+reads as an identity rather than as grey, leaves 423. Choosing four to maximise
+the smallest gap between neighbours gives **88°** — better separation than the
+first attempt claimed, from a smaller pool.
+
+| Slot | Hue | RGB565 | Shows as | On black | On white | From accent | From green |
+|---|---|---|---|---|---|---|---|
+| 1 | 65 | `0x73E0` | `#737D00` | 4.66 | 4.50 | 49° | 38° |
+| 2 | 153 | `0x0429` | `#00864A` | 4.51 | 4.66 | 138° | 50° |
+| 3 | 241 | `0x631E` | `#6361F7` | 4.58 | 4.58 | 135° | 138° |
+| 4 | 329 | `0xD170` | `#D62C84` | 4.55 | 4.61 | 47° | 134° |
+
+Slot 1 sits at 4.50 against white, which meets the threshold with nothing to
+spare. It is kept because the alternative was a smaller hue gap, and at a 4×6
+marker the gap is what the user actually perceives.
+
+Slot 2 is 50° from the status green in hue but far from it in lightness — the
+green is `#38C800`, well above this band, and is only ever drawn on the `ACK`
+line. They do not appear in the same role.
 
 For comparison, and why neither can be borrowed:
 
@@ -66,11 +95,31 @@ carries time, name and delivery state in three different roles. A fifth colour i
 that row competes with the accent bar that marks own messages. A small block
 before the sender name reads as a label rather than as emphasis.
 
-## Not decided here
+## Decided when it was built
 
-Where the marker sits, and whether the channel tabs pick up the same colour. Both
-are taste, and the strip already uses an accent fill for the active tab, so they
-interact.
+**The marker is a 4x6 block between the timestamp and the origin name** in the
+history sender line. That row already carries time, origin and delivery state in
+three roles; a fourth colour in the text would compete with the accent bar marking
+own messages, where a block before the name reads as a label.
+
+**The tab strip carries the colour in the border of inactive tabs.** The active tab
+keeps its accent fill untouched: being the selected channel is the stronger thing
+to say, and a colour bar at the same lightness as the accent would only muddy it.
+So the channel you are on is identified by name inside the fill, and the ones you
+are not by colour in the outline.
+
+**Assignment is by channel slot, and that is safe because slots are stable.**
+`MyMesh::removeChannel` blanks a slot in place rather than compacting, so deleting
+one channel does not recolour the others. Slot 0 — the public channel — gets no
+colour deliberately: it is the default every node shares, and marking it would
+read as one of the user's own.
+
+**Matching is by name.** Channel messages carry the channel name as their log
+origin, because MeshCore prepends the sender to the text itself, so the tab cache
+already maps name to slot and no field had to be added to the log or its file
+format. Two limits follow and are accepted: a direct message from a contact whose
+name equals a channel name picks up that colour, and a channel named longer than
+the cache's 20 bytes gets no colour rather than the wrong one.
 
 ---
 

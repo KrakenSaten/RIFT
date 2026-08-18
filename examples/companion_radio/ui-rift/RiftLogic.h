@@ -78,6 +78,51 @@ static inline int riftChannelCapacity(int max_text_len, const char* sender_name)
 // the code point to *cp, or returns 0 for anything malformed - a bad lead byte,
 // a missing or invalid continuation byte, or a sequence that would run past the
 // terminator. Callers advance one byte on 0 so a corrupt stream cannot stall.
+// ------------------------------------------------------------ channel colours
+//
+// Four colours, and the count is a result rather than a choice. A channel's
+// identity colour cannot swap between night and day mode or it stops being an
+// identity, so one value has to clear contrast against both #000000 and #FFFFFF.
+// Contrast is a function of luminance alone, which leaves the band L 0.175-0.183
+// at 4.5:1 - narrow, and it forbids variation in lightness. Every channel colour
+// is therefore about equally dark and they differ only by hue.
+//
+// These four are the result of sweeping all 65536 RGB565 values and keeping the
+// ones that clear 4.5:1 on both fields - 1091 of them - then choosing four at
+// least 45 degrees from the accent and 35 from the status green, and maximising
+// the smallest gap between neighbours. That gap is 88 degrees; at a 6x8 cell with
+// no antialiasing, and all of them necessarily at the same lightness, hue is the
+// only thing telling them apart.
+//
+// The contrast has to be computed on the quantised RGB565 value, not on the
+// source hex. The first version of this table was picked in 24-bit and failed:
+// quantisation raises the luminance, and all six candidates dropped below 4.5:1
+// against white once the panel had rounded them - one to 4.38. design/channel-
+// colours.md records that, and the sweep, and why neither the accent nor the
+// status green can be borrowed.
+//
+// Beyond four, no colour. A repeated colour is worse than none: two channels that
+// look identical can be mistaken for each other, where two with no marker only
+// tell you to read the name.
+#define RIFT_CHAN_COL_NONE  0x0000
+
+static inline uint16_t riftChannelColour(int channel_idx) {
+  // Slot 0 is the public channel and deliberately gets none: it is the default
+  // every node shares, and marking it would read as one of the user's own.
+  //
+  // Keyed on the slot, which is stable - MyMesh::removeChannel blanks a slot in
+  // place rather than compacting, so deleting one channel does not recolour the
+  // others.
+  //                            hue  on black  on white  from accent  from green
+  switch (channel_idx) {
+    case 1: return 0x73E0;   //  65     4.66      4.50         49          38
+    case 2: return 0x0429;   // 153     4.51      4.66        138          50
+    case 3: return 0x631E;   // 241     4.58      4.58        135         138
+    case 4: return 0xD170;   // 329     4.55      4.61         47         134
+    default: return RIFT_CHAN_COL_NONE;
+  }
+}
+
 // ------------------------------------------------------------ millis deadlines
 //
 // A plain millis() > deadline comparison is not wrap-safe. millis() wraps at

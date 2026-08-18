@@ -2872,7 +2872,13 @@ private:
         display.fillRect(x, _tabs_y - 2, tw - 2, 13);
         display.setColor(0xFFFF);
       } else {
-        display.setColor(rift_pal.rule);
+        // The border carries the channel colour; the label stays mid. The active
+        // tab keeps its accent fill untouched - being the selected channel is the
+        // stronger thing to say, and a colour bar at the same lightness as the
+        // accent would only muddy it. So the channel you are on is identified by
+        // name in the fill, and the ones you are not by colour in the outline.
+        uint16_t col = riftChannelColour(_tabs[i].idx);
+        display.setColor(col != RIFT_CHAN_COL_NONE ? col : rift_pal.rule);
         display.drawRect(x, _tabs_y - 2, tw - 2, 13);
         display.setColor(rift_pal.mid);
       }
@@ -3169,6 +3175,25 @@ public:
   // inserted, because the keystroke went to the picker.
   bool acceptsText() const { return !_picking; }
 
+  // A history entry's channel, as a colour. Channel messages carry the channel
+  // name as their origin - MeshCore prepends the sender to the text itself - so
+  // the tab cache, which already maps name to slot, is the whole lookup and no
+  // new field is needed in the log or its file format.
+  //
+  // Two honest limits. A direct message from a contact whose name happens to equal
+  // a channel name picks up that channel's colour; recording the slot in every
+  // entry would disambiguate it, at the cost of a file format version, to fix a
+  // collision the user created. And ChanTab::name is 20 bytes, so a channel named
+  // longer than that is cached truncated and never matches - it gets no colour
+  // rather than the wrong one.
+  uint16_t originColour(const char* origin) const {
+    if (origin == NULL || origin[0] == 0) return RIFT_CHAN_COL_NONE;
+    for (int i = 0; i < _tab_count; i++) {
+      if (strcmp(_tabs[i].name, origin) == 0) return riftChannelColour(_tabs[i].idx);
+    }
+    return RIFT_CHAN_COL_NONE;
+  }
+
   void onDelivered(uint32_t ack_hash, uint32_t trip_ms) {
     msg_log.markDelivered(ack_hash, trip_ms);
   }
@@ -3180,10 +3205,6 @@ public:
     // for itself. A channel target is already there with an accent fill, so
     // naming it again at the top said the same thing twice.
     //
-    // A contact target is not: the strip holds channels only - there can be
-    // MAX_CONTACTS of the other kind - and marks a DM by showing "DM" without a
-    // name. So for a contact this line is the only place the target appears, and
-    // it stays. The asymmetry is the strip's, not the heading's.
     // A contact target needs a heading: the strip holds channels only - there can
     // be MAX_CONTACTS of the other kind - and marks a DM without naming it. This
     // line is then the only place the target appears, and at full width rather
@@ -3246,8 +3267,19 @@ public:
       sprintf(tbuf, "%02d:%02d", hh, mm);
       display.setColor(rift_pal.dim);
       display.drawTextLeftAlign(6, y, tbuf);
+      // Channel colour as a marker in the gap the timestamp leaves, not as the
+      // colour of the name. The sender line already carries time, origin and
+      // delivery state in three roles, and a fourth colour in the text would
+      // compete with the accent bar that marks own messages. A block before the
+      // name reads as a label instead. Matched on the raw origin, not the
+      // CP437-translated copy, because that is what the channel is named.
+      uint16_t chan_col = originColour(p->origin);
+      if (chan_col != RIFT_CHAN_COL_NONE) {
+        display.setColor(chan_col);
+        display.fillRect(37, y + 1, 4, 6);
+      }
       display.setColor(rift_pal.mid);
-      display.drawTextEllipsized(42, y, 190, filtered_origin);
+      display.drawTextEllipsized(48, y, 184, filtered_origin);
 
       if (ack != NULL) {
         // green for delivered, accent for a send that never landed. Channel
