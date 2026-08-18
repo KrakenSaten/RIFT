@@ -32,6 +32,16 @@ struct RiftPalette {
 };
 extern RiftPalette rift_pal;
 extern bool rift_day_mode;
+
+// Keeps the display up regardless of the auto-off timer. A charger that does not
+// enumerate as a USB host reads as battery through isExternalPowered(), so
+// KEEP_DISPLAY_ON_USB cannot see it - this is the switch that needs no detection.
+extern bool rift_screen_always_on;
+
+// Both of the above survive a reboot in a small RIFT-owned file. NodePrefs is
+// upstream's and serialised, so adding fields there would reach every build.
+void riftLoadSettings();
+void riftSaveSettings();
 void riftApplyPalette(bool day);
 
 // Unread count mirrored out of UITask so the nav bar - a free function called

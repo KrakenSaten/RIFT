@@ -444,6 +444,27 @@ int MyMesh::sendTextTo(ContactInfo* recipient, const char* text, uint32_t& expec
 }
 
 // find a slot with no channel in it, or -1 if all are taken
+// Deleting a channel is clearing its slot: findFreeChannelSlot() looks for an
+// empty name, and every RIFT screen that walks the channels skips those, so the
+// slot disappears from the picker and the strip and is reused by the next add.
+//
+// Slot 0 is Public and is refused. It is the only channel a fresh node can talk
+// on, and deleting it would leave the device with nothing to send to and no
+// obvious way back.
+bool MyMesh::removeChannel(int idx) {
+  if (idx <= 0 || idx >= MAX_GROUP_CHANNELS) return false;
+
+  ChannelDetails existing;
+  if (!getChannel(idx, existing) || existing.name[0] == 0) return false;
+
+  ChannelDetails blank;
+  memset(&blank, 0, sizeof(blank));
+  if (!setChannel(idx, blank)) return false;
+
+  saveChannels();
+  return true;
+}
+
 int MyMesh::findFreeChannelSlot() {
   for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
     ChannelDetails existing;

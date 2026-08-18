@@ -569,6 +569,41 @@ static const RiftPalette RIFT_DAY = {
 
 RiftPalette rift_pal = RIFT_NIGHT;
 bool rift_day_mode = false;
+bool rift_screen_always_on = false;
+
+// Four bytes on SPIFFS: magic, version, flags. Small enough that the write cost
+// that dominates the message log does not apply, and it only happens when a
+// setting is actually changed.
+#define RIFT_SETTINGS_PATH "/rift.cfg"
+#define RIFT_SETTINGS_MAGIC0 'R'
+#define RIFT_SETTINGS_MAGIC1 'S'
+#define RIFT_SETTINGS_VERSION 1
+
+void riftLoadSettings() {
+#if defined(ESP32)
+  File f = SPIFFS.open(RIFT_SETTINGS_PATH, "r");
+  if (!f) return;
+  uint8_t b[4];
+  if (f.read(b, sizeof(b)) == sizeof(b)
+      && b[0] == RIFT_SETTINGS_MAGIC0 && b[1] == RIFT_SETTINGS_MAGIC1
+      && b[2] == RIFT_SETTINGS_VERSION) {
+    riftApplyPalette((b[3] & 1) != 0);
+    rift_screen_always_on = (b[3] & 2) != 0;
+  }
+  f.close();
+#endif
+}
+
+void riftSaveSettings() {
+#if defined(ESP32)
+  File f = SPIFFS.open(RIFT_SETTINGS_PATH, "w");
+  if (!f) return;
+  uint8_t b[4] = { RIFT_SETTINGS_MAGIC0, RIFT_SETTINGS_MAGIC1, RIFT_SETTINGS_VERSION,
+                   (uint8_t) ((rift_day_mode ? 1 : 0) | (rift_screen_always_on ? 2 : 0)) };
+  f.write(b, sizeof(b));
+  f.close();
+#endif
+}
 int rift_nav_unread = 0;
 int rift_nav_batt_pct = 0;
 
@@ -809,8 +844,10 @@ class RiftSystemScreen : public RiftScreen {
 
   // A small action menu rather than hidden letter shortcuts - discoverable, and
   // it leaves the printable keys free for the text fields.
-  enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY };
-  enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_PATHMODE, IT_DAYMODE, IT_COUNT };
+  enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
+              CH_DELETE, CH_DELETE_CONFIRM };
+  enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_DELCHANNEL,
+              IT_PATHMODE, IT_SCREEN, IT_DAYMODE, IT_COUNT };
 
   // most labels are fixed; the path-mode row shows its current value
   void itemLabel(int i, char* buf, size_t len) {
@@ -819,8 +856,14 @@ class RiftSystemScreen : public RiftScreen {
       "Send advert (whole mesh)",
       "Edit node name",
       "Add channel",
+      "Delete channel",
     };
-    if (i == IT_DAYMODE) {
+    if (i == IT_SCREEN) {
+      // A charger that does not enumerate as a USB host reads as battery, so the
+      // display cannot tell it is powered. This is the switch that does not
+      // depend on detecting anything.
+      snprintf(buf, len, "Screen: %s", rift_screen_always_on ? "always on" : "auto");
+    } else if (i == IT_DAYMODE) {
       // the design binds this to backlight level; this panel's backlight is on or
       // off with no level to read, so it is an explicit choice instead
       snprintf(buf, len, "Display: %s", rift_day_mode ? "day" : "night");
@@ -848,6 +891,9 @@ private:
   RiftTextInput _edit;
   char _ch_name[32];       // held while the key is being chosen
   char _ch_key[48];        // generated key, shown so it can be typed elsewhere
+  int  _del_sel = 0;       // index into _del_idx while choosing what to delete
+  int  _del_count = 0;
+  uint8_t _del_idx[MAX_GROUP_CHANNELS];   // slot numbers, so the list can skip gaps
 public:
   // Called when the user navigates away. Leaving by trackball or keyboard went
   // through this screen's own handling, but a tap on the nav bar changes screen
@@ -900,7 +946,20 @@ private:
 
       case IT_DAYMODE:
         riftApplyPalette(!rift_day_mode);
+        riftSaveSettings();
         _task->showAlert(rift_day_mode ? "Day mode" : "Night mode", 1200);
+        break;
+
+      case IT_SCREEN:
+        rift_screen_always_on = !rift_screen_always_on;
+        riftSaveSettings();
+        _task->showAlert(rift_screen_always_on ? "Screen stays on" : "Screen sleeps", 1400);
+        break;
+
+      case IT_DELCHANNEL:
+        _del_sel = 0;
+        collectDeletable();
+        _mode = CH_DELETE;
         break;
 
       case IT_NAME:
@@ -1023,6 +1082,83 @@ private:
     return 1000;
   }
 
+  // Slot 0 is Public and is not offered - see MyMesh::removeChannel().
+  void collectDeletable() {
+    _del_count = 0;
+    for (int i = 1; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails ch;
+      if (!the_mesh.getChannel(i, ch) || ch.name[0] == 0) continue;
+      _del_idx[_del_count++] = (uint8_t) i;
+    }
+    if (_del_sel >= _del_count) _del_sel = _del_count > 0 ? _del_count - 1 : 0;
+  }
+
+  int renderDeleteList(DisplayDriver& display) {
+    renderHeading(display, "DELETE CHANNEL");
+    display.setTextSize(1);
+
+    if (_del_count == 0) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(4, 40, "No channels to delete.");
+      display.drawTextLeftAlign(4, 64, "Public cannot be removed - it is the");
+      display.drawTextLeftAlign(4, 76, "only channel a new node can talk on.");
+      display.drawTextLeftAlign(4, 100, "BACKSPACE back");
+      renderNavBar(display, RIFT_NAV_SYSTEM);
+      return 1000;
+    }
+
+    int y = 34;
+    for (int i = 0; i < _del_count && y < 180; i++, y += RIFT_LINE_H) {
+      ChannelDetails ch;
+      if (!the_mesh.getChannel(_del_idx[i], ch)) continue;
+      char nm[sizeof(ch.name)];
+      riftTranslateUTF8(nm, ch.name, sizeof(nm));
+
+      if (i == _del_sel) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y - 2, display.width(), 12);
+        display.setColor(0xFFFF);
+      } else {
+        display.setColor(rift_pal.fg);
+      }
+      display.drawTextLeftAlign(4, y, nm);
+    }
+
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(4, 196, "up/down choose, ENTER delete, BACKSPACE back");
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
+  int renderDeleteConfirm(DisplayDriver& display) {
+    renderHeading(display, "DELETE CHANNEL");
+    display.setTextSize(1);
+
+    ChannelDetails ch;
+    char nm[sizeof(ch.name)] = "";
+    if (_del_sel < _del_count && the_mesh.getChannel(_del_idx[_del_sel], ch)) {
+      riftTranslateUTF8(nm, ch.name, sizeof(nm));
+    }
+
+    display.setColor(rift_pal.fg);
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "Delete \"%s\"?", nm);
+    display.drawTextLeftAlign(4, 44, tmp);
+
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(4, 70, "Messages already received stay in the");
+    display.drawTextLeftAlign(4, 82, "history. The key is gone from this");
+    display.drawTextLeftAlign(4, 94, "device - rejoining needs it again.");
+
+    display.setColor(rift_pal.accent);
+    display.drawTextLeftAlign(4, 124, "ENTER deletes");
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(4, 140, "BACKSPACE cancels");
+
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
   int renderShowKey(DisplayDriver& display) {
     renderHeading(display, "CHANNEL ADDED");
     display.setTextSize(1);
@@ -1079,6 +1215,8 @@ public:
       case CH_KEY_CHOICE:  return renderKeyChoice(display);
       case CH_KEY_ENTRY:   return renderKeyEntry(display);
       case CH_SHOW_KEY:    return renderShowKey(display);
+      case CH_DELETE:      return renderDeleteList(display);
+      case CH_DELETE_CONFIRM: return renderDeleteConfirm(display);
       default: break;
     }
 
@@ -1385,6 +1523,29 @@ public:
       if (c == KEY_ENTER) { finishChannel(2); return true; }
       if (_edit.handleKey(c)) return true;
       if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = CH_KEY_CHOICE; return true; }
+      return true;
+    }
+
+    if (_mode == CH_DELETE) {
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = MENU; return true; }
+      if (_del_count == 0) return true;
+      if (c == KEY_UP)   { _del_sel = (_del_sel + _del_count - 1) % _del_count; return true; }
+      if (c == KEY_DOWN) { _del_sel = (_del_sel + 1) % _del_count; return true; }
+      // deliberately a second screen rather than an immediate delete: the key is
+      // not recoverable from here and the list is one keypress from the menu
+      if (c == KEY_ENTER) { _mode = CH_DELETE_CONFIRM; return true; }
+      return true;
+    }
+
+    if (_mode == CH_DELETE_CONFIRM) {
+      if (c == KEY_ENTER) {
+        bool ok = (_del_sel < _del_count) && the_mesh.removeChannel(_del_idx[_del_sel]);
+        _task->showAlert(ok ? "Channel deleted" : "Delete failed", 1400);
+        collectDeletable();
+        _mode = _del_count > 0 ? CH_DELETE : MENU;
+        return true;
+      }
+      _mode = CH_DELETE;   // anything else backs out without deleting
       return true;
     }
 
@@ -3344,6 +3505,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
   // Before any screen exists, so COMMS and the popup open with the history
   // already in place rather than filling in a moment later.
+  riftLoadSettings();   // before the first render, so the palette is right at boot
   msg_log.load(RIFT_MSGLOG_PATH);
   RIFT_MARK("msgs");
 
@@ -3787,6 +3949,13 @@ void UITask::loop() {
       _auto_off = millis() + AUTO_OFF_MILLIS;
     }
 #endif
+    // isExternalPowered() is HWCDC::isPlugged(), which reports a USB *host*. A
+    // charger that never enumerates supplies power without being one, so the
+    // device reads as on battery while it is charging. This is the setting for
+    // exactly that case, and it needs nothing detected.
+    if (rift_screen_always_on) {
+      _auto_off = millis() + AUTO_OFF_MILLIS;
+    }
     if (millis() > _auto_off) {
       _display->turnOff();
     }

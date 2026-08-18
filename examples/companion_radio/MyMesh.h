@@ -139,6 +139,7 @@ public:
   //
   // Both return the slot index, or -1 on failure (bad key, or no free slot).
   int  addGroupChannelFromBase64(const char* name, const char* psk_base64);
+  bool removeChannel(int idx);   // refuses slot 0, which is Public
   // hashtag channel: the key is derived from the name, so anyone who knows the
   // name can read the traffic. Encrypted on air, but not secret.
   int  addGroupChannelHashtag(const char* name);
