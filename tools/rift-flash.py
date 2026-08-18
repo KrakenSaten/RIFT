@@ -54,6 +54,8 @@ def main():
     ap.add_argument("--port", help="serial port, e.g. COM5")
     ap.add_argument("--firmware", default=".pio/build/LilyGo_TDeck_rift/firmware.bin")
     ap.add_argument("--single", action="store_true", help="one write instead of two")
+    ap.add_argument("--parts", type=int, default=2,
+                    help="number of writes to split into (default 2)")
     ap.add_argument("--dry-run", action="store_true", help="build the chunks, write nothing")
     args = ap.parse_args()
 
@@ -76,11 +78,19 @@ def main():
     print("fits app0: 0x%X..0x%X of 0x%X (%.0f%% used)"
           % (APP_OFFSET, end, APP_END, 100.0 * len(image) / (APP_END - APP_OFFSET)))
 
-    if args.single or len(image) <= SPLIT_AT:
+    if args.single or args.parts <= 1 or len(image) <= 4096:
         chunks = [(APP_OFFSET, image)]
     else:
-        chunks = [(APP_OFFSET, image[:SPLIT_AT]),
-                  (APP_OFFSET + SPLIT_AT, image[SPLIT_AT:])]
+        # Sector-aligned cuts. Splitting further is also the measurement that
+        # separates the two explanations for the failures: if the same flash
+        # address dies whichever transfer it lands in, it is the address; if a
+        # shorter transfer gets through, it is the length.
+        step = ((len(image) // args.parts) + 4095) // 4096 * 4096
+        chunks = []
+        off = 0
+        while off < len(image):
+            chunks.append((APP_OFFSET + off, image[off:off + step]))
+            off += step
 
     out = os.path.join(os.path.dirname(args.firmware) or ".", "rift-chunks")
     os.makedirs(out, exist_ok=True)
