@@ -104,6 +104,30 @@ static inline int riftChannelCapacity(int max_text_len, const char* sender_name)
 // Beyond four, no colour. A repeated colour is worse than none: two channels that
 // look identical can be mistaken for each other, where two with no marker only
 // tell you to read the name.
+// A log entry's origin, reduced to the bare name of the conversation.
+//
+// Incoming entries record a bare name - the sender for a DM, the channel for a
+// channel message, since MeshCore prepends the sender to the text itself. Outgoing
+// entries record "to <name>:", from sendToContact and sendToChannel. Anything
+// matching an origin against configured channels or contacts has to normalise
+// first, or only received messages would ever match.
+//
+// Returns false when there is no name left to compare, which covers both "to :"
+// - decoration with nothing inside it - and a name too long for the buffer. Both
+// mean "do not claim to know which conversation this is", which is the safe
+// answer for a caller choosing a colour.
+static inline bool riftOriginName(const char* origin, char* out, size_t out_size) {
+  if (origin == NULL || out == NULL || out_size == 0) return false;
+  const char* p = origin;
+  if (strncmp(p, "to ", 3) == 0) p += 3;
+  size_t len = strlen(p);
+  while (len > 0 && p[len - 1] == ':') len--;
+  if (len == 0 || len >= out_size) return false;
+  memcpy(out, p, len);
+  out[len] = 0;
+  return true;
+}
+
 #define RIFT_CHAN_COL_NONE  0x0000
 
 static inline uint16_t riftChannelColour(int channel_idx) {

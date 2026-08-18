@@ -518,6 +518,55 @@ static double relativeLuminance(uint16_t v) {
     return 0.2126 * srgbChannel(r) + 0.7152 * srgbChannel(g) + 0.0722 * srgbChannel(b);
 }
 
+TEST(OriginName, IncomingNamesPassThrough) {
+    char out[64];
+    ASSERT_TRUE(riftOriginName("general", out, sizeof(out)));
+    EXPECT_STREQ("general", out);
+    ASSERT_TRUE(riftOriginName("Bob", out, sizeof(out)));
+    EXPECT_STREQ("Bob", out);
+}
+
+TEST(OriginName, OutgoingDecorationIsStripped) {
+    char out[64];
+    ASSERT_TRUE(riftOriginName("to general:", out, sizeof(out)));
+    EXPECT_STREQ("general", out);
+    ASSERT_TRUE(riftOriginName("to Bob:", out, sizeof(out)));
+    EXPECT_STREQ("Bob", out);
+    // an incoming channel entry that happens to end in a colon still normalises
+    ASSERT_TRUE(riftOriginName("general:", out, sizeof(out)));
+    EXPECT_STREQ("general", out);
+}
+
+TEST(OriginName, NothingToNameIsRefused) {
+    char out[64];
+    EXPECT_FALSE(riftOriginName("", out, sizeof(out)));
+    EXPECT_FALSE(riftOriginName("to :", out, sizeof(out)));      // decoration only
+    EXPECT_FALSE(riftOriginName(":", out, sizeof(out)));
+    EXPECT_FALSE(riftOriginName("::::", out, sizeof(out)));
+    EXPECT_FALSE(riftOriginName(NULL, out, sizeof(out)));
+    EXPECT_FALSE(riftOriginName("general", out, 0));
+}
+
+TEST(OriginName, RefusesRatherThanTruncating) {
+    // A truncated name would match the wrong channel, which is worse than matching
+    // none: the caller uses this to pick an identity colour.
+    char out[8];
+    EXPECT_FALSE(riftOriginName("to a-very-long-channel:", out, sizeof(out)));
+    EXPECT_FALSE(riftOriginName("exactly8", out, sizeof(out)));   // no room for the terminator
+    ASSERT_TRUE (riftOriginName("seven77", out, sizeof(out)));
+    EXPECT_STREQ("seven77", out);
+}
+
+TEST(OriginName, DoesNotConflateSimilarNames) {
+    // the reason this is a whole-string compare in the caller rather than a prefix
+    char a[64], b[64];
+    ASSERT_TRUE(riftOriginName("to general:", a, sizeof(a)));
+    ASSERT_TRUE(riftOriginName("to general-2:", b, sizeof(b)));
+    EXPECT_STRNE(a, b);
+    EXPECT_STREQ("general", a);
+    EXPECT_STREQ("general-2", b);
+}
+
 TEST(ChannelColour, EveryColourClears45OnBothFields) {
     // A channel colour cannot swap between night and day mode without ceasing to
     // be an identity, so one value has to be legible on both #000000 and #FFFFFF.

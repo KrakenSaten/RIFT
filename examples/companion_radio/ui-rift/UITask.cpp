@@ -2984,8 +2984,13 @@ private:
                                         ch.channel, the_mesh.getNodeName(),
                                         sent, sent_len);
     if (ok) {
+      // "to <channel>:", matching what sendToContact records for a DM. This used
+      // to be this node's own name, which said the same thing as the accent bar
+      // beside it and left the row unable to say which channel the message went
+      // to - so a message you sent to a channel could not be coloured while every
+      // message you received on it could.
       char origin[62];
-      sprintf(origin, "%s:", the_mesh.getNodeName());
+      snprintf(origin, sizeof(origin), "to %s:", ch.name);
       msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, sent, true);
       clearInput();
     } else {
@@ -3188,8 +3193,14 @@ public:
   // rather than the wrong one.
   uint16_t originColour(const char* origin) const {
     if (origin == NULL || origin[0] == 0) return RIFT_CHAN_COL_NONE;
+
+    // riftOriginName strips the "to <name>:" an outgoing entry carries; it is in
+    // RiftLogic.h so the edge cases have tests rather than an argument
+    char name[64];
+    if (!riftOriginName(origin, name, sizeof(name))) return RIFT_CHAN_COL_NONE;
+
     for (int i = 0; i < _tab_count; i++) {
-      if (strcmp(_tabs[i].name, origin) == 0) return riftChannelColour(_tabs[i].idx);
+      if (strcmp(_tabs[i].name, name) == 0) return riftChannelColour(_tabs[i].idx);
     }
     return RIFT_CHAN_COL_NONE;
   }
@@ -3267,19 +3278,23 @@ public:
       sprintf(tbuf, "%02d:%02d", hh, mm);
       display.setColor(rift_pal.dim);
       display.drawTextLeftAlign(6, y, tbuf);
-      // Channel colour as a marker in the gap the timestamp leaves, not as the
-      // colour of the name. The sender line already carries time, origin and
-      // delivery state in three roles, and a fourth colour in the text would
-      // compete with the accent bar that marks own messages. A block before the
-      // name reads as a label instead. Matched on the raw origin, not the
-      // CP437-translated copy, because that is what the channel is named.
+      // The channel name is drawn in the channel's colour, so the row and the tab
+      // above it carry the same identity. This started as a 4x6 block beside the
+      // name, on the argument that the row already had three roles and a fourth
+      // colour in the text would compete with the accent bar. Seen on hardware the
+      // block was the weaker answer: it asks the eye to associate a mark with a
+      // border, where the name in the same colour simply is the association.
+      //
+      // Contrast permits it because these four were chosen in the 4.5:1 text band
+      // rather than the 3:1 band that a non-text marker could have used - see
+      // riftChannelColour. Had they been picked for a block, this would not have
+      // been available.
+      //
+      // Matched on the raw origin rather than the CP437-translated copy, because
+      // that is what the channel is named.
       uint16_t chan_col = originColour(p->origin);
-      if (chan_col != RIFT_CHAN_COL_NONE) {
-        display.setColor(chan_col);
-        display.fillRect(37, y + 1, 4, 6);
-      }
-      display.setColor(rift_pal.mid);
-      display.drawTextEllipsized(48, y, 184, filtered_origin);
+      display.setColor(chan_col != RIFT_CHAN_COL_NONE ? chan_col : rift_pal.mid);
+      display.drawTextEllipsized(42, y, 190, filtered_origin);
 
       if (ack != NULL) {
         // green for delivered, accent for a send that never landed. Channel

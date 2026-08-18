@@ -97,10 +97,29 @@ before the sender name reads as a label rather than as emphasis.
 
 ## Decided when it was built
 
-**The marker is a 4x6 block between the timestamp and the origin name** in the
-history sender line. That row already carries time, origin and delivery state in
-three roles; a fourth colour in the text would compete with the accent bar marking
-own messages, where a block before the name reads as a label.
+**The channel name in the history row is drawn in the channel's colour**, so the
+row and the tab above it carry one identity.
+
+This was first built as a 4x6 block beside the name, on the argument that the row
+already carried three roles and a fourth colour in the text would compete with the
+accent bar marking own messages. Seen on hardware that was the weaker answer: a
+block asks the eye to associate a mark with a border, where the name in the same
+colour simply *is* the association. Changed at the user's request after looking at
+both.
+
+The block argument was about composition, not contrast — and contrast is what made
+the change available. These four were chosen in the 4.5:1 text band rather than the
+3:1 band a non-text marker could have used. Had they been picked for a block, the
+name could not have been coloured without failing the check.
+
+**Outgoing messages had to be fixed to make this work at all.** `sendToChannel`
+recorded this node's own name as the log origin, which said the same thing as the
+accent bar beside it and left the row unable to name the channel — so a message you
+received on a channel could be coloured and one you sent to it could not. It now
+records `to <channel>:`, matching what `sendToContact` already did for a DM.
+`riftOriginName` normalises that decoration away, and lives in `RiftLogic.h` so its
+edge cases — `to :`, a name too long for the buffer, `general` against `general-2` —
+have tests rather than an argument.
 
 **The tab strip carries the colour in the border of inactive tabs.** The active tab
 keeps its accent fill untouched: being the selected channel is the stronger thing
