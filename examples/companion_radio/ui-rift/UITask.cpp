@@ -3141,20 +3141,7 @@ private:
       char origin[62];
       snprintf(origin, sizeof(origin), "to %s:", ch.name);
       msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, sent, true);
-      // Diagnostic, and deliberately over-specified: outgoing channel messages are
-      // coming out uncoloured while incoming ones are correct, and reading both code
-      // paths did not show why. So this calls originColour() - the identical
-      // function the history row calls - on the identical string the history row
-      // will be given, and records the answer next to the inputs it depended on.
-      //
-      // s = channel slot, t = how many entries the tab cache held, COL/nocol = what
-      // the lookup returned, and the origin exactly as stored, in brackets, so a
-      // stray character would be visible. If it says COL the lookup works and the
-      // renderer is at fault; if nocol, the string or the cache is, and both are
-      // right there on the line.
-      riftLogf("tx s%d t%d %s [%s]", _target_channel_idx, _tab_count,
-               originColour(origin) != RIFT_CHAN_COL_NONE ? "COL" : "nocol", origin);
-      riftLogf("tx %s: %s", ch.name, sent);
+      riftLogf("tx s%d %s: %s", _target_channel_idx, ch.name, sent);
       clearInput();
     } else {
       riftLogf("TX FAILED s%d %s", _target_channel_idx, ch.name);
@@ -3351,22 +3338,6 @@ public:
   // inserted, because the keystroke went to the picker.
   bool acceptsText() const { return !_picking; }
 
-  // TEMPORARY diagnostic for the channel-colour fault. Both directions are drawing
-  // the origin in grey while the tab strip colours the same channel correctly, and
-  // the tab strip does not use this lookup - it goes straight from slot to colour -
-  // so the name match is the suspect. This prints the origin as stored, what it
-  // normalises to, and every entry the tab cache actually holds, so the comparison
-  // that is failing can be read rather than inferred. Remove once it is closed.
-  void logChannelResolution(const char* origin) const {
-    char name[64];
-    bool ok = riftOriginName(origin, name, sizeof(name));
-    riftLogf("? org[%s]", origin);
-    riftLogf("? norm[%s] tabs=%d col=%s", ok ? name : "(refused)", _tab_count,
-             originColour(origin) != RIFT_CHAN_COL_NONE ? "yes" : "NO");
-    for (int i = 0; i < _tab_count && i < 4; i++) {
-      riftLogf("? tab%d slot%d [%s]", i, _tabs[i].idx, _tabs[i].name);
-    }
-  }
 
   // A history entry's channel, as a colour. Channel messages carry the channel
   // name as their origin - MeshCore prepends the sender to the text itself - so
@@ -3914,16 +3885,13 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   } else {
     // path_len is Packet's encoding, not a count - see riftHopCount(). Printed
     // raw, a two-hop route at the 2-byte hash setting showed as "(66)".
-    sprintf(origin, "(%d) %s:", (uint32_t) riftHopCount(path_len), from_name);
+    sprintf(origin, "(%d) %s:", (int) riftHopCount(path_len), from_name);
   }
   msg_log.add(rtc_clock.getCurrentTime(), origin, text, false);
   // The text as well as the header. The message history already holds it, but the
   // log is where it sits next to the advert that preceded it and the ack that
   // followed, and that ordering is the thing the history cannot show.
   riftLogf("rx %dh %s: %s", (int) riftHopCount(path_len), origin, text);
-  // TEMPORARY - see logChannelResolution. Runs on every incoming message, which is
-  // noisy on purpose: the fault has survived two rounds of reading the code.
-  ((RiftCommsScreen *) nav_screens[RIFT_NAV_COMMS])->logChannelResolution(origin);
   ((RiftMsgPreviewScreen *) msg_preview)->onNewMsg();
 
   // Don't take the screen away from someone mid-input: a half-typed line in

@@ -518,29 +518,75 @@ static double relativeLuminance(uint16_t v) {
     return 0.2126 * srgbChannel(r) + 0.7152 * srgbChannel(g) + 0.0722 * srgbChannel(b);
 }
 
-TEST(OriginName, IncomingNamesPassThrough) {
+// The three shapes the message log actually stores. The first version of these
+// tests asserted a bare name for incoming entries, which is not what
+// UITask::newMsg writes - it decorates with the hop count - so they passed while
+// the feature was broken on the device. These strings are the ones the device
+// printed when it was asked.
+
+TEST(OriginName, IncomingCarriesTheHopMarker) {
     char out[64];
-    ASSERT_TRUE(riftOriginName("general", out, sizeof(out)));
-    EXPECT_STREQ("general", out);
-    ASSERT_TRUE(riftOriginName("Bob", out, sizeof(out)));
+    ASSERT_TRUE(riftOriginName("(0) #test:", out, sizeof(out)));
+    EXPECT_STREQ("#test", out);
+    ASSERT_TRUE(riftOriginName("(2) #oslo:", out, sizeof(out)));
+    EXPECT_STREQ("#oslo", out);
+    // "(D)" is what newMsg writes when the path is direct rather than a count
+    ASSERT_TRUE(riftOriginName("(D) Bob:", out, sizeof(out)));
+    EXPECT_STREQ("Bob", out);
+    // two-digit counts exist at the 2-byte hash setting
+    ASSERT_TRUE(riftOriginName("(12) lillemesh:", out, sizeof(out)));
+    EXPECT_STREQ("lillemesh", out);
+}
+
+TEST(OriginName, OutgoingCarriesTheToMarker) {
+    char out[64];
+    ASSERT_TRUE(riftOriginName("to #test:", out, sizeof(out)));
+    EXPECT_STREQ("#test", out);
+    ASSERT_TRUE(riftOriginName("to Bob:", out, sizeof(out)));
     EXPECT_STREQ("Bob", out);
 }
 
-TEST(OriginName, OutgoingDecorationIsStripped) {
+TEST(OriginName, BareNamesStillPassThrough) {
     char out[64];
-    ASSERT_TRUE(riftOriginName("to general:", out, sizeof(out)));
-    EXPECT_STREQ("general", out);
-    ASSERT_TRUE(riftOriginName("to Bob:", out, sizeof(out)));
-    EXPECT_STREQ("Bob", out);
-    // an incoming channel entry that happens to end in a colon still normalises
-    ASSERT_TRUE(riftOriginName("general:", out, sizeof(out)));
-    EXPECT_STREQ("general", out);
+    ASSERT_TRUE(riftOriginName("#test", out, sizeof(out)));
+    EXPECT_STREQ("#test", out);
+    ASSERT_TRUE(riftOriginName("Public", out, sizeof(out)));
+    EXPECT_STREQ("Public", out);
+}
+
+TEST(OriginName, TrailingWhitespaceAndColonsAreStripped) {
+    char out[64];
+    ASSERT_TRUE(riftOriginName("(0) #test: ", out, sizeof(out)));
+    EXPECT_STREQ("#test", out);
+    ASSERT_TRUE(riftOriginName("#test:", out, sizeof(out)));
+    EXPECT_STREQ("#test", out);
+}
+
+TEST(OriginName, MalformedDecorationDoesNotEatTheName) {
+    char out[64];
+    // an unclosed bracket is not a hop marker, so the name is left alone rather
+    // than the rest of the string being swallowed
+    ASSERT_TRUE(riftOriginName("(unclosed #test", out, sizeof(out)));
+    EXPECT_STREQ("(unclosed #test", out);
+    // and a bracket not followed by a space is not the marker either
+    ASSERT_TRUE(riftOriginName("(x)name", out, sizeof(out)));
+    EXPECT_STREQ("(x)name", out);
+}
+
+TEST(OriginName, IncomingAndOutgoingResolveToTheSameChannel) {
+    // the property the colours depend on: one channel, one colour, whichever
+    // direction the message went
+    char a[64], b[64];
+    ASSERT_TRUE(riftOriginName("(0) #test:", a, sizeof(a)));
+    ASSERT_TRUE(riftOriginName("to #test:", b, sizeof(b)));
+    EXPECT_STREQ(a, b);
 }
 
 TEST(OriginName, NothingToNameIsRefused) {
     char out[64];
     EXPECT_FALSE(riftOriginName("", out, sizeof(out)));
-    EXPECT_FALSE(riftOriginName("to :", out, sizeof(out)));      // decoration only
+    EXPECT_FALSE(riftOriginName("to :", out, sizeof(out)));
+    EXPECT_FALSE(riftOriginName("(0) :", out, sizeof(out)));
     EXPECT_FALSE(riftOriginName(":", out, sizeof(out)));
     EXPECT_FALSE(riftOriginName("::::", out, sizeof(out)));
     EXPECT_FALSE(riftOriginName(NULL, out, sizeof(out)));
@@ -552,19 +598,16 @@ TEST(OriginName, RefusesRatherThanTruncating) {
     // none: the caller uses this to pick an identity colour.
     char out[8];
     EXPECT_FALSE(riftOriginName("to a-very-long-channel:", out, sizeof(out)));
-    EXPECT_FALSE(riftOriginName("exactly8", out, sizeof(out)));   // no room for the terminator
+    EXPECT_FALSE(riftOriginName("exactly8", out, sizeof(out)));
     ASSERT_TRUE (riftOriginName("seven77", out, sizeof(out)));
     EXPECT_STREQ("seven77", out);
 }
 
 TEST(OriginName, DoesNotConflateSimilarNames) {
-    // the reason this is a whole-string compare in the caller rather than a prefix
     char a[64], b[64];
     ASSERT_TRUE(riftOriginName("to general:", a, sizeof(a)));
     ASSERT_TRUE(riftOriginName("to general-2:", b, sizeof(b)));
     EXPECT_STRNE(a, b);
-    EXPECT_STREQ("general", a);
-    EXPECT_STREQ("general-2", b);
 }
 
 TEST(ChannelColour, EveryColourClears45OnBothFields) {

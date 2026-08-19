@@ -133,12 +133,30 @@ one channel does not recolour the others. Slot 0 — the public channel — gets
 colour deliberately: it is the default every node shares, and marking it would
 read as one of the user's own.
 
-**Matching is by name.** Channel messages carry the channel name as their log
-origin, because MeshCore prepends the sender to the text itself, so the tab cache
-already maps name to slot and no field had to be added to the log or its file
-format. Two limits follow and are accepted: a direct message from a contact whose
-name equals a channel name picks up that colour, and a channel named longer than
-the cache's 20 bytes gets no colour rather than the wrong one.
+**Matching is by name, and getting that right took three attempts.**
+
+The log's `origin` field is a *display string*, not data, and it comes in three
+shapes. `UITask::newMsg` decorates an incoming entry with the hop count —
+`(2) #test:`, or `(D) Bob:` when the path is direct. `sendToContact` and
+`sendToChannel` write an outgoing one as `to name:`. The lookup was built believing
+an incoming entry stored the bare channel name, so it matched nothing and *every*
+message row drew grey while the tab strip — which goes straight from slot to colour
+without this function — was correct.
+
+Three readings of the code did not find it, and two guesses at the cause were
+wrong. What found it was printing the stored string on the device: `? org[(0) #test: ]`
+made it obvious in one line. The tests had passed throughout, because they asserted
+a bare name for incoming entries — they were testing the same wrong assumption the
+code was built on. They now use the strings the device printed.
+
+Two limits remain and are accepted: a direct message from a contact whose name
+equals a channel name picks up that colour, and a channel named longer than the tab
+cache's 20 bytes gets no colour rather than the wrong one.
+
+The robust alternative is to record the channel slot in each log entry, which would
+make the match exact and survive both a rename and any future change to the display
+format. It costs a file format version, so it is worth doing the next time that
+format changes for another reason rather than on its own.
 
 ---
 

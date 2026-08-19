@@ -106,22 +106,38 @@ static inline int riftChannelCapacity(int max_text_len, const char* sender_name)
 // tell you to read the name.
 // A log entry's origin, reduced to the bare name of the conversation.
 //
-// Incoming entries record a bare name - the sender for a DM, the channel for a
-// channel message, since MeshCore prepends the sender to the text itself. Outgoing
-// entries record "to <name>:", from sendToContact and sendToChannel. Anything
-// matching an origin against configured channels or contacts has to normalise
-// first, or only received messages would ever match.
+// The origin stored in the message log is a display string, not data, and it comes
+// in three shapes. UITask::newMsg decorates an incoming entry with the hop count:
+// "(2) name:", or "(D) name:" when the path is direct. sendToContact and
+// sendToChannel record an outgoing one as "to name:". Anything matching an origin
+// against configured channels or contacts has to undo all of that first.
 //
-// Returns false when there is no name left to compare, which covers both "to :"
-// - decoration with nothing inside it - and a name too long for the buffer. Both
-// mean "do not claim to know which conversation this is", which is the safe
-// answer for a caller choosing a colour.
+// This is what the channel colours got wrong on the first attempt. The lookup was
+// written believing an incoming entry stored the bare name, so it matched nothing
+// and every message row drew grey while the tab strip - which goes straight from
+// slot to colour without this function - was correct. Three readings of the code
+// did not find it; the device printed the stored string and it was obvious.
+//
+// Returns false when there is no name left to compare, which covers "to :",
+// decoration with nothing inside it, and a name too long for the buffer. Both mean
+// "do not claim to know which conversation this is", the safe answer for a caller
+// choosing an identity colour.
 static inline bool riftOriginName(const char* origin, char* out, size_t out_size) {
   if (origin == NULL || out == NULL || out_size == 0) return false;
   const char* p = origin;
-  if (strncmp(p, "to ", 3) == 0) p += 3;
+
+  // the hop marker, whatever is inside the brackets - a count, or D for direct
+  if (*p == '(') {
+    const char* close = strchr(p, ')');
+    if (close != NULL && close[1] == ' ') p = close + 2;
+  } else if (strncmp(p, "to ", 3) == 0) {
+    p += 3;
+  }
+
+  // Trailing spaces as well as colons: the separator is written as ":" today, and
+  // a name is never meaningfully distinguished by whitespace at its end.
   size_t len = strlen(p);
-  while (len > 0 && p[len - 1] == ':') len--;
+  while (len > 0 && (p[len - 1] == ':' || p[len - 1] == ' ')) len--;
   if (len == 0 || len >= out_size) return false;
   memcpy(out, p, len);
   out[len] = 0;
