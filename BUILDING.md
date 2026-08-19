@@ -91,15 +91,27 @@ as long. `--no-stub` only moved the failure earlier.
 that gets rebuilt by hand on the next machine:
 
 ```bash
-python tools/rift-flash.py --port COM5 --parts 4
+python tools/rift-flash.py --port COM5
 ```
 
-**Use `--parts 4`.** Two halves stopped being enough: writes began failing about
-638 KB into a transfer, at flash address `0x000ac0e1`, three times in a row. The
-same address then wrote through without complaint as part of a shorter transfer,
-which settles what was previously ambiguous - **it is the transfer length, not the
-address.** Both earlier failures started at `0x10000`, so "638 KB in" and "address
-0xAC0E1" were the same point and could not be told apart.
+**The split is automatic now, and you should not need `--parts` at all.** The tool
+aims for 192KB per write and computes the count from the image size, because the
+count that works is a function of how big the firmware has become. A long write
+fails part way through with a pySerial `PermissionError` on reopening the port, and
+the threshold is the **transfer length, not the flash address** - established by
+splitting at a different boundary and watching the same address go through.
+
+At 1.54MB, four parts (405KB each) was fine. At 1.55MB, four parts is 400KB each
+and fails on the third; eight parts at 200KB each goes through. A fixed count is
+therefore a default that silently stops working as the image grows.
+
+Override with `--chunk-kb` if 192 ever stops being enough, or `--parts N` to force a
+count. `--single` writes it in one go, which is how the failure was characterised.
+
+A failed chunk is retried four times, three seconds apart, because the error is
+often transient. If it exhausts the retries the image is partly written and the
+device will not boot - **run the tool again before power-cycling.** It is not
+bricked: the ROM bootloader is untouched and the port will still enumerate.
 
 Four parts of ~405 KB each complete in under four seconds apiece with every hash
 verified. Expect to need more parts as the firmware grows.

@@ -82,13 +82,14 @@ What does not help: a different cable, and `upload_speed`. Baud is a no-op here;
 this is native USB CDC, so lowering it changes nothing and the run takes exactly
 as long. `--no-stub` only moved the failure earlier.
 
-**Two halves is no longer enough - use `tools/rift-flash.py --parts 4`.** Writes
-began failing about 638 KB into a transfer, at flash address `0x000ac0e1`, three
-times running. That looked address-specific until you notice both transfers
-started at `0x10000`, so "638 KB in" and "0xAC0E1" were the same point. Four parts
-wrote that same address straight through as part of a shorter transfer, every hash
-verified - **so it is the transfer length.** Expect to need more parts as the
-firmware grows.
+**Flash with `tools/rift-flash.py --port COMn`, and let it choose the split.** A
+long write fails part way through, and the threshold is the transfer length rather
+than the flash address. The tool aims for 192KB per write and derives the count from
+the image size, because the count that works grows with the firmware: four parts was
+fine at 1.54MB and fails at 1.55MB, where eight works. A failed chunk is retried
+four times three seconds apart; if it gives up, the image is partly written and the
+device will not boot, so run the tool again before power-cycling. Why the transport
+gives up on a long write is still unknown.
 
 What works is splitting the write. The app is one image at `0x10000`, so cut
 `firmware.bin` at a sector-aligned offset and write the pieces separately —

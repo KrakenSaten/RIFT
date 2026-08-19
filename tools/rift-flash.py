@@ -22,6 +22,7 @@ import argparse
 import glob
 import os
 import subprocess
+import time
 import sys
 
 APP_OFFSET = 0x10000
@@ -43,10 +44,29 @@ def esptool_cmd():
     return [sys.executable, tool]
 
 
-def run(cmd):
+def run(cmd, attempts=4):
+    """Write one chunk, retrying a failed attempt.
+
+    The failure this exists for is a pySerial PermissionError on opening the port -
+    "the device does not recognise the command" - part way through a multi-chunk
+    write. It is transient: the same chunk goes through on a retry seconds later.
+    Without a retry the tool exited on the first one and left the device with some
+    chunks written and some not, which is a device that does not boot, and the fix
+    was to notice and run the whole thing again by hand.
+
+    Each esptool invocation resets the board, so a retry is a clean attempt at that
+    chunk rather than a resumption of a partial one.
+    """
     print("  " + " ".join(str(c) for c in cmd[2:] if not str(c).endswith("esptool.py")))
-    if subprocess.call(cmd) != 0:
-        sys.exit("write failed")
+    for attempt in range(1, attempts + 1):
+        if subprocess.call(cmd) == 0:
+            return
+        if attempt < attempts:
+            # the port often needs a moment before it will open again
+            print("  attempt %d failed, retrying in 3s" % attempt)
+            time.sleep(3)
+    sys.exit("write failed after %d attempts - the image is now partly written, "
+             "so run this again before power-cycling" % attempts)
 
 
 def main():
@@ -54,8 +74,10 @@ def main():
     ap.add_argument("--port", help="serial port, e.g. COM5")
     ap.add_argument("--firmware", default=".pio/build/LilyGo_TDeck_rift/firmware.bin")
     ap.add_argument("--single", action="store_true", help="one write instead of two")
-    ap.add_argument("--parts", type=int, default=2,
-                    help="number of writes to split into (default 2)")
+    ap.add_argument("--parts", type=int, default=0,
+                    help="number of writes to split into (default: from --chunk-kb)")
+    ap.add_argument("--chunk-kb", type=int, default=192,
+                    help="target size of each write in KB (default 192)")
     ap.add_argument("--dry-run", action="store_true", help="build the chunks, write nothing")
     args = ap.parse_args()
 
@@ -78,14 +100,23 @@ def main():
     print("fits app0: 0x%X..0x%X of 0x%X (%.0f%% used)"
           % (APP_OFFSET, end, APP_END, 100.0 * len(image) / (APP_END - APP_OFFSET)))
 
-    if args.single or args.parts <= 1 or len(image) <= 4096:
+    # Derived from a target chunk size rather than a fixed count, because the count
+    # that works is a function of how big the firmware has become. A long write fails
+    # part way through - see BUILDING.md - and the threshold is the transfer length,
+    # not the address. At 1.54MB four parts was fine; at 1.55MB four parts is 400KB
+    # each and fails, while eight parts at 200KB each goes through. A fixed default
+    # is therefore something that silently stops working as the image grows, which is
+    # the worst kind of default.
+    parts = args.parts
+    if parts <= 0:
+        target = max(args.chunk_kb, 1) * 1024
+        parts = max(1, (len(image) + target - 1) // target)
+
+    if args.single or parts <= 1 or len(image) <= 4096:
         chunks = [(APP_OFFSET, image)]
     else:
-        # Sector-aligned cuts. Splitting further is also the measurement that
-        # separates the two explanations for the failures: if the same flash
-        # address dies whichever transfer it lands in, it is the address; if a
-        # shorter transfer gets through, it is the length.
-        step = ((len(image) // args.parts) + 4095) // 4096 * 4096
+        # sector-aligned cuts, so no write straddles a 4KB erase boundary
+        step = ((len(image) // parts) + 4095) // 4096 * 4096
         chunks = []
         off = 0
         while off < len(image):
