@@ -324,14 +324,28 @@ confusing the wire form with the display form is this feature's sharpest trap.
 
 ### Open items
 
-1. **The `HOPS` distribution has never been read on a live mesh.** SYSTEM reports
-   `n` nodes / `max` hop count / `3+` beyond the third column. It reads `n0` on a
-   node that has heard nothing, so it fills itself in use rather than on demand.
-   Two things wait on it: moving the `HEARD` count out of the NODES heading, and
-   rebucketing the NODES hop columns — the report is that almost everything lands
-   in `3+`, which spends three quarters of the width on the minority. Do both
-   together; separately they shift the same layout twice. The buckets were guessed
-   once already, which is why this waits for a number.
+1. **The `HOPS` distribution still has not been read with more than one node.**
+   SYSTEM reports `n` nodes / `max` hop count / `3+` beyond the third column, and
+   two NODES changes wait on it: moving the `HEARD` count out of the heading, and
+   rebucketing the hop columns, since the report is that almost everything lands in
+   `3+`. Do both together; separately they shift the same layout twice. The buckets
+   were guessed once already, which is why this waits for a number.
+
+   It read `n0` for a long time and that was **not** a bug, though it was diagnosed
+   as one twice. `advert_paths`, which every RIFT node list reads, lives in RAM and
+   is cleared at startup, so it holds only what has been heard since boot - and
+   channel messages do not create contacts. A device receiving plenty of traffic can
+   have an empty table, and reflashing restarts it. Send an advert from another node
+   and `n` moves immediately.
+
+   **Seeding it from the persisted contacts was tried and reverted** (`2e0f0171`,
+   reverted in `bac7f804`). A stored contact with no known route carries
+   `out_path_len` `0xFF`, which means "flood, route unknown" and not a hop count, so
+   every contact landed in a 63-hop column - `0xFF & 63`. The screen sorts by hops,
+   so seeding needs somewhere honest to put "route unknown", and that decision
+   belongs to the column redesign rather than ahead of it. Do not retry it as a
+   standalone change.
+
 2. **Nordic character input — done, one thing left to confirm.**
 
    Double-tapping a base vowel in COMMS opens a picker: `a` offers æ å ä, `o`
@@ -375,10 +389,13 @@ confusing the wire form with the display form is this feature's sharpest trap.
    MeshCore is still paying the four minutes and does not know why. It is the
    largest effect available outside this repo. Outward-facing, so it needs an
    explicit go-ahead — asked for and deferred as of 0.5.0, not declined.
-7. **Why a long flash write fails at all.** Now known to be the transfer length
-   rather than the address - see section 1 - but not *why* the transport gives up
-   there. Section 1 has a working split
-   write and what was ruled out, but not a cause.
+7. **Why a long flash write fails at all.** Known to be the transfer length rather
+   than the address, but not *why* the transport gives up there. The threshold moves
+   with the image: four parts was fine at 1.54MB and fails on the third chunk at
+   1.55MB, where eight parts goes through. `tools/rift-flash.py` now derives the
+   count from a 192KB target and retries a failed chunk four times, so nothing has
+   to be remembered - but the cause is still unknown, and a partly written image is
+   a device that will not boot until the tool is run again.
 8. **Emoji still show as blocks past the mapped set**, and the user reports that
    as too many for current message traffic. The limit is now fundamental rather
    than a gap in the table: CP437 has no emoji, and what remains has no honest
@@ -388,13 +405,7 @@ confusing the wire form with the display form is this feature's sharpest trap.
    antialiasing, so the list has to be chosen for shapes that survive that size.
    An unrecognisable custom glyph is worse than a block: a block admits it cannot
    draw the thing, a vague shape looks like it means something specific.
-9. **Channels are not colour-coded in COMMS.** The analysis is done and is in
-   `design/channel-colours.md`: with the accent already spoken for, the usable
-   colours fall out of a contrast check against both the night and day fields, and
-   at 4.5:1 against both the luminance band is L 0.175-0.183 — narrow, but 2187
-   candidates clear 3:1. Hue is free; lightness is not. The implementation has not
-   been written.
-10. **The design renderings in `design/screens/` show the old chrome.** They still
+9. **The design renderings in `design/screens/` show the old chrome.** They still
     match `design/handoff.md` as originally written, which is why both are marked
     superseded rather than rewritten, but the README now has to caveat them. Either
     redraw them or accept the caveat permanently.
