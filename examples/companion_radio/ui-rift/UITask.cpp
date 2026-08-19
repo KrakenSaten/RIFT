@@ -1,5 +1,6 @@
 #include "UITask.h"
 #include "RiftLogic.h"
+#include "RiftEventLog.h"
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/UTF8Helpers.h>
 #include "../MyMesh.h"
@@ -123,59 +124,6 @@ static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::path
 // (DataStore holds identity/prefs/contacts/channels only, and MyMesh's offline
 // queue is private raw protocol frames), so the UI owns this - same approach as
 // ui-new, just shared between the popup and the COMMS terminal.
-// ----------------------------------------------------------------- event log
-//
-// Every hardware problem in this firmware was found by putting a value on screen
-// after reasoning had failed - the I2C timing, the touch byte layout, the
-// trackball pins, the boot time, the missing notification. What SYSTEM could not
-// do was say what happened *earlier*: it shows the current value of everything and
-// the history of nothing, so a fault that has passed leaves no trace.
-//
-// RAM only, and deliberately. Persisting it would put a second writer on the
-// filesystem holding the node identity, for data whose whole value is that it
-// describes the session you are still in.
-#define RIFT_LOG_LINES  48
-#define RIFT_LOG_TEXT   44
-
-struct RiftEventLog {
-  struct Line {
-    uint32_t at_ms;
-    char text[RIFT_LOG_TEXT];
-  };
-  Line lines[RIFT_LOG_LINES];
-  int head = RIFT_LOG_LINES - 1;   // index of the newest
-  int count = 0;
-  uint16_t dropped = 0;            // lines lost to the ring, so the screen can say so
-
-  void add(const char* text) {
-    head = (head + 1) % RIFT_LOG_LINES;
-    if (count < RIFT_LOG_LINES) count++;
-    else if (dropped < 0xFFFF) dropped++;
-    Line* l = &lines[head];
-    l->at_ms = (uint32_t) millis();
-    StrHelper::strncpy(l->text, text, sizeof(l->text));
-  }
-
-  // back == 0 is the newest
-  const Line* peek(int back) const {
-    if (back < 0 || back >= count) return NULL;
-    return &lines[(head - back + RIFT_LOG_LINES * 2) % RIFT_LOG_LINES];
-  }
-};
-
-static RiftEventLog rift_log;
-
-// Callers pass a format so the line is built once, here, rather than each site
-// carrying its own buffer. Truncation is silent because a truncated log line is
-// still worth having and there is nothing useful to do about it at the call site.
-static void riftLogf(const char* fmt, ...) {
-  char buf[RIFT_LOG_TEXT];
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
-  rift_log.add(buf);
-}
 
 struct RiftMsgLog {
   struct Entry {
@@ -966,7 +914,7 @@ class RiftSystemScreen : public RiftScreen {
       "Delete channel",
     };
     if (i == IT_LOG) {
-      snprintf(buf, len, "View log (%d)", rift_log.count);
+      snprintf(buf, len, "View log (%d)", riftLog().count);
     } else if (i == IT_SCREEN) {
       // A charger that does not enumerate as a USB host reads as battery, so the
       // display cannot tell it is powered. This is the switch that does not
@@ -1317,21 +1265,21 @@ private:
     const int TOP = 30, BOTTOM = 198;
     int rows = (BOTTOM - TOP) / RIFT_LINE_H;
 
-    if (rift_log.count == 0) {
+    if (riftLog().count == 0) {
       display.setColor(rift_pal.dim);
       display.drawTextLeftAlign(4, TOP, "nothing logged yet");
     }
 
     // clamped here rather than at the keypress, so a log that grows while you are
     // scrolled back cannot leave the offset pointing past the end
-    int max_scroll = rift_log.count - rows;
+    int max_scroll = riftLog().count - rows;
     if (max_scroll < 0) max_scroll = 0;
     if (_log_scroll > max_scroll) _log_scroll = max_scroll;
     if (_log_scroll < 0) _log_scroll = 0;
 
     int y = BOTTOM - RIFT_LINE_H;
     for (int i = 0; i < rows; i++, y -= RIFT_LINE_H) {
-      const RiftEventLog::Line* l = rift_log.peek(_log_scroll + i);
+      const RiftEventLog::Line* l = riftLog().peek(_log_scroll + i);
       if (l == NULL) break;
 
       // seconds since boot with one decimal. Not the wall clock: the RTC may never
@@ -1353,14 +1301,19 @@ private:
     display.setColor(rift_pal.rule);
     display.fillRect(0, 202, display.width(), 1);
     display.setColor(rift_pal.dim);
-    char foot[52];
-    if (rift_log.dropped > 0) {
-      snprintf(foot, sizeof(foot), "up/down scroll   %d lines, %u lost",
-               rift_log.count, (unsigned) rift_log.dropped);
+    // "ENTER back" is not decoration: this screen traps left and right for paging,
+    // which are the keys that change screen everywhere else, so without it a user
+    // who rolls the trackball to leave has no way out that the screen admits to.
+    display.drawTextLeftAlign(4, 208, "up/down line  L/R page  ENTER back");
+
+    char foot[28];
+    if (riftLog().dropped > 0) {
+      snprintf(foot, sizeof(foot), "%d +%u lost", riftLog().count,
+               (unsigned) riftLog().dropped);
     } else {
-      snprintf(foot, sizeof(foot), "up/down scroll   %d lines", rift_log.count);
+      snprintf(foot, sizeof(foot), "%d", riftLog().count);
     }
-    display.drawTextLeftAlign(4, 208, foot);
+    display.drawTextRightAlign(display.width() - 2, 208, foot);
 
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
@@ -1744,6 +1697,11 @@ public:
       // line to the newest would read as the log having jumped.
       if (c == KEY_UP)   { _log_scroll++; return true; }
       if (c == KEY_DOWN) { if (_log_scroll > 0) _log_scroll--; return true; }
+      // left/right page, because the ring is 128 lines and 14 fit on screen - by
+      // line alone the far end is nine presses away. render() clamps the offset,
+      // so overshooting the oldest line is harmless.
+      if (c == KEY_LEFT)  { _log_scroll += 14; return true; }
+      if (c == KEY_RIGHT) { _log_scroll = _log_scroll > 14 ? _log_scroll - 14 : 0; return true; }
       _mode = MENU;
       return true;
     }
@@ -4287,6 +4245,9 @@ void UITask::loop() {
       _auto_off = millis() + AUTO_OFF_MILLIS;
     }
     if (riftDue((uint32_t) millis(), _auto_off)) {
+      // logged so a later "wake: screen on for message" has something to be read
+      // against - without it there is no record that the screen was ever off
+      riftLogf("screen off (idle)");
       _display->turnOff();
     }
 #endif

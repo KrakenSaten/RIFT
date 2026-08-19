@@ -2,6 +2,13 @@
 
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
+
+#ifdef RIFT_VERSION
+// RIFT-only. Both headers are standalone, and every call site below is guarded,
+// so the other T-Deck builds are untouched by this.
+#include "ui-rift/RiftEventLog.h"
+#include "ui-rift/RiftLogic.h"
+#endif
 // Channel PSKs are shared between nodes as base64. Declared rather than
 // included: base64.hpp defines these without `inline`, so including it here as
 // well as in BaseChatMesh.cpp gives duplicate definitions at link time.
@@ -195,6 +202,7 @@ void MyMesh::writeContactRespFrame(uint8_t code, const ContactInfo &contact) {
 void MyMesh::updateContactFromFrame(ContactInfo &contact, uint32_t& last_mod, const uint8_t *frame, int len) {
   int i = 0;
   uint8_t code = frame[i++]; // eg. CMD_ADD_UPDATE_CONTACT
+  (void) code;   // read to advance i; RIFT builds with -Wall and would warn
   memcpy(contact.id.pub_key, &frame[i], PUB_KEY_SIZE);
   i += PUB_KEY_SIZE;
   contact.type = frame[i++];
@@ -365,6 +373,14 @@ void MyMesh::onContactsFull() {
 }
 
 void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
+#ifdef RIFT_VERSION
+  // Logged before anything else and regardless of whether a companion is attached:
+  // a received advert is the most frequent evidence that this radio is hearing the
+  // mesh at all, and it was the obvious thing missing from the first version of the
+  // log - which recorded only the adverts this node sent itself.
+  riftLogf("%s %s %s %dh", is_new ? "NEW" : "adv", riftAdvertTypeName(contact.type),
+           contact.name, (int) mesh::Packet::pathHashCount(path_len));
+#endif
   if (_serial->isConnected()) {
     if (is_new) {
       writeContactRespFrame(PUSH_CODE_NEW_ADVERT, contact);
@@ -418,6 +434,11 @@ int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
 }
 
 void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
+#ifdef RIFT_VERSION
+  // A route changing is the difference between a DM that lands and one that does
+  // not, and nothing on screen said it had happened.
+  riftLogf("path %s now %d hop", contact.name, (int) contact.out_path_len);
+#endif
   out_frame[0] = PUSH_CODE_PATH_UPDATED;
   memcpy(&out_frame[1], contact.id.pub_key, PUB_KEY_SIZE);
   _serial->writeFrame(out_frame, 1 + PUB_KEY_SIZE); // NOTE: app may not be connected
