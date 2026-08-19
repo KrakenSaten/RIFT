@@ -812,6 +812,13 @@ public:
           default:                why = "unknown"; break;
         }
         riftLogf("last reset: %s", why);
+        // Logged because an unset clock is not an error anywhere and yet it emptied
+        // three screens. Standalone is RIFT's normal case, so this is the normal
+        // state, not an edge case.
+        uint32_t clk = the_mesh.getRTCClock()->getCurrentTime();
+        if (clk < 1600000000u) riftLogf("clock unset (%u)", (unsigned) clk);
+        else                   riftLogf("clock %02u:%02u", (unsigned) ((clk / 3600u) % 24u),
+                                        (unsigned) ((clk / 60u) % 60u));
       }
       _task->gotoHomeScreen();
     }
@@ -1564,6 +1571,29 @@ public:
     y += RIFT_LINE_H;
 #endif
 
+    // Added after an unset clock silently emptied NODES, RADAR and the HOPS row
+    // below: every advert was being cached with recv_timestamp 0, which the readers
+    // took for an empty slot. Nothing on screen said the clock was unset, and it is
+    // the normal state of a standalone node - no companion app to set it, and no GPS
+    // fix. It also explains message timestamps reading 00:00.
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "CLOCK");
+    {
+      uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+      // 1600000000 is September 2020. Anything below it is not a clock that was
+      // ever set, whatever it counted up to since boot.
+      if (now < 1600000000u) {
+        display.setColor(rift_pal.accent);
+        strcpy(tmp, "unset");
+      } else {
+        display.setColor(rift_pal.fg);
+        snprintf(tmp, sizeof(tmp), "%02u:%02u", (unsigned) ((now / 3600u) % 24u),
+                 (unsigned) ((now / 60u) % 60u));
+      }
+      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      y += RIFT_LINE_H;
+    }
+
     // Hop distribution of everything currently heard. Temporary: NODES buckets
     // into DIRECT / 1 / 2 / 3+, and the report is that almost everything lands in
     // the last column on a real mesh, which makes the layout spend three quarters
@@ -1576,8 +1606,15 @@ public:
       AdvertPath paths[RIFT_CONST_MAX];
       int n = the_mesh.getRecentlyHeard(paths, RIFT_CONST_MAX);
       int live = 0, maxhop = 0, beyond = 0;
+      // The emptiness test is the name, and the loop scans rather than stopping.
+      // recv_timestamp comes from the RTC, and on a standalone node with no
+      // companion app and no GPS fix the RTC is never set - so every filled entry
+      // carries timestamp 0, which read as "empty slot", and the first one ended
+      // the scan. That is why this said n0 on a mesh that was demonstrably being
+      // heard. With every timestamp equal the sort cannot guarantee the live
+      // entries are a prefix either, so breaking is wrong regardless of the clock.
       for (int i = 0; i < n; i++) {
-        if (paths[i].recv_timestamp == 0 || paths[i].name[0] == 0) break;
+        if (paths[i].name[0] == 0) continue;
         live++;
         int h = (int) riftHopCount(paths[i].path_len);
         if (h > maxhop) maxhop = h;
@@ -1898,12 +1935,21 @@ class RiftConstellationScreen : public RiftScreen {
 
   void refresh() {
     int n = the_mesh.getRecentlyHeard(_paths, RIFT_CONST_MAX);
-    // getRecentlyHeard always returns max_num entries including empty slots,
-    // and it sorts newest-first, so the live ones are a prefix
+    // getRecentlyHeard always returns max_num entries including empty slots and
+    // sorts newest-first, so the live ones *look* like a prefix - but only while
+    // the timestamps differ. recv_timestamp comes from the RTC, and a standalone
+    // node with no companion app and no GPS fix never sets it, so every filled
+    // entry carries 0. Treating 0 as empty then hid every node this device had
+    // heard, and with all timestamps equal the sort cannot order them anyway.
+    //
+    // The name is the emptiness test - the fill always writes it, and unused slots
+    // are memset to zero - and the live entries are compacted to the front so the
+    // rest of this screen can keep indexing a prefix.
     int live = 0;
     for (int i = 0; i < n; i++) {
-      if (_paths[i].recv_timestamp != 0 && _paths[i].name[0] != 0) live++;
-      else break;
+      if (_paths[i].name[0] == 0) continue;
+      if (live != i) _paths[live] = _paths[i];
+      live++;
     }
     _count = live;
     if (_sel >= _count) _sel = _count > 0 ? _count - 1 : 0;
