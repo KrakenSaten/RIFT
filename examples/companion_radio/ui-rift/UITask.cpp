@@ -2058,7 +2058,16 @@ public:
 
     display.setColor(rift_pal.mid);
     if (_count == 0) {
-      display.drawTextLeftAlign(2, 132, "no adverts heard yet");
+      // "since boot", not "yet". The path cache this reads lives in RAM and is
+      // cleared at startup, so an empty list after a restart is the normal state
+      // and not a fault - which is how it was read, repeatedly, including by me.
+      // Seeding it from the persisted contacts was tried and reverted: a stored
+      // contact with no known route carries out_path_len 0xFF, which is "flood,
+      // route unknown" rather than a hop count, and this screen sorts by hops. It
+      // put every contact in a 63-hop column, which is a claim the device cannot
+      // support. Doing it properly needs somewhere honest to put "route unknown",
+      // and that is part of the column redesign, not a change to make ahead of it.
+      display.drawTextLeftAlign(2, 132, "no adverts heard since boot");
     } else {
       display.drawTextLeftAlign(2, 132, "solid = heard under 30m");
       display.drawTextLeftAlign(2, 144, "hollow = older");
