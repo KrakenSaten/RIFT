@@ -1603,8 +1603,23 @@ public:
     // n = nodes heard, max = furthest hop count seen, 3+ = how many are beyond the
     // third column. Remove this row once the columns are redesigned.
     {
+      AdvertPath paths[RIFT_CONST_MAX];
+      int n = the_mesh.getRecentlyHeard(paths, RIFT_CONST_MAX);
       int live = 0, maxhop = 0, beyond = 0;
-      _task->hopStats(live, maxhop, beyond);
+      // The emptiness test is the name, and the loop scans rather than stopping.
+      // recv_timestamp comes from the RTC, and on a standalone node with no
+      // companion app and no GPS fix the RTC is never set - so every filled entry
+      // carries timestamp 0, which read as "empty slot", and the first one ended
+      // the scan. That is why this said n0 on a mesh that was demonstrably being
+      // heard. With every timestamp equal the sort cannot guarantee the live
+      // entries are a prefix either, so breaking is wrong regardless of the clock.
+      for (int i = 0; i < n; i++) {
+        if (paths[i].name[0] == 0) continue;
+        live++;
+        int h = (int) riftHopCount(paths[i].path_len);
+        if (h > maxhop) maxhop = h;
+        if (h >= RIFT_HOP_COLS - 1) beyond++;
+      }
       display.setColor(rift_pal.mid);
       display.drawTextLeftAlign(LX, y, "HOPS");
       display.setColor(rift_pal.fg);
@@ -1864,7 +1879,7 @@ public:
 #define RIFT_HOP_ROWS 3
 #define RIFT_NODE_NAME_MAX 10
 
-class RiftConstellationScreen : public RiftScreen, ContactVisitor {
+class RiftConstellationScreen : public RiftScreen {
   UITask* _task;
   AdvertPath _paths[RIFT_CONST_MAX];
   int _plot_x[RIFT_CONST_MAX];   // where each node was drawn, for tap hit-testing
@@ -1918,77 +1933,29 @@ class RiftConstellationScreen : public RiftScreen, ContactVisitor {
     display.fillRect(x2, min(y1, y2), 1, abs(y2 - y1) + 1);
   }
 
-  // from ContactVisitor - scanRecentContacts() orders by last_advert_timestamp
-  // descending, so the freshest contact arrives first and the list is already in
-  // the order this screen wants.
-  void onContactVisit(const ContactInfo& contact) override {
-    if (contact.name[0] == 0) return;              // reserved anon slots
-    if (_count >= RIFT_CONST_MAX) return;
-
-    AdvertPath* p = &_paths[_count++];
-    memcpy(p->pubkey_prefix, contact.id.pub_key, sizeof(p->pubkey_prefix));
-    StrHelper::strncpy(p->name, contact.name, sizeof(p->name));
-    // out_path_len is the route we would send on, which is the best hop count
-    // available for a node not heard from since boot. It is an encoded path_len,
-    // the same shape advert_paths stores, so riftHopCount reads it unchanged.
-    p->path_len = contact.out_path_len;
-    p->recv_timestamp = contact.last_advert_timestamp;
-    memcpy(p->path, contact.out_path, sizeof(p->path) < sizeof(contact.out_path)
-                                      ? sizeof(p->path) : sizeof(contact.out_path));
-  }
-
   void refresh() {
-    // Seeded from persisted contacts, then overlaid with what has been heard this
-    // session.
+    int n = the_mesh.getRecentlyHeard(_paths, RIFT_CONST_MAX);
+    // getRecentlyHeard always returns max_num entries including empty slots and
+    // sorts newest-first, so the live ones *look* like a prefix - but only while
+    // the timestamps differ. recv_timestamp comes from the RTC, and a standalone
+    // node with no companion app and no GPS fix never sets it, so every filled
+    // entry carries 0. Treating 0 as empty then hid every node this device had
+    // heard, and with all timestamps equal the sort cannot order them anyway.
     //
-    // advert_paths - what getRecentlyHeard reads - lives in RAM and is memset at
-    // startup, so for the first minutes after every boot this screen knew nobody,
-    // however many contacts the device had stored. That is exactly backwards for a
-    // field device: the moment you switch it on is the moment you most want to know
-    // who is around. It also made the screen look broken after a reflash, which is
-    // how long it took to notice.
-    //
-    // Contacts survive a reboot and carry out_path_len, the route we would send on.
-    // An advert heard since boot is better evidence than a stored route, so it wins
-    // where both exist.
-    _count = 0;
-    the_mesh.scanRecentContacts(0, this);
-
-    AdvertPath heard[RIFT_CONST_MAX];
-    int n = the_mesh.getRecentlyHeard(heard, RIFT_CONST_MAX);
+    // The name is the emptiness test - the fill always writes it, and unused slots
+    // are memset to zero - and the live entries are compacted to the front so the
+    // rest of this screen can keep indexing a prefix.
+    int live = 0;
     for (int i = 0; i < n; i++) {
-      if (heard[i].name[0] == 0) continue;         // unused slot
-      int at = -1;
-      for (int j = 0; j < _count; j++) {
-        if (memcmp(_paths[j].pubkey_prefix, heard[i].pubkey_prefix,
-                   sizeof(heard[i].pubkey_prefix)) == 0) { at = j; break; }
-      }
-      if (at >= 0) {
-        _paths[at] = heard[i];                     // fresher inbound path wins
-      } else if (_count < RIFT_CONST_MAX) {
-        _paths[_count++] = heard[i];               // heard, but not a stored contact
-      }
+      if (_paths[i].name[0] == 0) continue;
+      if (live != i) _paths[live] = _paths[i];
+      live++;
     }
-
+    _count = live;
     if (_sel >= _count) _sel = _count > 0 ? _count - 1 : 0;
   }
 
-
 public:
-  // Refreshes first, so the numbers describe what NODES would show right now
-  // rather than the last time it happened to be on screen.
-  void hopStats(int& n_out, int& maxhop, int& beyond) {
-    refresh();
-    n_out = _count;
-    maxhop = 0;
-    beyond = 0;
-    for (int i = 0; i < _count; i++) {
-      int h = (int) riftHopCount(_paths[i].path_len);
-      if (h > maxhop) maxhop = h;
-      if (h >= RIFT_HOP_COLS - 1) beyond++;
-    }
-  }
-
   RiftConstellationScreen(UITask* task) : _task(task), _count(0), _sel(0), _last_refresh(0),
                                           _refreshed_once(false) { }
 
@@ -4068,13 +4035,6 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
       _auto_off = millis() + AUTO_OFF_MILLIS;
       refreshNow();
     }
-  }
-}
-
-void UITask::hopStats(int& n, int& maxhop, int& beyond) {
-  n = maxhop = beyond = 0;
-  if (nav_screens[RIFT_NAV_NODES] != NULL) {
-    ((RiftConstellationScreen *) nav_screens[RIFT_NAV_NODES])->hopStats(n, maxhop, beyond);
   }
 }
 
