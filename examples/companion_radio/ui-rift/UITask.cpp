@@ -3115,11 +3115,20 @@ private:
       char origin[62];
       snprintf(origin, sizeof(origin), "to %s:", ch.name);
       msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, sent, true);
-      // The slot is here because a channel only gets a colour in slots 1-4, and a
-      // message that came out uncoloured could mean either that or a name that
-      // failed to match. Logging the slot makes the two distinguishable from the
-      // device instead of from the source.
-      riftLogf("tx s%d %s: %s", _target_channel_idx, ch.name, sent);
+      // Diagnostic, and deliberately over-specified: outgoing channel messages are
+      // coming out uncoloured while incoming ones are correct, and reading both code
+      // paths did not show why. So this calls originColour() - the identical
+      // function the history row calls - on the identical string the history row
+      // will be given, and records the answer next to the inputs it depended on.
+      //
+      // s = channel slot, t = how many entries the tab cache held, COL/nocol = what
+      // the lookup returned, and the origin exactly as stored, in brackets, so a
+      // stray character would be visible. If it says COL the lookup works and the
+      // renderer is at fault; if nocol, the string or the cache is, and both are
+      // right there on the line.
+      riftLogf("tx s%d t%d %s [%s]", _target_channel_idx, _tab_count,
+               originColour(origin) != RIFT_CHAN_COL_NONE ? "COL" : "nocol", origin);
+      riftLogf("tx %s: %s", ch.name, sent);
       clearInput();
     } else {
       riftLogf("TX FAILED s%d %s", _target_channel_idx, ch.name);
