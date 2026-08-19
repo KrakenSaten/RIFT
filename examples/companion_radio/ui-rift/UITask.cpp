@@ -141,6 +141,11 @@ struct RiftMsgLog {
     uint32_t timeout_ms;
     uint32_t trip_ms;
     bool delivered;
+    // Not persisted. save() writes outgoing and delivered into its flags byte and
+    // deliberately drops sent_at_ms and timeout_ms - see load() - so after a reboot
+    // there is no deadline left to have passed. This only records whether the line
+    // has already been written, within one session.
+    bool timeout_logged;
   };
 
   Entry entries[RIFT_MSG_LOG_SIZE];
@@ -162,7 +167,32 @@ struct RiftMsgLog {
     p->timeout_ms = 0;
     p->trip_ms = 0;
     p->delivered = false;
+    p->timeout_logged = false;
     return p;
+  }
+
+  // The worst silent failure this firmware has. A direct message that never lands
+  // looks exactly like one that did until the delivery label changes from "..." to
+  // "no ack", and nothing recorded the moment it changed - so unless the user
+  // happened to be looking at that row when it flipped, an undelivered message left
+  // no trace at all. Swept rather than scheduled, because the deadline is per
+  // message and is estimated at send time.
+  void logTimeouts() {
+    for (int i = 0; i < count; i++) {
+      Entry* p = &entries[(head - i + RIFT_MSG_LOG_SIZE * 2) % RIFT_MSG_LOG_SIZE];
+      if (!p->outgoing || p->expected_ack == 0 || p->delivered) continue;
+      if (p->timeout_logged || p->timeout_ms == 0) continue;
+      // subtraction, matching deliveryLabel: sent_at + timeout would overflow at
+      // the millis wrap and report a fresh send as long since timed out
+      if ((uint32_t) millis() - p->sent_at_ms <= p->timeout_ms) continue;
+      p->timeout_logged = true;
+      char who[40];
+      // "no ack" rather than "FAILED": the message may well have arrived and the
+      // acknowledgement been lost, and the log should not claim more than it knows
+      riftLogf("no ack from %s (%us)",
+               riftOriginName(p->origin, who, sizeof(who)) ? who : "?",
+               (unsigned) (p->timeout_ms / 1000u));
+    }
   }
 
   // mark the pending outgoing message matching this ACK hash as delivered
@@ -173,6 +203,12 @@ struct RiftMsgLog {
       if (p->expected_ack == ack_hash && !p->delivered) {
         p->delivered = true;
         p->trip_ms = trip_ms;
+        // named here rather than in msgDelivered(), which has the round trip but
+        // not the recipient
+        char who[40];
+        riftLogf("ack %s %ums",
+                 riftOriginName(p->origin, who, sizeof(who)) ? who : "?",
+                 (unsigned) trip_ms);
         markDirty();
         return;
       }
@@ -757,6 +793,25 @@ public:
                    (unsigned) rift_boot_marks[rift_boot_mark_count - 1].at_ms,
                    rift_boot_marks[worst].name, (unsigned) worst_ms);
         }
+        // The reset reason is on SYSTEM, but only for the boot you are in. In the
+        // log it survives the next one, which is what makes a repeating fault
+        // legible - a single panic and a panic every ten minutes look identical
+        // from one reading.
+        esp_reset_reason_t rr = esp_reset_reason();
+        const char* why;
+        switch (rr) {
+          case ESP_RST_POWERON:   why = "power on"; break;
+          case ESP_RST_SW:        why = "sw restart"; break;
+          case ESP_RST_PANIC:     why = "PANIC"; break;
+          case ESP_RST_INT_WDT:   why = "int wdt"; break;
+          case ESP_RST_TASK_WDT:  why = "task wdt"; break;
+          case ESP_RST_WDT:       why = "wdt"; break;
+          case ESP_RST_BROWNOUT:  why = "BROWNOUT"; break;
+          case ESP_RST_DEEPSLEEP: why = "deep sleep"; break;
+          case ESP_RST_EXT:       why = "ext reset"; break;
+          default:                why = "unknown"; break;
+        }
+        riftLogf("last reset: %s", why);
       }
       _task->gotoHomeScreen();
     }
@@ -1078,6 +1133,12 @@ private:
       return;
     }
 
+    // deletion was logged and addition was not, which left the log unable to
+    // explain a slot number appearing or a channel colour changing
+    static const char* KIND[] = { "hashtag", "random key", "pasted key" };
+    riftLogf("channel + slot%d %s (%s)", idx, _ch_name,
+             KIND[(kind < 0 || kind > 2) ? 0 : kind]);
+
     if (kind == 1) {
       _mode = CH_SHOW_KEY;   // let the user read the key off the screen
     } else {
@@ -1305,7 +1366,9 @@ private:
 
       // Failures in the accent so they can be found by scanning rather than by
       // reading. Upper case is the marker the log lines themselves use.
-      bool bad = (strstr(l->text, "FAILED") != NULL);
+      // "no ack" joins FAILED as a line worth finding by scanning rather than by
+      // reading. Lower case because it is not a failure this device can be sure of.
+      bool bad = (strstr(l->text, "FAILED") != NULL) || (strstr(l->text, "no ack") != NULL);
       display.setColor(bad ? rift_pal.accent : rift_pal.fg);
 
       if (rows == 1) {
@@ -3930,7 +3993,6 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 }
 
 void UITask::msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) {
-  riftLogf("ack after %ums", (unsigned) trip_time_millis);
   ((RiftCommsScreen *) nav_screens[RIFT_NAV_COMMS])->onDelivered(ack_hash, trip_time_millis);
   refreshNow();   // reflect the new delivery state promptly
 }
@@ -4211,6 +4273,44 @@ void UITask::loop() {
   // traffic settles rather than every 20 seconds during it.
   if (msg_log.dueToSave(millis())) {
     msg_log.save(RIFT_MSGLOG_PATH);
+  }
+  if (riftDue((uint32_t) millis(), _next_state_check)) {
+    _next_state_check = (uint32_t) millis() + 4000;
+
+    // In here rather than every pass through the loop. It sweeps up to 48 entries,
+    // which is cheap but is still work in a loop that shares the SPI bus with the
+    // radio, and a timeout reported within four seconds is as precise as anyone
+    // needs it to be.
+    msg_log.logTimeouts();
+
+    if (hasGPSHardware()) {
+      LocationProvider* nmea = sensors.getLocationProvider();
+      bool fix = (nmea != NULL) && nmea->isValid();
+      if (fix != _gps_had_fix) {
+        _gps_had_fix = fix;
+        if (fix) riftLogf("GPS fix, %ld sat", (long) nmea->satellitesCount());
+        else     riftLogf("GPS fix lost");
+      }
+    }
+
+    // Buckets rather than readings. A line every four seconds would bury everything
+    // else in the ring, and only crossing downward is news - a brownout otherwise
+    // leaves LAST RESET saying a reset happened and nothing saying why.
+    uint16_t mv = getBattMilliVolts();
+    if (mv > 0) {
+      int pct = ((int) mv - BATT_MIN_MILLIVOLTS) * 100
+                / (BATT_MAX_MILLIVOLTS - BATT_MIN_MILLIVOLTS);
+      int8_t bucket = (pct <= 5) ? 0 : ((pct <= 10) ? 1 : ((pct <= 20) ? 2 : 3));
+      if (_batt_bucket < 0) {
+        _batt_bucket = bucket;          // first reading is the baseline, not an event
+      } else if (bucket != _batt_bucket) {
+        bool falling = bucket < _batt_bucket;
+        _batt_bucket = bucket;
+        // charging back up is tracked so the next fall is reported again, but it is
+        // not itself worth a line
+        if (falling) riftLogf("battery %d%% (%umV)", pct < 0 ? 0 : pct, (unsigned) mv);
+      }
+    }
   }
 
   if (_display != NULL && _display->isOn()) {

@@ -142,6 +142,14 @@ class UITask : public AbstractUITask {
   int _companion_backlog = 0;
   int _last_key = 0;
   unsigned long ui_started_at, next_batt_chck;
+
+  // Periodic state whose *changes* are logged. Both values are already on SYSTEM as
+  // a current reading; what was missing was any trace that they had changed, so a
+  // GPS fix that came and went, or a battery that was nearly flat an hour before an
+  // unexplained restart, was unreadable afterwards.
+  uint32_t _next_state_check = 0;
+  bool _gps_had_fix = false;
+  int8_t _batt_bucket = -1;      // -1 until the first reading, which is a baseline
   // uint32_t, not int: this holds millis() + 300, and a signed int overflows at
   // day 24.8 - undefined behaviour, and negative long before the millis wrap that
   // riftDue() exists to handle. Zero is safe as the initial value because it is
