@@ -4,6 +4,7 @@
 #include <helpers/UTF8Helpers.h>
 #include "../MyMesh.h"
 #include "target.h"
+#include <stdarg.h>
 
 // RiftLogic.h mirrors these so it can be compiled without MeshCore for the native
 // tests. If upstream ever renumbers them, fail here rather than silently applying
@@ -122,6 +123,60 @@ static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::path
 // (DataStore holds identity/prefs/contacts/channels only, and MyMesh's offline
 // queue is private raw protocol frames), so the UI owns this - same approach as
 // ui-new, just shared between the popup and the COMMS terminal.
+// ----------------------------------------------------------------- event log
+//
+// Every hardware problem in this firmware was found by putting a value on screen
+// after reasoning had failed - the I2C timing, the touch byte layout, the
+// trackball pins, the boot time, the missing notification. What SYSTEM could not
+// do was say what happened *earlier*: it shows the current value of everything and
+// the history of nothing, so a fault that has passed leaves no trace.
+//
+// RAM only, and deliberately. Persisting it would put a second writer on the
+// filesystem holding the node identity, for data whose whole value is that it
+// describes the session you are still in.
+#define RIFT_LOG_LINES  48
+#define RIFT_LOG_TEXT   44
+
+struct RiftEventLog {
+  struct Line {
+    uint32_t at_ms;
+    char text[RIFT_LOG_TEXT];
+  };
+  Line lines[RIFT_LOG_LINES];
+  int head = RIFT_LOG_LINES - 1;   // index of the newest
+  int count = 0;
+  uint16_t dropped = 0;            // lines lost to the ring, so the screen can say so
+
+  void add(const char* text) {
+    head = (head + 1) % RIFT_LOG_LINES;
+    if (count < RIFT_LOG_LINES) count++;
+    else if (dropped < 0xFFFF) dropped++;
+    Line* l = &lines[head];
+    l->at_ms = (uint32_t) millis();
+    StrHelper::strncpy(l->text, text, sizeof(l->text));
+  }
+
+  // back == 0 is the newest
+  const Line* peek(int back) const {
+    if (back < 0 || back >= count) return NULL;
+    return &lines[(head - back + RIFT_LOG_LINES * 2) % RIFT_LOG_LINES];
+  }
+};
+
+static RiftEventLog rift_log;
+
+// Callers pass a format so the line is built once, here, rather than each site
+// carrying its own buffer. Truncation is silent because a truncated log line is
+// still worth having and there is nothing useful to do about it at the call site.
+static void riftLogf(const char* fmt, ...) {
+  char buf[RIFT_LOG_TEXT];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  rift_log.add(buf);
+}
+
 struct RiftMsgLog {
   struct Entry {
     uint32_t timestamp;
@@ -246,9 +301,14 @@ struct RiftMsgLog {
     bool ok = saveInner(path);
     if (ok) {
       save_failures = 0;
+      // only the slow ones. A save that costs nothing is not news, and a line per
+      // save would push everything else out of a 48-line ring within an evening.
+      if (last_save_ms >= 50) riftLogf("save %d msg %ums", count, (unsigned) last_save_ms);
     } else if (save_failures < 255) {
       save_failures++;
       retry_at = millis() + riftSaveBackoffMillis(save_failures);
+      riftLogf("SAVE FAILED (%u), retry in %us", (unsigned) save_failures,
+               (unsigned) (riftSaveBackoffMillis(save_failures) / 1000u));
     }
     return ok;
   }
@@ -382,6 +442,7 @@ struct RiftMsgLog {
 };
 
 static RiftMsgLog msg_log;
+
 
 // Break text into lines at a pixel width, calling emit() per line (NULL just
 // counts). DisplayDriver::printWordWrap() is only a default that forwards to
@@ -731,6 +792,24 @@ public:
   void poll() override {
     if (riftDue((uint32_t) millis(), dismiss_after)) {
       RIFT_MARK("home");
+      // First line in the log, so it is never empty and every later timestamp has
+      // something to be read against. The slowest phase is the one that mattered
+      // here once: a 243-second boot was four minutes of I2C timeouts, and this is
+      // the number that would have said so on the first look rather than the fifth.
+      {
+        int worst = 0;
+        uint32_t worst_ms = 0;
+        for (int i = 0; i < rift_boot_mark_count; i++) {
+          uint32_t prev = (i == 0) ? 0 : rift_boot_marks[i - 1].at_ms;
+          uint32_t gap = rift_boot_marks[i].at_ms - prev;
+          if (gap > worst_ms) { worst = i; worst_ms = gap; }
+        }
+        if (rift_boot_mark_count > 0) {
+          riftLogf("boot %ums, slowest %s +%ums",
+                   (unsigned) rift_boot_marks[rift_boot_mark_count - 1].at_ms,
+                   rift_boot_marks[worst].name, (unsigned) worst_ms);
+        }
+      }
       _task->gotoHomeScreen();
     }
   }
@@ -871,9 +950,11 @@ class RiftSystemScreen : public RiftScreen {
   // A small action menu rather than hidden letter shortcuts - discoverable, and
   // it leaves the printable keys free for the text fields.
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
-              CH_DELETE, CH_DELETE_CONFIRM };
+              CH_DELETE, CH_DELETE_CONFIRM, LOG };
   enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_DELCHANNEL,
-              IT_PATHMODE, IT_SCREEN, IT_DAYMODE, IT_COUNT };
+              IT_PATHMODE, IT_SCREEN, IT_DAYMODE, IT_LOG, IT_COUNT };
+
+  int _log_scroll = 0;   // 0 = pinned to the newest line
 
   // most labels are fixed; the path-mode row shows its current value
   void itemLabel(int i, char* buf, size_t len) {
@@ -884,7 +965,9 @@ class RiftSystemScreen : public RiftScreen {
       "Add channel",
       "Delete channel",
     };
-    if (i == IT_SCREEN) {
+    if (i == IT_LOG) {
+      snprintf(buf, len, "View log (%d)", rift_log.count);
+    } else if (i == IT_SCREEN) {
       // A charger that does not enumerate as a USB host reads as battery, so the
       // display cannot tell it is powered. This is the switch that does not
       // depend on detecting anything.
@@ -946,14 +1029,22 @@ private:
         // contacts and silently drop it - so this is a prerequisite for
         // two-way DMs, not a nicety.
         _task->notify(UIEventType::ack);
-        _task->showAlert(the_mesh.advert() ? "Advert sent (direct)" : "Advert failed", 1200);
+        {
+          bool ok = the_mesh.advert();
+          riftLogf("advert neighbours: %s", ok ? "sent" : "FAILED");
+          _task->showAlert(ok ? "Advert sent (direct)" : "Advert failed", 1200);
+        }
         break;
 
       case IT_ADVERT_FLOOD:
         // reaches nodes beyond direct RF range, which is what they need before
         // they can decrypt a DM from us
         _task->notify(UIEventType::ack);
-        _task->showAlert(the_mesh.advertFlood() ? "Advert flooded!" : "Advert failed", 1200);
+        {
+          bool ok = the_mesh.advertFlood();
+          riftLogf("advert whole mesh: %s", ok ? "sent" : "FAILED");
+          _task->showAlert(ok ? "Advert flooded!" : "Advert failed", 1200);
+        }
         break;
 
       case IT_PATHMODE: {
@@ -986,6 +1077,11 @@ private:
         _del_sel = 0;
         collectDeletable();
         _mode = CH_DELETE;
+        break;
+
+      case IT_LOG:
+        _log_scroll = 0;   // open at the newest, which is what you came to see
+        _mode = LOG;
         break;
 
       case IT_NAME:
@@ -1211,6 +1307,65 @@ private:
     return 1000;
   }
 
+  // Newest at the bottom, the way a terminal reads, and scrolled by line rather
+  // than by page: the interesting thing is usually the last few lines and their
+  // order relative to each other.
+  int renderLog(DisplayDriver& display) {
+    renderHeading(display, "LOG");
+    display.setTextSize(1);
+
+    const int TOP = 30, BOTTOM = 198;
+    int rows = (BOTTOM - TOP) / RIFT_LINE_H;
+
+    if (rift_log.count == 0) {
+      display.setColor(rift_pal.dim);
+      display.drawTextLeftAlign(4, TOP, "nothing logged yet");
+    }
+
+    // clamped here rather than at the keypress, so a log that grows while you are
+    // scrolled back cannot leave the offset pointing past the end
+    int max_scroll = rift_log.count - rows;
+    if (max_scroll < 0) max_scroll = 0;
+    if (_log_scroll > max_scroll) _log_scroll = max_scroll;
+    if (_log_scroll < 0) _log_scroll = 0;
+
+    int y = BOTTOM - RIFT_LINE_H;
+    for (int i = 0; i < rows; i++, y -= RIFT_LINE_H) {
+      const RiftEventLog::Line* l = rift_log.peek(_log_scroll + i);
+      if (l == NULL) break;
+
+      // seconds since boot with one decimal. Not the wall clock: the RTC may never
+      // have been set, and what these lines are read against is each other and the
+      // boot timings, which are all relative to power-on.
+      char stamp[12];
+      snprintf(stamp, sizeof(stamp), "%u.%u", (unsigned) (l->at_ms / 1000u),
+               (unsigned) ((l->at_ms % 1000u) / 100u));
+      display.setColor(rift_pal.dim);
+      display.drawTextRightAlign(44, y, stamp);
+
+      // Failures in the accent so they can be found by scanning rather than by
+      // reading. Upper case is the marker the log lines themselves use.
+      bool bad = (strstr(l->text, "FAILED") != NULL);
+      display.setColor(bad ? rift_pal.accent : rift_pal.fg);
+      display.drawTextEllipsized(50, y, display.width() - 54, l->text);
+    }
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 202, display.width(), 1);
+    display.setColor(rift_pal.dim);
+    char foot[52];
+    if (rift_log.dropped > 0) {
+      snprintf(foot, sizeof(foot), "up/down scroll   %d lines, %u lost",
+               rift_log.count, (unsigned) rift_log.dropped);
+    } else {
+      snprintf(foot, sizeof(foot), "up/down scroll   %d lines", rift_log.count);
+    }
+    display.drawTextLeftAlign(4, 208, foot);
+
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
   int renderEditName(DisplayDriver& display) {
     renderHeading(display, "NODE NAME");
     display.setTextSize(1);
@@ -1243,6 +1398,7 @@ public:
       case CH_SHOW_KEY:    return renderShowKey(display);
       case CH_DELETE:      return renderDeleteList(display);
       case CH_DELETE_CONFIRM: return renderDeleteConfirm(display);
+      case LOG:            return renderLog(display);
       default: break;
     }
 
@@ -1275,16 +1431,11 @@ public:
       display.drawTextLeftAlign(4, y, tmp);
     }
 
-    // The one thing a user has to understand before messaging a stranger, put
-    // next to the action rather than left in the README.
-    display.setColor(rift_pal.rule);
-    display.fillRect(0, 94, 158, 1);
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 102, "neighbours reaches direct");
-    display.drawTextLeftAlign(2, 114, "RF only. whole mesh floods");
-    display.drawTextLeftAlign(2, 126, "further, through repeaters.");
-    display.drawTextLeftAlign(2, 138, "use it before a first DM");
-    display.drawTextLeftAlign(2, 150, "to a distant node.");
+    // The five-line note explaining neighbours-vs-whole-mesh used to sit here.
+    // Removed at the user's request after seeing the screen: it was the largest
+    // block of prose in a UI that is otherwise readings and actions, and the menu
+    // had grown to nine items and needed the room. The explanation is not lost -
+    // it moved to the README, which is where a first-time question gets asked.
 
     // ---- right column: read-only ----
     const int LX = 166;
@@ -1585,9 +1736,23 @@ public:
       return true;
     }
 
+    if (_mode == LOG) {
+      // Read-only, so every key that is not a scroll means "done". Rows are added
+      // and removed at the newest end, so scrolling up means going further back.
+      // Not wrapped like the menu lists: those are selections where wrapping is a
+      // shortcut, this is a position in a history where wrapping from the oldest
+      // line to the newest would read as the log having jumped.
+      if (c == KEY_UP)   { _log_scroll++; return true; }
+      if (c == KEY_DOWN) { if (_log_scroll > 0) _log_scroll--; return true; }
+      _mode = MENU;
+      return true;
+    }
+
     if (_mode == CH_DELETE_CONFIRM) {
       if (c == KEY_ENTER) {
         bool ok = (_del_sel < _del_count) && the_mesh.removeChannel(_del_idx[_del_sel]);
+        riftLogf("channel slot %d deleted: %s",
+                 _del_sel < _del_count ? _del_idx[_del_sel] : -1, ok ? "ok" : "FAILED");
         _task->showAlert(ok ? "Channel deleted" : "Delete failed", 1400);
         collectDeletable();
         _mode = _del_count > 0 ? CH_DELETE : MENU;
@@ -2992,8 +3157,10 @@ private:
       char origin[62];
       snprintf(origin, sizeof(origin), "to %s:", ch.name);
       msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, sent, true);
+      riftLogf("tx %s (%d B)", ch.name, sent_len);
       clearInput();
     } else {
+      riftLogf("TX FAILED to %s", ch.name);
       _task->showAlert("Send failed", 1200);
     }
   }
@@ -3729,6 +3896,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
     sprintf(origin, "(%d) %s:", (uint32_t) riftHopCount(path_len), from_name);
   }
   msg_log.add(rtc_clock.getCurrentTime(), origin, text, false);
+  riftLogf("rx %s (%d hop)", origin, (int) riftHopCount(path_len));
   ((RiftMsgPreviewScreen *) msg_preview)->onNewMsg();
 
   // Don't take the screen away from someone mid-input: a half-typed line in
@@ -3747,10 +3915,17 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
     // motor in this variant, so a message arriving while the screen is dark has
     // exactly one way to announce itself. Suppressed only when a companion app is
     // attached, because then the phone is doing the notifying.
+    // Logged because afterwards "no notification arrived" and "the screen was
+    // already on" and "a companion was attached so the phone was notifying" all
+    // look identical, and the first is a bug while the other two are the design.
+    if (!_display->isOn() && hasConnection()) {
+      riftLogf("wake: suppressed, companion attached");
+    }
     if (!_display->isOn() && !hasConnection()) {
       _display->turnOn();
       if (rift_msg_wakes < 0xFFFF) rift_msg_wakes++;
       rift_last_wake_ms = (uint32_t) millis();
+      riftLogf("wake: screen on for message");
     }
     if (_display->isOn()) {
       _auto_off = millis() + AUTO_OFF_MILLIS;
@@ -3760,6 +3935,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 }
 
 void UITask::msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) {
+  riftLogf("ack after %ums", (unsigned) trip_time_millis);
   ((RiftCommsScreen *) nav_screens[RIFT_NAV_COMMS])->onDelivered(ack_hash, trip_time_millis);
   refreshNow();   // reflect the new delivery state promptly
 }

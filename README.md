@@ -220,6 +220,17 @@ So **send an advert from SYSTEM first**, and confirm the T-Deck appears in the o
 node's contact list. Public-channel messages work without this, because channels use
 a shared key.
 
+SYSTEM offers two kinds of advert, and the difference decides whether a distant node
+ever hears you:
+
+- **Send advert (neighbours)** reaches only nodes within direct radio range. It is
+  the right one in a group standing together, and it puts nothing on the wider mesh.
+- **Send advert (whole mesh)** floods, so repeaters carry it onward. This is the one
+  to use before a first direct message to someone you cannot see.
+
+If a DM is silently going nowhere, an advert that was only sent to neighbours is the
+first thing to suspect.
+
 Configured channels appear as a strip across the top of COMMS — tap one to switch
 to it, with the active channel filled. Contacts are not in the strip (there can be
 many); press Enter on an empty line for the full picker, which lists every channel
