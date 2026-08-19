@@ -133,6 +133,7 @@ class UITask : public AbstractUITask {
   //
   // "Due now" has to be expressed relative to now.
   void refreshNow() { _next_refresh = (unsigned long) millis(); }
+
   NodePrefs* _node_prefs;
   char _alert[80];
   unsigned long _alert_expiry;
@@ -236,6 +237,11 @@ public:
   // NODES offers ENTER: DM; this switches to COMMS with that node selected
   void startDirectMessage(const uint8_t* key6);
   void showAlert(const char* text, int duration_millis);
+  // For the temporary HOPS row on SYSTEM. It used to read getRecentlyHeard itself,
+  // which is the session-only path cache, so it reported n0 on a device that had
+  // plenty of stored contacts and had simply not heard a fresh advert since boot.
+  // NODES now merges both sources, so the row asks NODES rather than guessing.
+  void hopStats(int& n, int& maxhop, int& beyond);
   int  getMsgCount() const { return _msgcount; }
   bool hasDisplay() const { return _display != NULL; }
   bool isButtonPressed() const;
