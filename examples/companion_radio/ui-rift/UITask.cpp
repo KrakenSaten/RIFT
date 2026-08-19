@@ -3115,10 +3115,14 @@ private:
       char origin[62];
       snprintf(origin, sizeof(origin), "to %s:", ch.name);
       msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, sent, true);
-      riftLogf("tx %s (%d B)", ch.name, sent_len);
+      // The slot is here because a channel only gets a colour in slots 1-4, and a
+      // message that came out uncoloured could mean either that or a name that
+      // failed to match. Logging the slot makes the two distinguishable from the
+      // device instead of from the source.
+      riftLogf("tx s%d %s: %s", _target_channel_idx, ch.name, sent);
       clearInput();
     } else {
-      riftLogf("TX FAILED to %s", ch.name);
+      riftLogf("TX FAILED s%d %s", _target_channel_idx, ch.name);
       _task->showAlert("Send failed", 1200);
     }
   }
@@ -3134,6 +3138,7 @@ private:
     uint32_t expected_ack = 0, est_timeout = 0;
     int result = the_mesh.sendTextTo(rcpt, _input, expected_ack, est_timeout);
     if (result == MSG_SEND_FAILED) {
+      riftLogf("TX FAILED to %s", _target_name);
       _task->showAlert("Send failed", 1200);
       return;
     }
@@ -3143,6 +3148,12 @@ private:
 
     char origin[62];
     sprintf(origin, "to %s:", _target_name);
+    // DMs sent were not logged at all; only channel sends were. The routing choice
+    // goes in because a stale stored path sends DIRECT into the void and looks
+    // exactly like success until the ack never arrives - which is the pair of lines
+    // this log exists to put next to each other.
+    riftLogf("tx %s %s: %s", result == MSG_SEND_SENT_FLOOD ? "flood" : "direct",
+             _target_name, _input);
     auto p = msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, _input, true);
     p->expected_ack = expected_ack;
     p->sent_at_ms = millis();
@@ -3854,7 +3865,10 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
     sprintf(origin, "(%d) %s:", (uint32_t) riftHopCount(path_len), from_name);
   }
   msg_log.add(rtc_clock.getCurrentTime(), origin, text, false);
-  riftLogf("rx %s (%d hop)", origin, (int) riftHopCount(path_len));
+  // The text as well as the header. The message history already holds it, but the
+  // log is where it sits next to the advert that preceded it and the ack that
+  // followed, and that ordering is the thing the history cannot show.
+  riftLogf("rx %dh %s: %s", (int) riftHopCount(path_len), origin, text);
   ((RiftMsgPreviewScreen *) msg_preview)->onNewMsg();
 
   // Don't take the screen away from someone mid-input: a half-typed line in
