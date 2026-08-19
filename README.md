@@ -338,7 +338,7 @@ Boot is now 5.1 seconds. Why the probe does that is still not established — se
 
 ## Status
 
-**Current release: 0.5.0** — set by the `RIFT_VERSION` build flag and shown on the
+**Current release: 0.6.0** — set by the `RIFT_VERSION` build flag and shown on the
 boot screen and SYSTEM, alongside the MeshCore version it is built on. Deliberately
 0.x: it works and is verified on hardware, but it has had no external users and the
 limitations above are real.
@@ -348,7 +348,47 @@ over the companion protocol next to `FIRMWARE_VER_CODE`.
 
 Every screen from the original design concept is implemented and verified on
 physical hardware. Resource use: ~50 % of internal static RAM, ~25 % of the 6.5 MB
-app partition. 110 native tests across eight suites.
+app partition. 123 native tests across eight suites.
+
+**0.6.0** adds two things and fixes the data underneath one of them.
+
+**Channels are colour-coded.** Four colours, and the count is a result rather than a
+choice: a channel's identity cannot swap between night and day mode, so one value has
+to clear 4.5:1 against both black and white, which leaves a luminance band of
+0.175–0.183 and forbids any variation in lightness. They differ by hue alone, at least
+88° apart, at least 45° from the accent. The tab border carries the colour for
+channels you are not on; the name beside each message carries it in the history. Along
+the way the analysis turned out to have computed contrast on the source hex rather than
+the RGB565 the panel is given — every candidate failed against white once quantised,
+so they were re-chosen by sweeping RGB565 directly. `design/channel-colours.md` has the
+sweep.
+
+**SYSTEM has a log.** 128 lines, RAM only. The diagnostics on that screen show the
+current value of everything and the history of nothing, so a fault that had passed
+left no trace. It records adverts heard and sent, messages in and out with their text,
+acks — and their absence, which is the worst silent failure this firmware has — saves
+and save failures, GPS fixes gained and lost, battery crossing downward through 20, 10
+and 5 percent, channels added and deleted, the boot time with its slowest phase, and
+the reset reason, which in the log survives the next boot. The five-line note about
+adverts left the screen to make room; it is in this README now.
+
+**And the node data underneath NODES was wrong.** The path cache evicted by wall
+clock, so on a node whose RTC was never set — no companion app, no GPS fix, which is
+RIFT's own case — every timestamp was zero, the eviction scan never moved off the
+first slot, and the cache held exactly one node however many it heard. Age was wall
+clock minus wall clock, so every node read as just heard, forever. `AdvertPath` now
+carries a monotonic stamp and an explicit occupancy flag: monotonic time for
+durations, wall clock for dates, and the two not mixed. SYSTEM reports the cache
+occupancy and eviction count, because whether 16 slots is enough is a question to
+measure rather than answer.
+
+A selected node in NODES could also have no marker drawn — columns hold three, the
+selection indexes all of them, and touch could only reach the plotted ones. The
+selected node is now placed before its column can fill.
+
+Flashing no longer needs `--parts`: the tool derives the split from the image size,
+because the length a write survives does not grow with the firmware, and retries a
+failed chunk rather than leaving the image half written.
 
 **0.5.0** is a correctness release. Nothing on screen moved except the bottom of
 SYSTEM, and everything that changed was something that would have gone wrong
