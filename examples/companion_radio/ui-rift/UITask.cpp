@@ -354,10 +354,15 @@ struct RiftMsgLog {
     t_close = (uint32_t) (millis() - t0);
 
     if (!ok) {
-      // load() would read this happily and keep the records that made it, but the
-      // header claims a count the file does not hold, and leaving it would make
-      // the next boot quietly short of messages with nothing to explain it.
-      SPIFFS.remove(path);
+      // The partial file is kept, not removed. It used to be removed on the grounds
+      // that its header claims a count the file does not hold - but load() already
+      // stops at the first record that does not arrive and keeps what did, so a
+      // short file costs the newest messages and nothing else. Deleting it destroyed
+      // data the reader was built to recover, and if the power went before the retry
+      // the whole history was gone rather than its tail.
+      //
+      // dirty stays set, so the backoff will retry and a later successful save
+      // rewrites the file whole.
       return false;
     }
 
@@ -1340,6 +1345,14 @@ private:
       display.drawTextLeftAlign(4, TOP, "nothing logged yet");
     }
 
+    // Clamped here, and this was a regression: the first version of this screen
+    // clamped and the rewrite for wrapped lines dropped it. With no clamp, paging
+    // past the oldest line left _log_scroll beyond count, peek() returned NULL on
+    // the first iteration, and the screen went blank with no way to tell that it
+    // was scroll position rather than an empty log.
+    if (_log_scroll > riftLog().count - 1) _log_scroll = riftLog().count - 1;
+    if (_log_scroll < 0) _log_scroll = 0;
+
     // Long lines wrap to a second row rather than being cut at the right edge.
     // They were ellipsized, which lost the end of every message - and a log line
     // whose message is missing is the half that mattered. Entries are therefore
@@ -1350,14 +1363,26 @@ private:
       const RiftEventLog::Line* l = riftLog().peek(_log_scroll + i);
       if (l == NULL) break;
 
-      int len = (int) strlen(l->text);
+      // Translated before it is measured, and that ordering is the point. The log
+      // carries real message text, so it carries UTF-8 - and this screen was
+      // measuring and splitting raw bytes, which both drew Nordic characters as
+      // rubbish and could cut a two-byte sequence in half at the wrap. COMMS has
+      // always translated first; this did not, because it was written as a
+      // diagnostic that only ever held ASCII, and then message text was added to it.
+      //
+      // After translation one byte is one glyph, so a byte count is a column count
+      // and the wrap arithmetic below is correct by construction. The buffer is
+      // larger than the source because an emoji translates to a short ASCII word.
+      char shown[RIFT_LOG_TEXT * 2];
+      riftTranslateUTF8(shown, l->text, sizeof(shown));
+      int len = (int) strlen(shown);
       int split = 0;                       // 0 = fits on one row
       if (len > PER_ROW) {
         // break on the last space that still fits, so a word is not cut in half;
         // a single long token with no space falls back to a hard split
         split = PER_ROW;
         for (int k = PER_ROW; k > PER_ROW / 2; k--) {
-          if (l->text[k] == ' ') { split = k; break; }
+          if (shown[k] == ' ') { split = k; break; }
         }
       }
 
@@ -1375,20 +1400,20 @@ private:
       // reading. Upper case is the marker the log lines themselves use.
       // "no ack" joins FAILED as a line worth finding by scanning rather than by
       // reading. Lower case because it is not a failure this device can be sure of.
-      bool bad = (strstr(l->text, "FAILED") != NULL) || (strstr(l->text, "no ack") != NULL);
+      bool bad = (strstr(shown, "FAILED") != NULL) || (strstr(shown, "no ack") != NULL);
       display.setColor(bad ? rift_pal.accent : rift_pal.fg);
 
       if (rows == 1) {
-        display.drawTextLeftAlign(TEXT_X, top_y, l->text);
+        display.drawTextLeftAlign(TEXT_X, top_y, shown);
       } else {
-        char head[RIFT_LOG_TEXT];
+        char head[sizeof(shown)];
         int n = split;
-        memcpy(head, l->text, n);
+        memcpy(head, shown, n);
         head[n] = 0;
         display.drawTextLeftAlign(TEXT_X, top_y, head);
         // the continuation is indented, so a wrapped line cannot be mistaken for
         // two separate events at the same timestamp
-        const char* rest = l->text + split;
+        const char* rest = shown + split;
         while (*rest == ' ') rest++;
         display.drawTextEllipsized(TEXT_X + RIFT_CHAR_W * 2, top_y + RIFT_LINE_H,
                                    TEXT_W - RIFT_CHAR_W * 2, rest);
@@ -1594,6 +1619,23 @@ public:
       y += RIFT_LINE_H;
     }
 
+    // Occupancy and pressure on the path cache. 16 slots is a guess until it is
+    // measured against a real mesh, and an eviction count is what says whether the
+    // number is too small - a cache at 16/16 with evictions climbing is a mesh this
+    // screen cannot show all of, which is a different problem from a layout that
+    // cannot fit it.
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(LX, y, "PATH CACHE");
+    {
+      int used = the_mesh.getPathCacheUsed(), size = the_mesh.getPathCacheSize();
+      unsigned evicted = the_mesh.getPathEvictions();
+      display.setColor(evicted > 0 ? rift_pal.accent : rift_pal.fg);
+      if (evicted > 0) snprintf(tmp, sizeof(tmp), "%d/%d, %u lost", used, size, evicted);
+      else             snprintf(tmp, sizeof(tmp), "%d/%d", used, size);
+      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      y += RIFT_LINE_H;
+    }
+
     // Hop distribution of everything currently heard. Temporary: NODES buckets
     // into DIRECT / 1 / 2 / 3+, and the report is that almost everything lands in
     // the last column on a real mesh, which makes the layout spend three quarters
@@ -1614,7 +1656,7 @@ public:
       // heard. With every timestamp equal the sort cannot guarantee the live
       // entries are a prefix either, so breaking is wrong regardless of the clock.
       for (int i = 0; i < n; i++) {
-        if (paths[i].name[0] == 0) continue;
+        if (!paths[i].valid) continue;      // explicit, not inferred from a value
         live++;
         int h = (int) riftHopCount(paths[i].path_len);
         if (h > maxhop) maxhop = h;
@@ -1947,7 +1989,7 @@ class RiftConstellationScreen : public RiftScreen {
     // rest of this screen can keep indexing a prefix.
     int live = 0;
     for (int i = 0; i < n; i++) {
-      if (_paths[i].name[0] == 0) continue;
+      if (!_paths[i].valid) continue;       // explicit, not inferred from a value
       if (live != i) _paths[live] = _paths[i];
       live++;
     }
@@ -1988,19 +2030,36 @@ public:
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(4, 98, "YOU");
 
-    uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
-
     // Assign every node a column from its real hop count and a row within it.
+    //
+    // The selected node is placed first, before the column can fill up. Without
+    // that, a column with more nodes than rows dropped whatever came after the
+    // third - and the selection is a logical index over all of them, so the
+    // trackball could land on a node with no marker drawn: the detail panel below
+    // changed while nothing on the plot moved, and touch could not reach it at all
+    // because touch only hit-tests plotted nodes. Two input methods with different
+    // reachable sets, and a selection the screen would not admit to having.
+    //
+    // Placing it first costs one visible slot in a crowded column, which is a
+    // better trade than a selection that cannot be seen.
     int col_fill[RIFT_HOP_COLS] = { 0, 0, 0, 0 };
     int overflow = 0;
-    for (int i = 0; i < _count; i++) {
-      int hops = riftHopCount(_paths[i].path_len);
-      int c = hops;
-      if (c > RIFT_HOP_COLS - 1) c = RIFT_HOP_COLS - 1;
-      if (col_fill[c] >= RIFT_HOP_ROWS) { _plot_x[i] = -1; _plot_y[i] = -1; overflow++; continue; }
-      int r = col_fill[c]++;
-      _plot_x[i] = COL_X[c];
-      _plot_y[i] = ROW_MARK_Y[r];
+    for (int i = 0; i < RIFT_CONST_MAX; i++) { _plot_x[i] = -1; _plot_y[i] = -1; }
+
+    int order_first = (_count > 0 && _sel >= 0 && _sel < _count) ? _sel : -1;
+    for (int pass = 0; pass < 2; pass++) {
+      for (int i = 0; i < _count; i++) {
+        bool is_sel = (i == order_first);
+        if (pass == 0 ? !is_sel : is_sel) continue;   // selected first, then the rest
+
+        int hops = riftHopCount(_paths[i].path_len);
+        int c = hops;
+        if (c > RIFT_HOP_COLS - 1) c = RIFT_HOP_COLS - 1;
+        if (col_fill[c] >= RIFT_HOP_ROWS) { overflow++; continue; }
+        int r = col_fill[c]++;
+        _plot_x[i] = COL_X[c];
+        _plot_y[i] = ROW_MARK_Y[r];
+      }
     }
 
     // The selected node's route, drawn before the markers so the markers sit on
@@ -2036,7 +2095,11 @@ public:
       // Freshness is shape, not brightness. Four grey levels collapse into each
       // other outdoors once reflected light lays a veil over the panel; a filled
       // versus hollow rect survives it, and both stay at full contrast.
-      uint32_t age = (now > p->recv_timestamp) ? (now - p->recv_timestamp) : 0;
+      // Monotonic, so this is right whether or not the RTC was ever set. It used to
+      // be wall clock minus wall clock, which with an unset RTC is 0 - 0 = 0, and
+      // every node read as just heard forever; and if the RTC were then set, every
+      // stored entry would jump to being decades old at once.
+      uint32_t age = ((uint32_t) millis() - p->recv_millis) / 1000u;
       display.setColor(rift_pal.fg);
       if (age < 1800) display.fillRect(x, y, 5, 5);
       else            display.drawRect(x, y, 5, 5);
@@ -2095,7 +2158,11 @@ public:
       else sprintf(tmp, "%d hop%s", hops, hops == 1 ? "" : "s");
       display.drawTextRightAlign(display.width() - 2, 182, tmp);
 
-      uint32_t age = (now > p->recv_timestamp) ? (now - p->recv_timestamp) : 0;
+      // Monotonic, so this is right whether or not the RTC was ever set. It used to
+      // be wall clock minus wall clock, which with an unset RTC is 0 - 0 = 0, and
+      // every node read as just heard forever; and if the RTC were then set, every
+      // stored entry would jump to being decades old at once.
+      uint32_t age = ((uint32_t) millis() - p->recv_millis) / 1000u;
       char when[24];
       if (age < 60) sprintf(when, "%lus ago", (unsigned long) age);
       else if (age < 3600) sprintf(when, "%lum ago", (unsigned long) (age / 60));

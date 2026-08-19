@@ -80,7 +80,20 @@ struct AdvertPath {
   uint8_t pubkey_prefix[7];
   uint8_t path_len;
   char    name[32];
+  // Wall clock, for showing an absolute time. Zero when the RTC has never been set,
+  // which is the normal state of a node with no companion app and no GPS fix - so it
+  // cannot be used to decide slot occupancy or to measure age.
   uint32_t recv_timestamp;
+  // Monotonic, from millis(). This is what recency, eviction and age are computed
+  // from. Using the wall clock for them meant that with the RTC unset every entry
+  // carried timestamp 0, the eviction scan found "oldest" on the first slot and
+  // never moved, and every advert overwrote slot 0 - so the cache held exactly one
+  // node however many were heard. Age came out as 0 - 0 = 0, so every node read as
+  // just heard, forever.
+  uint32_t recv_millis;
+  // Explicit, rather than inferring occupancy from a timestamp or a name. Both of
+  // those were tried and both were wrong for a value that is legitimately zero.
+  bool valid;
   uint8_t path[MAX_PATH_SIZE];
 };
 
@@ -107,6 +120,10 @@ public:
   bool advertFlood();
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
+  // occupancy and pressure on the path cache, for the SYSTEM diagnostics
+  int  getPathCacheUsed() const;
+  int  getPathCacheSize() const;   // defined out of line: the table size is #defined below
+  uint16_t getPathEvictions() const { return path_evictions; }
 
   // Mesh receive activity. Nothing tracked this before, so the only "is the
   // network there" signal any UI could reach was the USB/BLE companion link -
@@ -308,6 +325,10 @@ private:
 
   #define ADVERT_PATH_TABLE_SIZE   16
   AdvertPath advert_paths[ADVERT_PATH_TABLE_SIZE]; // circular table
+  // How many times a live entry has been dropped to make room. Exposed because it
+  // is the number that says whether 16 slots is enough for the mesh in front of you,
+  // and the alternative to guessing is measuring it in the field.
+  uint16_t path_evictions = 0;
 };
 
 extern MyMesh the_mesh;

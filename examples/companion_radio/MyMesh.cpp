@@ -396,31 +396,61 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
   }
 
   // add inbound-path to mem cache
-  if (path && mesh::Packet::isValidPathLen(path_len)) {  // check path is valid
-    AdvertPath* p = advert_paths;
-    uint32_t oldest = 0xFFFFFFFF;
-    for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {   // check if already in table, otherwise evict oldest
-      if (memcmp(advert_paths[i].pubkey_prefix, contact.id.pub_key, sizeof(AdvertPath::pubkey_prefix)) == 0) {
-        p = &advert_paths[i];   // found
-        break;
-      }
-      if (advert_paths[i].recv_timestamp < oldest) {
-        oldest = advert_paths[i].recv_timestamp;
+  if (path && mesh::Packet::isValidPathLen(path_len)) {
+    // Three steps in order, because collapsing them into one scan is what broke it.
+    // The old loop tracked "oldest by recv_timestamp" while looking for a match, and
+    // with the RTC unset every timestamp is 0: the first slot won on 0 < 0xFFFFFFFF
+    // and no later slot could beat it on 0 < 0, so every advert landed in slot 0 and
+    // overwrote the one before it. The cache held one node however many were heard -
+    // on exactly the standalone node this table exists to serve.
+    AdvertPath* p = NULL;
+
+    // 1. already known: update in place
+    for (int i = 0; i < ADVERT_PATH_TABLE_SIZE && p == NULL; i++) {
+      if (advert_paths[i].valid &&
+          memcmp(advert_paths[i].pubkey_prefix, contact.id.pub_key,
+                 sizeof(AdvertPath::pubkey_prefix)) == 0) {
         p = &advert_paths[i];
       }
     }
+    // 2. an unused slot, before anything is evicted
+    for (int i = 0; i < ADVERT_PATH_TABLE_SIZE && p == NULL; i++) {
+      if (!advert_paths[i].valid) p = &advert_paths[i];
+    }
+    // 3. full: drop the one heard longest ago, by monotonic time
+    if (p == NULL) {
+      uint32_t now = millis();
+      uint32_t worst = 0;
+      p = &advert_paths[0];
+      for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
+        uint32_t age = now - advert_paths[i].recv_millis;   // unsigned: wrap-safe
+        if (age >= worst) { worst = age; p = &advert_paths[i]; }
+      }
+      path_evictions++;
+    }
 
     memcpy(p->pubkey_prefix, contact.id.pub_key, sizeof(p->pubkey_prefix));
-    strcpy(p->name, contact.name);
+    StrHelper::strncpy(p->name, contact.name, sizeof(p->name));
     p->recv_timestamp = getRTCClock()->getCurrentTime();
+    p->recv_millis = millis();
+    p->valid = true;
     p->path_len = mesh::Packet::copyPath(p->path, path, path_len);
   }
+
 
   if (!is_new) dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY); // only schedule lazy write for contacts that are in contacts[]
 }
 
 static int sort_by_recent(const void *a, const void *b) {
   return ((AdvertPath *) b)->recv_timestamp - ((AdvertPath *) a)->recv_timestamp;
+}
+
+int MyMesh::getPathCacheSize() const { return ADVERT_PATH_TABLE_SIZE; }
+
+int MyMesh::getPathCacheUsed() const {
+  int used = 0;
+  for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) if (advert_paths[i].valid) used++;
+  return used;
 }
 
 int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
@@ -1054,7 +1084,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   next_ack_idx = 0;
   sign_data = NULL;
   dirty_contacts_expiry = 0;
-  memset(advert_paths, 0, sizeof(advert_paths));
+  memset(advert_paths, 0, sizeof(advert_paths));   // clears valid on every slot
+  path_evictions = 0;
   _rx_ever = false;
   _last_rx_millis = 0;
   _rx_count = 0;
