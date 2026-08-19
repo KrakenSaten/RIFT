@@ -1263,47 +1263,73 @@ private:
     display.setTextSize(1);
 
     const int TOP = 30, BOTTOM = 198;
-    int rows = (BOTTOM - TOP) / RIFT_LINE_H;
+    const int TEXT_X = 50;
+    const int TEXT_W = display.width() - TEXT_X - 4;
+    const int PER_ROW = TEXT_W / RIFT_CHAR_W;
 
     if (riftLog().count == 0) {
       display.setColor(rift_pal.dim);
       display.drawTextLeftAlign(4, TOP, "nothing logged yet");
     }
 
-    // clamped here rather than at the keypress, so a log that grows while you are
-    // scrolled back cannot leave the offset pointing past the end
-    int max_scroll = riftLog().count - rows;
-    if (max_scroll < 0) max_scroll = 0;
-    if (_log_scroll > max_scroll) _log_scroll = max_scroll;
-    if (_log_scroll < 0) _log_scroll = 0;
-
+    // Long lines wrap to a second row rather than being cut at the right edge.
+    // They were ellipsized, which lost the end of every message - and a log line
+    // whose message is missing is the half that mattered. Entries are therefore
+    // one or two rows tall, so the loop walks upward by each entry's own height
+    // the way the COMMS history does, instead of assuming a fixed pitch.
     int y = BOTTOM - RIFT_LINE_H;
-    for (int i = 0; i < rows; i++, y -= RIFT_LINE_H) {
+    for (int i = 0; ; i++) {
       const RiftEventLog::Line* l = riftLog().peek(_log_scroll + i);
       if (l == NULL) break;
 
-      // seconds since boot with one decimal. Not the wall clock: the RTC may never
-      // have been set, and what these lines are read against is each other and the
-      // boot timings, which are all relative to power-on.
+      int len = (int) strlen(l->text);
+      int split = 0;                       // 0 = fits on one row
+      if (len > PER_ROW) {
+        // break on the last space that still fits, so a word is not cut in half;
+        // a single long token with no space falls back to a hard split
+        split = PER_ROW;
+        for (int k = PER_ROW; k > PER_ROW / 2; k--) {
+          if (l->text[k] == ' ') { split = k; break; }
+        }
+      }
+
+      int rows = split > 0 ? 2 : 1;
+      int top_y = y - (rows - 1) * RIFT_LINE_H;
+      if (top_y < TOP) break;              // ran out of room going up
+
       char stamp[12];
       snprintf(stamp, sizeof(stamp), "%u.%u", (unsigned) (l->at_ms / 1000u),
                (unsigned) ((l->at_ms % 1000u) / 100u));
       display.setColor(rift_pal.dim);
-      display.drawTextRightAlign(44, y, stamp);
+      display.drawTextRightAlign(44, top_y, stamp);
 
       // Failures in the accent so they can be found by scanning rather than by
       // reading. Upper case is the marker the log lines themselves use.
       bool bad = (strstr(l->text, "FAILED") != NULL);
       display.setColor(bad ? rift_pal.accent : rift_pal.fg);
-      display.drawTextEllipsized(50, y, display.width() - 54, l->text);
+
+      if (rows == 1) {
+        display.drawTextLeftAlign(TEXT_X, top_y, l->text);
+      } else {
+        char head[RIFT_LOG_TEXT];
+        int n = split;
+        memcpy(head, l->text, n);
+        head[n] = 0;
+        display.drawTextLeftAlign(TEXT_X, top_y, head);
+        // the continuation is indented, so a wrapped line cannot be mistaken for
+        // two separate events at the same timestamp
+        const char* rest = l->text + split;
+        while (*rest == ' ') rest++;
+        display.drawTextEllipsized(TEXT_X + RIFT_CHAR_W * 2, top_y + RIFT_LINE_H,
+                                   TEXT_W - RIFT_CHAR_W * 2, rest);
+      }
+
+      y = top_y - RIFT_LINE_H;
     }
 
     display.setColor(rift_pal.rule);
     display.fillRect(0, 202, display.width(), 1);
     display.setColor(rift_pal.dim);
-    // "ENTER back" is not decoration: this screen traps left and right for paging,
-    // which are the keys that change screen everywhere else, so without it a user
-    // who rolls the trackball to leave has no way out that the screen admits to.
     display.drawTextLeftAlign(4, 208, "up/down line  L/R page  ENTER back");
 
     char foot[28];
@@ -3325,6 +3351,23 @@ public:
   // inserted, because the keystroke went to the picker.
   bool acceptsText() const { return !_picking; }
 
+  // TEMPORARY diagnostic for the channel-colour fault. Both directions are drawing
+  // the origin in grey while the tab strip colours the same channel correctly, and
+  // the tab strip does not use this lookup - it goes straight from slot to colour -
+  // so the name match is the suspect. This prints the origin as stored, what it
+  // normalises to, and every entry the tab cache actually holds, so the comparison
+  // that is failing can be read rather than inferred. Remove once it is closed.
+  void logChannelResolution(const char* origin) const {
+    char name[64];
+    bool ok = riftOriginName(origin, name, sizeof(name));
+    riftLogf("? org[%s]", origin);
+    riftLogf("? norm[%s] tabs=%d col=%s", ok ? name : "(refused)", _tab_count,
+             originColour(origin) != RIFT_CHAN_COL_NONE ? "yes" : "NO");
+    for (int i = 0; i < _tab_count && i < 4; i++) {
+      riftLogf("? tab%d slot%d [%s]", i, _tabs[i].idx, _tabs[i].name);
+    }
+  }
+
   // A history entry's channel, as a colour. Channel messages carry the channel
   // name as their origin - MeshCore prepends the sender to the text itself - so
   // the tab cache, which already maps name to slot, is the whole lookup and no
@@ -3878,6 +3921,9 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   // log is where it sits next to the advert that preceded it and the ack that
   // followed, and that ordering is the thing the history cannot show.
   riftLogf("rx %dh %s: %s", (int) riftHopCount(path_len), origin, text);
+  // TEMPORARY - see logChannelResolution. Runs on every incoming message, which is
+  // noisy on purpose: the fault has survived two rounds of reading the code.
+  ((RiftCommsScreen *) nav_screens[RIFT_NAV_COMMS])->logChannelResolution(origin);
   ((RiftMsgPreviewScreen *) msg_preview)->onNewMsg();
 
   // Don't take the screen away from someone mid-input: a half-typed line in

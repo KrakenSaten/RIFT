@@ -24,7 +24,9 @@
 // outside ui-rift is guarded on RIFT_VERSION, which is defined only for this build.
 
 #define RIFT_LOG_LINES  128
-#define RIFT_LOG_TEXT   48
+// 64, not 48: a line now wraps to a second row on screen, so there is room for
+// about 88 characters of it, and 48 was cutting the message out of every rx line.
+#define RIFT_LOG_TEXT   64
 
 struct RiftEventLog {
   struct Line {
