@@ -2479,10 +2479,19 @@ static void rfUpsert(const uint8_t* key, const char* name, int8_t rssi, uint8_t 
     if (rf_count < RIFT_RF_MAX) {
       slot = rf_count++;
     } else {
-      int weakest = 0;   // table full - let stronger signals displace weaker
-      for (int i = 1; i < rf_count; i++) {
-        if (rf_table[i].rssi < rf_table[weakest].rssi) weakest = i;
+      // Table full - let stronger signals displace weaker, but never a watched
+      // device. A watched one is usually the weak one: it is being tracked because
+      // it comes and goes, and in a crowded room it would be pushed out by whatever
+      // is nearer, after which the presence check would report it gone while the
+      // radio was still hearing it. That would look exactly like a broken alert.
+      int weakest = -1;
+      for (int i = 0; i < rf_count; i++) {
+        if (rfWatchFind(rf_table[i].key, rf_table[i].is_wifi) >= 0) continue;
+        if (weakest < 0 || rf_table[i].rssi < rf_table[weakest].rssi) weakest = i;
       }
+      // every slot is watched, which needs the watch list to be as large as the
+      // table; impossible today, but it must not index -1 if that ever changes
+      if (weakest < 0) { portEXIT_CRITICAL(&rf_mux); return; }
       if (rssi <= rf_table[weakest].rssi) { portEXIT_CRITICAL(&rf_mux); return; }
       slot = weakest;
     }
