@@ -1579,21 +1579,18 @@ private:
     renderHeading(display, "SET TIME");
     display.setTextSize(1);
 
+    // The format line stays: it is the input specification, not a description of
+    // it, and the field is unusable without knowing the shape. The notes about
+    // local time and about impossible dates being refused rather than corrected
+    // moved to the README - both were explanation, and this screen is meant to be
+    // readings and actions.
     display.setColor(UIColor::secondary_txt);
-    display.drawTextLeftAlign(4, 30, "YYYY-MM-DD HH:MM");
-    // Stated because it is a real property of this firmware and not an omission:
-    // every timestamp on screen is the epoch divided down with no offset, so the
-    // clock is local time throughout. Entering UTC would make the message
-    // timestamps read as UTC.
-    display.drawTextLeftAlign(4, 42, "Local time. RIFT has no timezone,");
-    display.drawTextLeftAlign(4, 54, "so this is what timestamps show.");
+    display.drawTextLeftAlign(4, 34, "YYYY-MM-DD HH:MM   local time");
 
-    _edit.render(display, 4, 84, display.width() - 8);
+    _edit.render(display, 4, 62, display.width() - 8);
 
     display.setColor(UIColor::secondary_txt);
-    display.drawTextLeftAlign(4, 116, "ENTER set   BACKSPACE delete / back");
-    display.drawTextLeftAlign(4, 132, "An impossible date is refused, not");
-    display.drawTextLeftAlign(4, 144, "corrected - check it before ENTER.");
+    display.drawTextLeftAlign(4, 94, "ENTER set   BACKSPACE delete / back");
 
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
@@ -1602,10 +1599,6 @@ private:
   int renderEditName(DisplayDriver& display) {
     renderHeading(display, "NODE NAME");
     display.setTextSize(1);
-
-    display.setColor(UIColor::secondary_txt);
-    display.drawTextLeftAlign(4, 30, "This is the name other nodes see,");
-    display.drawTextLeftAlign(4, 42, "and the sender name on channel messages.");
 
     _edit.render(display, 4, 74, display.width() - 8);
 

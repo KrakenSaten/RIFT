@@ -220,6 +220,16 @@ So **send an advert from SYSTEM first**, and confirm the T-Deck appears in the o
 node's contact list. Public-channel messages work without this, because channels use
 a shared key.
 
+**Setting the clock.** A standalone node has nothing to set its clock from — no
+companion app, no GPS fix — so SYSTEM has `Set time`, which shows the current reading
+in its own menu row. The field is `YYYY-MM-DD HH:MM`.
+
+RIFT has no timezone. Every timestamp on screen is the epoch divided down with no
+offset, so **enter local time**: what you type is what message timestamps will show.
+Entering UTC makes them read as UTC. An impossible date is refused rather than
+corrected — February 30th does not silently become March 2nd, because you could not
+see that happen — so check the field before pressing ENTER.
+
 SYSTEM offers two kinds of advert, and the difference decides whether a distant node
 ever hears you:
 
