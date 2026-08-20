@@ -892,13 +892,20 @@ void riftDrawBootScreen(DisplayDriver& display, const char* status) {
 
   // the gap. 4px, so the 2px accent has a pixel of air either side - which is what
   // keeps it reading as a seam rather than as a line struck through the glyphs.
+  // Bounded to the glyphs themselves (x 32..104 at setTextSize(3)) plus a margin,
+  // rather than the whole width: past them it would be blanking background with
+  // background, which is 50 wasted rects on a screen drawn during boot.
   display.setColor(rift_pal.bg);
-  for (int px = x; px < x + 132; px++) {
+  for (int px = x - 2; px < x + 80; px++) {
     display.fillRect(px, RIFT_SEAM_Y(px) - 1, 1, 4);
   }
 
+  // The seam runs from the left edge to the middle and stops. Edge to edge read as
+  // a rule with the wordmark sitting on it; stopping halfway makes the wordmark the
+  // thing the line is part of, and leaves the right half of the screen for the
+  // strapline underneath rather than putting a diagonal above it.
   display.setColor(rift_pal.accent);
-  for (int px = 0; px < display.width(); px++) {
+  for (int px = 0; px < display.width() / 2; px++) {
     display.fillRect(px, RIFT_SEAM_Y(px), 1, 2);
   }
 
