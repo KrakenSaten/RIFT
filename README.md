@@ -16,6 +16,16 @@ RIFT turns the T-Deck into a standalone mesh terminal: read and write MeshCore
 messages using the physical keyboard, with no phone or companion app involved,
 plus passive Wi-Fi/BLE situational awareness and a view of the mesh topology.
 
+**Free, and it will never cost anything.** No licence fee, no paid tier, no
+unlocked features, now or later. That is not only an intention: RIFT is MIT
+licensed, and an MIT grant cannot be withdrawn from anything already published — so
+every version you can download stays free to use, modify and redistribute even if
+this repository disappears tomorrow. The same licence lets anyone else sell or
+rebrand it, which is the price of it being genuinely open, and is fine.
+
+If you want to send money somewhere, send it
+[upstream](https://buymeacoffee.com/ripplebiz) — MeshCore is the hard part.
+
 Upstream's on-device UI is a status display — it shows an unread count and
 previews incoming messages, but cannot compose. Writing a message normally means
 pairing the node to a MeshCore client over BLE, USB or Wi-Fi: the
