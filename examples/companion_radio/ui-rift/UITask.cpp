@@ -644,6 +644,53 @@ static const RiftPalette RIFT_DAY = {
 RiftPalette rift_pal = RIFT_NIGHT;
 bool rift_day_mode = false;
 bool rift_screen_always_on = false;
+
+#ifdef RIFT_RADAR
+// ------------------------------------------------------------- proximity watch
+//
+// A handful of RF devices marked from RADAR, and an alert when one of them turns
+// up. Declared here rather than beside the scan tables because the settings file
+// below has to write it.
+//
+// Two limits are worth stating where the code is, not only in the README:
+//
+// The key is a hardware address, and modern BLE devices rotate theirs every few
+// minutes for exactly the reason this feature exists. Marking a phone or a watch
+// will stop matching when it next re-randomises. It holds for Wi-Fi access points,
+// whose BSSID is stable, and for BLE devices with a static address - many beacons,
+// tags and headphones.
+//
+// And RADAR tears the radios down when you leave the screen, deliberately: one
+// antenna shared with LoRa and no watchdog on the main loop. So an alert fires only
+// while RADAR is open. Making it fire in the background is a separate decision with
+// a real cost to the mesh, and it has not been taken.
+#define RIFT_WATCH_MAX 4
+// How long without a sighting before a device counts as gone. A passive scan only
+// sees a device when it chooses to transmit, and a BLE beacon can be quiet for tens
+// of seconds, so this is generous - a shorter window would report it leaving and
+// arriving repeatedly while it sat still.
+#define RIFT_WATCH_GONE_MILLIS   90000UL
+// Minimum between two alerts for the same device, so one that sits at the edge of
+// range cannot alert on every sweep.
+#define RIFT_WATCH_REARM_MILLIS 300000UL
+
+struct RfWatch {
+  uint8_t key[6];
+  bool    is_wifi;
+  char    name[24];        // display only; the key is the identity
+  bool    present;         // last known state, so only the transition alerts
+  unsigned long last_alert;
+};
+static RfWatch rf_watch[RIFT_WATCH_MAX];
+static int rf_watch_count = 0;
+
+static int rfWatchFind(const uint8_t* key, bool is_wifi) {
+  for (int i = 0; i < rf_watch_count; i++) {
+    if (rf_watch[i].is_wifi == is_wifi && memcmp(rf_watch[i].key, key, 6) == 0) return i;
+  }
+  return -1;
+}
+#endif
 uint16_t rift_msg_wakes = 0;
 uint32_t rift_last_wake_ms = 0;
 
@@ -665,6 +712,27 @@ void riftLoadSettings() {
       && b[2] == RIFT_SETTINGS_VERSION) {
     riftApplyPalette((b[3] & 1) != 0);
     rift_screen_always_on = (b[3] & 2) != 0;
+#ifdef RIFT_RADAR
+    uint8_t nw = 0;
+    if (f.read(&nw, 1) == 1) {
+      if (nw > RIFT_WATCH_MAX) nw = RIFT_WATCH_MAX;
+      for (int i = 0; i < nw; i++) {
+        RfWatch w;
+        memset(&w, 0, sizeof(w));
+        uint8_t flag = 0;
+        // a truncated record is dropped whole rather than half-read, so a file cut
+        // short by a failed write cannot produce a watch with a key and no name
+        if (f.read(w.key, 6) != 6) break;
+        if (f.read(&flag, 1) != 1) break;
+        if (f.read((uint8_t*) w.name, sizeof(w.name)) != (int) sizeof(w.name)) break;
+        w.name[sizeof(w.name) - 1] = 0;
+        w.is_wifi = (flag != 0);
+        // present starts false on purpose: a device that was in range when the
+        // node was switched off should announce itself again, not be assumed there
+        rf_watch[rf_watch_count++] = w;
+      }
+    }
+#endif
   }
   f.close();
 #endif
@@ -677,6 +745,19 @@ void riftSaveSettings() {
   uint8_t b[4] = { RIFT_SETTINGS_MAGIC0, RIFT_SETTINGS_MAGIC1, RIFT_SETTINGS_VERSION,
                    (uint8_t) ((rift_day_mode ? 1 : 0) | (rift_screen_always_on ? 2 : 0)) };
   f.write(b, sizeof(b));
+#ifdef RIFT_RADAR
+  // Appended rather than versioned. The reader below stops when the file runs out,
+  // so a settings file written before this existed still loads its flags - bumping
+  // the version would have discarded a working day/night choice to add a feature.
+  uint8_t nw = (uint8_t) rf_watch_count;
+  f.write(&nw, 1);
+  for (int i = 0; i < rf_watch_count; i++) {
+    f.write(rf_watch[i].key, 6);
+    uint8_t flag = rf_watch[i].is_wifi ? 1 : 0;
+    f.write(&flag, 1);
+    f.write((const uint8_t*) rf_watch[i].name, sizeof(rf_watch[i].name));
+  }
+#endif
   f.close();
 #endif
 }
@@ -2414,6 +2495,63 @@ static void rfAgeOut() {
   portEXIT_CRITICAL(&rf_mux);
 }
 
+// Toggle a mark. Returns true if it is now watched, false if it was removed or
+// there was no room. The name is copied for display only - the address is what is
+// matched, because a BLE name is often absent, duplicated, or a rendering of the
+// address itself.
+static bool rfWatchToggle(const uint8_t* key, bool is_wifi, const char* name) {
+  int at = rfWatchFind(key, is_wifi);
+  if (at >= 0) {
+    for (int i = at; i + 1 < rf_watch_count; i++) rf_watch[i] = rf_watch[i + 1];
+    rf_watch_count--;
+    return false;
+  }
+  if (rf_watch_count >= RIFT_WATCH_MAX) return false;
+  RfWatch* w = &rf_watch[rf_watch_count++];
+  memset(w, 0, sizeof(*w));
+  memcpy(w->key, key, 6);
+  w->is_wifi = is_wifi;
+  StrHelper::strncpy(w->name, (name != NULL && name[0]) ? name : "(unnamed)", sizeof(w->name));
+  // present false, so a device already in range announces itself on the next sweep
+  // rather than being silently assumed present from the moment it was marked
+  return true;
+}
+
+// Called after each completed sweep. Only the transition alerts: a device sitting
+// in range must not alert every 700ms, and one at the edge of range must not alert
+// every time a sweep happens to catch it.
+static void rfWatchCheck(UITask* task) {
+  unsigned long now = millis();
+  for (int i = 0; i < rf_watch_count; i++) {
+    RfWatch* w = &rf_watch[i];
+
+    bool seen = false;
+    portENTER_CRITICAL(&rf_mux);
+    for (int j = 0; j < rf_count; j++) {
+      if (rf_table[j].is_wifi == w->is_wifi && memcmp(rf_table[j].key, w->key, 6) == 0) {
+        seen = (now - rf_table[j].seen_at) <= RIFT_WATCH_GONE_MILLIS;
+        break;
+      }
+    }
+    portEXIT_CRITICAL(&rf_mux);
+
+    if (seen && !w->present) {
+      w->present = true;
+      if (w->last_alert == 0 || (now - w->last_alert) >= RIFT_WATCH_REARM_MILLIS) {
+        w->last_alert = now;
+        task->proximityAlert(w->name, w->is_wifi);
+      } else {
+        // suppressed, but recorded - otherwise a missing alert and a device that
+        // never arrived look the same afterwards
+        riftLogf("watch %s back, alert held", w->name);
+      }
+    } else if (!seen && w->present) {
+      w->present = false;
+      riftLogf("watch gone: %s", w->name);
+    }
+  }
+}
+
 class RiftBleCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice dev) override {
     // copy immediately - getName()/toString() return temporaries whose c_str()
@@ -2469,6 +2607,17 @@ class RiftRadarScreen : public RiftScreen {
   unsigned long _wait_ms;
   int _scroll;
   int _last_n;
+
+  // The selection is an identity, not a row. The list is sorted by signal strength
+  // and re-sorts every sweep, so a cursor held as an index would slide onto a
+  // different device whenever signals crossed - and then ENTER would mark the wrong
+  // one. The index below is where it was last drawn; the key is what it means.
+  uint8_t _sel_key[6];
+  bool _sel_is_wifi;
+  char _sel_name[24];
+  bool _have_sel;
+  int  _sel_idx;
+  bool _resel;        // set by up/down: adopt whatever is at _sel_idx next frame
 
 
   void beginWifi() {
@@ -2528,7 +2677,11 @@ public:
   RiftRadarScreen(UITask* task)
      : _task(task), _state(OFF), _view(VIEW_BANDS), _want_active(false),
        _wifi_up(false), _ble_up(false), _torn_down(true),
-       _wait_since(0), _wait_ms(0), _scroll(0), _last_n(0) { }
+       _wait_since(0), _wait_ms(0), _scroll(0), _last_n(0),
+       _sel_is_wifi(false), _have_sel(false), _sel_idx(0), _resel(false) {
+    memset(_sel_key, 0, sizeof(_sel_key));
+    _sel_name[0] = 0;
+  }
 
   // These only record intent. Screen changes can originate from a mesh callback,
   // and tearing the BT controller down from inside the LoRa receive path crashes
@@ -2622,6 +2775,9 @@ public:
         if (ble_scan_done) {
           BLEDevice::getScan()->clearResults();   // keep the internal map bounded
           rfAgeOut();
+          // after ageing, so a device that has just dropped out of the table is
+          // judged absent rather than lingering for one more cycle
+          rfWatchCheck(_task);
           _state = START_WIFI;
           _wait_since = millis();
           _wait_ms = RIFT_SCAN_GAP_MILLIS;
@@ -2861,12 +3017,61 @@ public:
     }
     if (_scroll >= n) _scroll = (n > 0) ? n - 1 : 0;
 
+    // Resolve the selection against this frame's ordering. If the marked device is
+    // still in the list the cursor follows it wherever it sorted to; if it is gone,
+    // or the user just moved, the cursor adopts whatever is at that position now.
+    if (n == 0) {
+      _have_sel = false;
+      _sel_idx = 0;
+    } else {
+      int found = -1;
+      if (_have_sel && !_resel) {
+        for (int i = 0; i < n; i++) {
+          if (snap[i].is_wifi == _sel_is_wifi && memcmp(snap[i].key, _sel_key, 6) == 0) {
+            found = i; break;
+          }
+        }
+      }
+      if (found >= 0) {
+        _sel_idx = found;
+      } else {
+        if (_sel_idx >= n) _sel_idx = n - 1;
+        if (_sel_idx < 0) _sel_idx = 0;
+        memcpy(_sel_key, snap[_sel_idx].key, 6);
+        _sel_is_wifi = snap[_sel_idx].is_wifi;
+        StrHelper::strncpy(_sel_name, snap[_sel_idx].name, sizeof(_sel_name));
+        _have_sel = true;
+      }
+      _resel = false;
+    }
+
+    // Scroll follows the cursor. Without this the selection could sit outside the
+    // visible window, which is the state NODES was just fixed for having.
+    const int ROWS = (192 - 120) / RIFT_LINE_H + 1;
+    if (_sel_idx < _scroll) _scroll = _sel_idx;
+    if (_sel_idx >= _scroll + ROWS) _scroll = _sel_idx - ROWS + 1;
+    if (_scroll < 0) _scroll = 0;
+
     display.setColor(rift_pal.rule);
     display.fillRect(0, 112, display.width(), 1);
 
     int y = 120;
     for (int i = _scroll; i < n && y <= 192; i++, y += RIFT_LINE_H) {
       bool top = (i == 0);
+      bool is_sel = _have_sel && (i == _sel_idx);
+      bool watched = rfWatchFind(snap[i].key, snap[i].is_wifi) >= 0;
+
+      // cursor left of the RSSI column, and a filled block for a watched device.
+      // Two marks rather than one colour: a watched device that is also selected
+      // has to read as both, and colour cannot say two things in one cell.
+      if (is_sel) {
+        display.setColor(rift_pal.fg);
+        display.drawTextLeftAlign(-4, y, ">");
+      }
+      if (watched) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(24, y + 1, 4, 6);
+      }
       char filtered[sizeof(snap[i].name)];
       riftTranslateUTF8(filtered, snap[i].name, sizeof(filtered));
 
@@ -2892,7 +3097,13 @@ public:
     display.setColor(rift_pal.rule);
     display.fillRect(0, 196, display.width(), 1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 206, "ENTER: waterfall");
+    {
+      char foot[44];
+      int watched = rf_watch_count;
+      if (watched > 0) snprintf(foot, sizeof(foot), "ENTER: watch (%d)   W: waterfall", watched);
+      else             snprintf(foot, sizeof(foot), "ENTER: watch   W: waterfall");
+      display.drawTextLeftAlign(2, 206, foot);
+    }
     // a claim the user is entitled to see on the device, not only in the README
     display.drawTextRightAlign(display.width() - 2, 206, "nothing transmitted");
 
@@ -2903,9 +3114,34 @@ public:
   bool handleInput(char c) override {
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
-    // both views are fed by the same scan cycle, so this is just a display swap
-    if (c == KEY_ENTER) {
+    // ENTER acts on the selected row, which is what it does in every other list in
+    // this firmware. The waterfall moves to W - it is a view swap, not a row action,
+    // and having ENTER mean two different things depending on which view you were in
+    // is how a keypress ends up doing the wrong thing.
+    if (c == 'w' || c == 'W') {
       _view = (_view == VIEW_BANDS) ? VIEW_WATERFALL : VIEW_BANDS;
+      return true;
+    }
+    if (c == KEY_ENTER && _view == VIEW_BANDS) {
+      if (!_have_sel) {
+        _task->showAlert("Nothing to watch", 1200);
+      } else if (rfWatchToggle(_sel_key, _sel_is_wifi, _sel_name)) {
+        riftSaveSettings();
+        char msg[40];
+        snprintf(msg, sizeof(msg), "Watching %s", _sel_name);
+        _task->showAlert(msg, 1600);
+        riftLogf("watch + %s %s", _sel_is_wifi ? "wifi" : "ble", _sel_name);
+      } else if (rfWatchFind(_sel_key, _sel_is_wifi) < 0) {
+        riftSaveSettings();
+        _task->showAlert("Watch removed", 1400);
+        riftLogf("watch - %s", _sel_name);
+      } else {
+        // the toggle refused because the list is full, which is a different outcome
+        // from having removed something and must not read as success
+        char msg[40];
+        snprintf(msg, sizeof(msg), "Watch list full (%d)", RIFT_WATCH_MAX);
+        _task->showAlert(msg, 1800);
+      }
       return true;
     }
     // waterfall is a level down from the band view
@@ -2914,8 +3150,9 @@ public:
       return true;
     }
     if (_view == VIEW_BANDS) {
-      if (c == KEY_UP) { if (_scroll > 0) _scroll--; return true; }
-      if (c == KEY_DOWN) { if (_scroll + 1 < _last_n) _scroll++; return true; }
+      // moves the cursor, not the window - the window follows it in render()
+      if (c == KEY_UP)   { if (_sel_idx > 0) { _sel_idx--; _resel = true; } return true; }
+      if (c == KEY_DOWN) { if (_sel_idx + 1 < _last_n) { _sel_idx++; _resel = true; } return true; }
     }
     return false;
   }
@@ -4111,6 +4348,21 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
       _auto_off = millis() + AUTO_OFF_MILLIS;
       refreshNow();
     }
+  }
+}
+
+void UITask::proximityAlert(const char* name, bool is_wifi) {
+  char msg[48];
+  snprintf(msg, sizeof(msg), "NEAR: %s", (name != NULL && name[0]) ? name : "device");
+  // Longer than an ordinary alert: this one is the point of the feature, and the
+  // user may not have been looking at the screen when it appeared.
+  showAlert(msg, 5000);
+  riftLogf("watch NEAR %s %s", is_wifi ? "wifi" : "ble", name);
+  if (_display != NULL) {
+    // The screen coming on is the whole notification, as it is for a message.
+    if (!_display->isOn()) _display->turnOn();
+    _auto_off = millis() + AUTO_OFF_MILLIS;
+    refreshNow();
   }
 }
 

@@ -236,6 +236,11 @@ public:
   // NODES offers ENTER: DM; this switches to COMMS with that node selected
   void startDirectMessage(const uint8_t* key6);
   void showAlert(const char* text, int duration_millis);
+
+  // A marked RF device has turned up. Visual only: this variant has no sounder and
+  // no vibration motor, so notify() compiles away to nothing - the same conclusion
+  // the message notification reached.
+  void proximityAlert(const char* name, bool is_wifi);
   int  getMsgCount() const { return _msgcount; }
   bool hasDisplay() const { return _display != NULL; }
   bool isButtonPressed() const;
