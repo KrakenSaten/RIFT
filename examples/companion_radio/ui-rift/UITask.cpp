@@ -638,7 +638,17 @@ static const RiftPalette RIFT_NIGHT = {
 static const RiftPalette RIFT_DAY = {
   0xFFFF, 0xEF5D, 0x0000, 0x5ACB, 0x6B4D, 0x8C51, 0xFA00,
   /* acc_tx */ 0x2104,   // #202020 - the accent itself is unreadable as text here
-  /* ok     */ 0x3E40
+  // #428610, not the night green. #39CB00 is 2.16:1 on white - below even the 3:1
+  // non-text floor - and COMMS draws "ACK 1.2s" in it, so in day mode the one label
+  // that says a message arrived was the least readable thing on the screen. Found by
+  // computing the palette's contrast rather than by looking at it, which is the only
+  // way this kind of failure gets noticed: it looks like a colour choice.
+  //
+  // This is the lightest green at that hue that still clears 4.5:1 on white: L
+  // 0.1825, 4.52:1. Per-mode, exactly as acc_tx already is - the palette swaps
+  // roles by design, so a value that cannot work in one mode is replaced rather
+  // than compromised in both.
+  /* ok     */ 0x4422
 };
 
 RiftPalette rift_pal = RIFT_NIGHT;
