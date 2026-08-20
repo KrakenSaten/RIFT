@@ -2645,6 +2645,22 @@ static bool rfWatchToggle(const uint8_t* key, bool is_wifi, const char* name) {
   return true;
 }
 
+// How many watched devices are currently present, and the name of one of them. The
+// present flag is maintained by rfWatchCheck below, so this reads a decision that
+// has already been made rather than re-scanning the table on every frame - render
+// runs several times a second and shares its SPI bus with the radio.
+static int rfWatchPresent(const char** name_out) {
+  int n = 0;
+  const char* first = NULL;
+  for (int i = 0; i < rf_watch_count; i++) {
+    if (!rf_watch[i].present) continue;
+    if (first == NULL) first = rf_watch[i].name;
+    n++;
+  }
+  if (name_out) *name_out = first;
+  return n;
+}
+
 // Called after each completed sweep. Only the transition alerts: a device sitting
 // in range must not alert every 700ms, and one at the edge of range must not alert
 // every time a sweep happens to catch it.
@@ -2856,6 +2872,12 @@ public:
     }
     rfClear();   // hand the heap back; the mesh is the primary job
     wfClear();   // history would be stale and misleading on return
+    // Presence is forgotten with the table it was derived from. Left set, the lamp
+    // would light on re-entry from a sighting made minutes ago in another room,
+    // before any sweep had confirmed it - which is the one thing an indicator must
+    // never do. It also means a device still in range announces itself again, which
+    // is the same choice the settings loader makes for a watch read off disk.
+    for (int i = 0; i < rf_watch_count; i++) rf_watch[i].present = false;
     _state = OFF;
     _torn_down = true;
   }
@@ -2956,8 +2978,12 @@ public:
   }
 
   int renderWaterfall(DisplayDriver& display) {
-    const char* status = (_state == OFF) ? "IDLE" : "WATERFALL";
-    renderHeading(display, status);
+    // The lamp wins the row here too. Someone reading the waterfall still wants to
+    // know whether the thing they marked has turned up, and "WATERFALL" is a label
+    // for a view they are already looking at.
+    if (!renderWatchLamp(display)) {
+      renderHeading(display, (_state == OFF) ? "IDLE" : "WATERFALL");
+    }
 
     display.setTextSize(1);
 
@@ -3060,8 +3086,10 @@ public:
     //
     // The heading therefore appears exactly when there is something to say. That
     // is deliberate rather than a flicker.
-    if (_state == OFF) renderHeading(display, "IDLE");
-    else if (!_wifi_up && !_ble_up) renderHeading(display, "INITIALISING");
+    if (!renderWatchLamp(display)) {
+      if (_state == OFF) renderHeading(display, "IDLE");
+      else if (!_wifi_up && !_ble_up) renderHeading(display, "INITIALISING");
+    }
 
     // snapshot under the lock, then draw without holding it
     RfContact snap[RIFT_RF_MAX];
@@ -3260,6 +3288,62 @@ public:
 
     renderNavBar(display, RIFT_NAV_RADAR);
     return 700;   // coarse: the TFT shares its SPI bus with the LoRa radio
+  }
+
+  // The proximity lamp: a state, not an event.
+  //
+  // The alert on arrival is a moment and you have to be looking at it. What a person
+  // actually wants to know is "is it here now", which is a question the screen can
+  // answer continuously. Returns true if it drew, so the caller knows the heading
+  // row is taken.
+  //
+  // Deliberately only on RADAR. The radios are torn down when this screen is left,
+  // so a lamp on MESH or COMMS would be showing a reading nobody is taking - and a
+  // stale indicator is worse than none, because it is believed. If background
+  // scanning is ever added, the nav bar is where this belongs.
+  bool renderWatchLamp(DisplayDriver& display) {
+    if (rf_watch_count == 0) return false;      // no chrome for an unused feature
+    // Not scanning: the lamp cannot know, so it does not claim. IDLE and
+    // INITIALISING own the row in that case and say something truer.
+    if (_state == OFF || (!_wifi_up && !_ble_up)) return false;
+
+    const char* who = NULL;
+    int near = rfWatchPresent(&who);
+
+    char label[40];
+    if (near == 0) {
+      snprintf(label, sizeof(label), "WATCHING %d", rf_watch_count);
+    } else if (near == 1) {
+      snprintf(label, sizeof(label), "NEAR  %s", who ? who : "device");
+    } else {
+      snprintf(label, sizeof(label), "NEAR  %s  +%d", who ? who : "device", near - 1);
+    }
+
+    // Filled when present, outlined when armed and waiting. Fill against outline
+    // rather than bright against dim, because the grey step between two levels
+    // disappears in sunlight and the difference between these two states is the
+    // whole point of the lamp. Same idiom the band cells and the NODES markers use.
+    if (near > 0) {
+      display.setColor(rift_pal.accent);
+      display.fillRect(0, 2, display.width(), 14);
+      // Reversed out of the fill. On white the accent is 3.5:1 - a legal fill and an
+      // illegal text colour - so it is never the text here; on black the reverse
+      // would work but one treatment for both keeps the lamp reading identically.
+      display.setColor(0xFFFF);
+      display.drawTextLeftAlign(4, 6, label);
+      // the block sits at the right so the name can be read left to right without
+      // the eye stepping over a marker first
+      display.fillRect(display.width() - 14, 5, 8, 8);
+      display.setColor(rift_pal.accent);
+      display.fillRect(display.width() - 12, 7, 4, 4);
+    } else {
+      display.setColor(rift_pal.rule);
+      display.drawRect(0, 2, display.width(), 14);
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(4, 6, label);
+      display.drawRect(display.width() - 14, 5, 8, 8);
+    }
+    return true;
   }
 
   bool handleInput(char c) override {
