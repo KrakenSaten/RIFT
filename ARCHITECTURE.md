@@ -184,6 +184,42 @@ file is shared. Boot-phase timings are on the SYSTEM screen — `boot:` and
 
 ---
 
+## Where things are
+
+| Path | What |
+|---|---|
+| `examples/companion_radio/ui-rift/UITask.cpp` | Every RIFT screen. ~2900 lines. The bulk of the work |
+| `examples/companion_radio/ui-rift/UITask.h` | Palette, boot marks, nav constants |
+| `examples/companion_radio/ui-rift/RiftLogic.h` | Pure functions extracted so they can be tested |
+| `examples/companion_radio/MyMesh.cpp` | Channel creation, message send/receive, ack tracking |
+| `examples/companion_radio/main.cpp` | `setup()`; boot screen and SPIFFS probe live here |
+| `src/helpers/ui/ST7789NativeDisplay.*` | Native 320×240 driver, double-buffered via `GFXcanvas16` |
+| `src/helpers/ui/TDeckKeyboard/Trackball/Touch.*` | Input drivers |
+| `variants/lilygo_tdeck/platformio.ini` | The `LilyGo_TDeck_rift` environment |
+| `variants/lilygo_tdeck/target.cpp` | Board init — the I²C fix lives here |
+| `design/` | `DESIGN-HANDOFF.md` is current; `handoff.md` is the original concept |
+| `flasher/` | Browser flasher page and manifest |
+| `test/` | Native googletest suites |
+
+The UI is selected purely by build flags. `ui-new`, `ui-orig`, `ui-tiny` and
+`ui-rift` are parallel implementations behind the same `UIScreen` seam.
+
+---
+
+## The screen coming on is the notification
+
+`PIN_BUZZER` and `PIN_VIBRATION` are undefined for this variant, so
+`UITask::notify()` compiles to nothing - even though `MyMesh` calls it correctly.
+The whole notification path exists in software with no output device at the end.
+
+So `newMsg()` calling `turnOn()` **is** the notification, and removing that line
+removes the feature. It is suppressed only when a companion app is attached, because
+then the phone is notifying. `MSG WAKE` on SYSTEM counts how often it has fired, so
+"it did not notify me" can be checked rather than argued about.
+
+Audio through the ES8311 codec is the only route to a sound and is deliberately
+deferred: I2S and codec bring-up is work, not a flag.
+
 ## The screen design
 
 The five on-device screens follow a design handoff (`design/`, with the original

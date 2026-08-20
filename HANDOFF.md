@@ -51,52 +51,6 @@ GT=.pio/libdeps/native/googletest/googletest
 
 ---
 
-## 2. Where things are
-
-| Path | What |
-|---|---|
-| `examples/companion_radio/ui-rift/UITask.cpp` | Every RIFT screen. ~2900 lines. The bulk of the work |
-| `examples/companion_radio/ui-rift/UITask.h` | Palette, boot marks, nav constants |
-| `examples/companion_radio/ui-rift/RiftLogic.h` | Pure functions extracted so they can be tested |
-| `examples/companion_radio/MyMesh.cpp` | Channel creation, message send/receive, ack tracking |
-| `examples/companion_radio/main.cpp` | `setup()`; boot screen and SPIFFS probe live here |
-| `src/helpers/ui/ST7789NativeDisplay.*` | Native 320×240 driver, double-buffered via `GFXcanvas16` |
-| `src/helpers/ui/TDeckKeyboard/Trackball/Touch.*` | Input drivers |
-| `variants/lilygo_tdeck/platformio.ini` | The `LilyGo_TDeck_rift` environment |
-| `variants/lilygo_tdeck/target.cpp` | Board init — the I²C fix lives here |
-| `design/` | The screen design handoff: spec, PNGs, original archive |
-| `flasher/` | Browser flasher page and manifest |
-| `test/` | Native googletest suites |
-
-The UI is selected purely by build flags. `ui-new`, `ui-orig`, `ui-tiny` and
-`ui-rift` are parallel implementations behind the same `UIScreen` seam.
-
----
-
-## 2b. The screen coming on is the notification
-
-Stated as a requirement rather than left as an implementation detail, because it
-is easy to mistake for one and remove.
-
-**This board has no sounder and no vibration motor.** `PIN_BUZZER` and
-`PIN_VIBRATION` are not defined for the T-Deck variant, so `UITask::notify()`
-compiles to nothing at all - even though `MyMesh` calls it correctly for both
-contact and channel messages. The whole notification path exists in software with
-no output device at the end of it.
-
-So a message arriving while the display is dark has exactly one way to announce
-itself: `newMsg()` calls `turnOn()`. That line is the notification. It is
-suppressed only when a companion app is attached, because then the phone is doing
-the notifying.
-
-`MSG WAKE` on SYSTEM shows how many times it has fired and how long ago, so a
-report of "it did not notify me" can be checked rather than reasoned about - the
-alternative being three plausible explanations and no way to choose between them.
-
-Audio through the ES8311 codec is the only route to an audible alert and is
-deliberately deferred: it needs I2S and codec bring-up, which is real work rather
-than a flag.
-
 ## 3. Hardware facts that cost time
 
 Every one of these was wrong on the first assumption and only settled by putting
@@ -178,216 +132,74 @@ than any amount of code reading.
 
 ---
 
-## 5. The screen design
-
-`design/DESIGN-HANDOFF.md` is the current reference: measured palette and contrast,
-the RGB565 constraint, and the NODES problem stated so it can be acted on.
-`design/handoff.md` is the original concept and predates the chrome rework.
-holds renderings. Two rules run through it:
-
-- **Never encode data in brightness where shape can carry it.** Reflected light
-  outdoors lifts black toward grey and the dark steps of a ramp collapse.
-  Freshness in NODES and the FAR band in RADAR are filled versus hollow.
-- **De-emphasis inverts with the field.** On white, dim must be *darker*. The
-  accent `#FF4100` keeps its value in both modes but changes role: legible as
-  text on black (6.0:1), fill-only on white (3.5:1).
-
-Night/day palettes are in `UITask.h` as `RiftPalette`; `riftApplyPalette()` also
-assigns the shared `UIColor` statics so nothing half-changes. Toggled from SYSTEM.
-
-Two things in the spec could not be built as drawn, both documented: the splash
-progress bar has nothing to animate against (`SPIFFS.begin()` blocks the only
-running task and reports no progress), and day mode is a menu item rather than
-bound to backlight level, because this panel's backlight is on or off.
-
----
-
 ## 6. State of play
 
-**Done and verified on hardware:** all five screens redesigned; passive Wi-Fi/BLE
-RADAR with waterfall; COMMS with channel tabs, DMs and delivery status; NODES as
-hop columns with real route drawing; SYSTEM in two columns with diagnostics;
-touch, trackball-as-Enter, node renaming, channel creation, Nordic character
-rendering; browser flasher; boot in 5.1 s. MESH now headlines mesh receive
-activity — `NO SIGNAL` at boot and `IDLE` after a minute both seen on hardware,
-with the age and packet count ticking alongside.
+All five screens work and are verified on hardware: MESH headlines mesh receive
+activity, NODES draws hop columns with real routes, RADAR does passive Wi-Fi/BLE
+with a waterfall and a proximity watch, COMMS has channel tabs with colours and
+delivery status, SYSTEM has actions, diagnostics and a 128-line event log. Boot is
+5.1 s. Screens have a lifecycle, so an arriving message no longer disturbs a scan
+or wipes a key being read.
 
-Screens now have a lifecycle. `RiftScreen` adds `onEnter`/`onLeave`/`isModal`/
-`isOverlay`, the message preview is a real overlay drawn over the screen the user
-is on, and dismissing it hands that screen back instead of dropping them on MESH.
-Checked on device against both bugs the old arrangement caused: a message
-arriving mid-scan no longer disturbs RADAR, and no longer wipes a channel key
-being read on SYSTEM.
-
-The popup lists the six newest messages rather than showing one at a time with
-ENTER to step through — paging cost N presses to clear N messages and told you
-less. ENTER now opens COMMS, which is where the full history and scrolling live.
-Rows follow the COMMS idiom so it reads as a shorter COMMS. The alert box uses
-the same panel language, `bg` fill and accent border, sized to its text: it used
-to fill with `bar`, a band two percent from its own background, and read as a
-stray outline.
-
-Incoming emoji no longer arrive as runs of blocks. Invisible code points —
-variation selectors, ZWJ, skin tones — are dropped rather than drawn, consecutive
-unmappable ones collapse to one block, and the rest map to real glyphs or ASCII
-emoticons where a genuine equivalent exists.
-
-The 16px title bar is gone. The wordmark moved into the nav bar — the first tab
-reads `RIFT`, and takes the accent while active, as text on black and as a fill
-with the letters reversed out on white — and the battery moved to the nav bar's
-right-hand slack, so all the chrome is on one edge. Per-screen context became
-`renderHeading()`: the same text at the top of the body with no band behind it.
-Three of the fourteen old call sites only repeated the nav bar and draw nothing
-now; eleven carried real state and kept it. MESH also fronts `meshcore.io` above
-the state, which distinguishes the device from Meshtastic and is something the
-firmware knows for certain.
-
-COMMS was the only screen genuinely short of room, and it is the one that varies:
-with a channel target there is no heading, so the strip sits at the top and the
-history takes the reclaimed 16px, which is one more message. With a contact target
-the heading is the only place the target appears — the strip holds channels
-only — so it stays and the strip drops. Nothing jumps, because the history draws
-bottom-up.
-
-**CI** (`.github/workflows/rift-build-check.yml`, `rift-release.yml`): tests gate
-the builds, all five environments build, third-party actions pinned to SHAs,
-read-only by default with write only on the publish job, and a release is refused
-if the tag and `RIFT_VERSION` disagree.
-
-**Warnings are on for RIFT's own code** (`-Wall -Wextra`, `-w` unflagged) and it
-compiles clean. `-Werror` is off while ~210 warnings in shared MeshCore code are
-not ours to fix.
-
-**95 native tests**, all runnable locally. They cover the places that have
-actually been wrong: base64 key validation, `path_len` decoding, hash collision
-resolution, the mesh-activity thresholds, screen-transition hooks, the UTF-8 to
-CP437 translation, and the Nordic variant table — including an assertion that
-every variant is two-byte UTF-8 with a glyph the panel can draw back, since
-confusing the wire form with the display form is this feature's sharpest trap.
+What changed in each release is on the
+[releases page](https://github.com/KrakenSaten/RIFT/releases); the reasoning is in
+the commit messages. Neither is repeated here.
 
 ### Open items
 
-1. **The `HOPS` distribution still has not been read with more than one node.**
-   SYSTEM reports `n` nodes / `max` hop count / `3+` beyond the third column, and
-   two NODES changes wait on it: moving the `HEARD` count out of the heading, and
-   rebucketing the hop columns, since the report is that almost everything lands in
-   `3+`. Do both together; separately they shift the same layout twice. The buckets
-   were guessed once already, which is why this waits for a number.
+1. **`HOPS` has not been read with more than one node.** Two NODES changes wait on
+   it: moving `HEARD` out of the heading, and rebucketing the hop columns, since
+   almost everything lands in `3+`. Do both together — separately they shift the
+   same layout twice. The buckets were guessed once already.
 
-   It read `n0` for a long time and that was **not** a bug, though it was diagnosed
-   as one twice. `advert_paths`, which every RIFT node list reads, lives in RAM and
-   is cleared at startup, so it holds only what has been heard since boot - and
-   channel messages do not create contacts. A device receiving plenty of traffic can
-   have an empty table, and reflashing restarts it. Send an advert from another node
-   and `n` moves immediately.
+   Its cache is RAM-only and cleared at boot, and channel messages create no
+   contacts, so an empty list after a restart is normal and was twice mistaken for
+   a bug. Seeding it from stored contacts was tried and reverted (`2e0f0171` /
+   `bac7f804`): a contact with no learned route carries `out_path_len` `0xFF` —
+   "flood, route unknown", not 63 hops — and this screen sorts by hops. Do not
+   retry it as a standalone change; it belongs to the column redesign.
 
-   **Seeding it from the persisted contacts was tried and reverted** (`2e0f0171`,
-   reverted in `bac7f804`). A stored contact with no known route carries
-   `out_path_len` `0xFF`, which means "flood, route unknown" and not a hop count, so
-   every contact landed in a 63-hop column - `0xFF & 63`. The screen sorts by hops,
-   so seeding needs somewhere honest to put "route unknown", and that decision
-   belongs to the column redesign rather than ahead of it. Do not retry it as a
-   standalone change.
+2. **Nordic input works; one thing unconfirmed.** Double-tap a vowel in COMMS for a
+   picker. Nothing local can check that a Nordic character survives the trip — the
+   panel looks identical either way. Send one to a phone and read it there.
+   `ø` on the air must be UTF-8 `0xC3 0xB8`; `0x01` is a display-side placeholder
+   and putting it in outgoing text sends a C0 control byte.
 
-2. **Nordic character input — done, one thing left to confirm.**
+3. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning is partial —
+   the `?module` form resolves dependencies from the CDN at load time. Needs an npm
+   build step.
 
-   Double-tapping a base vowel in COMMS opens a picker: `a` offers æ å ä, `o`
-   offers ø ö, and the uppercase forms follow. Verified on hardware in both cases.
-   Both taps are inserted as ordinary letters first and the picker replaces the
-   pair, so cancelling leaves exactly what was typed — which is what makes a false
-   trigger on a genuine double vowel (Haakon, Aage) cost one keypress.
+4. **`QUIET` has never been seen on hardware.** Needs a quarter hour of silence;
+   only the threshold is covered, by native test.
 
-   A double tap rather than a long press because a long press cannot be detected
-   at all — see section 3. That was measured only after building the wrong thing.
+5. **Report the I²C bug upstream.** Measurements in `3528d80a`. The fix took boot
+   from 243 s to 5.1 s and every other T-Deck user is still paying it. Outward
+   facing, so it needs a go-ahead — asked for and deferred, not declined.
 
-   The compose line is UTF-8 aware: it renders by translating first and taking the
-   tail of the *translated* text, so a cut cannot land inside a sequence; backspace
-   removes a whole code point; and the send path truncates on a code point
-   boundary. All three use `mesh::validUtf8PrefixLength`, which upstream already
-   has and tests. Two were live bugs — a byte-wise backspace left a dangling lead
-   byte, and the send truncation could put invalid UTF-8 on the air once the
-   capacity dropped below the composed length (compose a long DM, switch the target
-   to a channel).
+6. **Why a long flash write fails.** Known to be the transfer length, not the
+   address, and the threshold moves with the image size. `tools/rift-flash.py`
+   handles it; the cause is still unknown.
 
-   The character counter counts bytes, deliberately: MeshCore truncates at 160
-   bytes, so a Nordic character really does cost two.
+7. **Emoji show as blocks past the mapped set.** CP437 has none, and what remains
+   has no honest ASCII equivalent. The route is hand-drawn glyphs in a 6×8 cell,
+   which makes the discard list as much the deliverable as the glyphs: an
+   unrecognisable glyph is worse than a block, because a block admits it cannot
+   draw the thing.
 
-   **Still unconfirmed:** that a Nordic character survives the trip to another
-   client. Nothing local can check it — the panel would look identical whether the
-   wire carried UTF-8 or CP437. Send one to a phone and read it there.
+8. **The NODES redesign.** `design/DESIGN-HANDOFF.md` §6 states the problem and the
+   direction — summary buckets, a scrollable list, one selected route — with the
+   four constraints that are not negotiable.
 
-   Sharpest trap, still: `ø` on the air must be UTF-8 `0xC3 0xB8`. `0x01` is a
-   display-side placeholder only, and putting it in outgoing text sends a C0
-   control byte that other clients may mangle or truncate.
-3. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning the version
-   is only partial — the `?module` form resolves its dependencies from the CDN at
-   load time. Real self-hosting needs an npm build step.
-4. **`.github/actions/setup-build-environment`** is upstream's and still refers to
-   two actions by tag. Pinning there would change their workflows too.
-5. **`QUIET` has never been seen on hardware.** It needs a quarter of an hour of
-   silence, so only the threshold is covered, by native test. `NO SIGNAL` and
-   `IDLE` were both confirmed on device.
-6. **Report the I²C bug upstream.** Measurements are in commit `3528d80a`. The
-   fix took this device's boot from 243 s to 5.1 s; every other T-Deck user on
-   MeshCore is still paying the four minutes and does not know why. It is the
-   largest effect available outside this repo. Outward-facing, so it needs an
-   explicit go-ahead — asked for and deferred as of 0.5.0, not declined.
-7. **Why a long flash write fails at all.** Known to be the transfer length rather
-   than the address, but not *why* the transport gives up there. The threshold moves
-   with the image: four parts was fine at 1.54MB and fails on the third chunk at
-   1.55MB, where eight parts goes through. `tools/rift-flash.py` now derives the
-   count from a 192KB target and retries a failed chunk four times, so nothing has
-   to be remembered - but the cause is still unknown, and a partly written image is
-   a device that will not boot until the tool is run again.
-8. **Emoji still show as blocks past the mapped set**, and the user reports that
-   as too many for current message traffic. The limit is now fundamental rather
-   than a gap in the table: CP437 has no emoji, and what remains has no honest
-   ASCII synonym — mapping it anyway would put a claim on screen the sender did
-   not make. The route is custom glyphs, drawn through the same `print()`
-   interception that synthesises `ø`. Bounded, but the cell is 6x8 with no
-   antialiasing, so the list has to be chosen for shapes that survive that size.
-   An unrecognisable custom glyph is worse than a block: a block admits it cannot
-   draw the thing, a vague shape looks like it means something specific.
+## 7. How this has worked
 
----
-
-## 7. How this project has worked
-
-Worth keeping, because it is what actually produced results.
-
-**Measure, do not reason.** Four hardware problems and one CI failure were all
-resolved by displaying or logging the real value after reasoning had failed —
-sometimes twice. The SYSTEM screen's diagnostics (last key, I²C scan, free heap,
-reset reason, touch coordinates, boot timings) were never on any requirements
-list and are the most valuable thing in the firmware.
-
-**Verify a review's claims before acting on them.** Both external reviews were
-substantially correct, but each had one item where the mechanism was wrong even
-though the conclusion held, and acting on the stated mechanism would have fixed
-the wrong thing.
-
-**Fixes introduce bugs.** Three findings in the second review were regressions
-from the first round's fixes. Re-check the blast radius of a fix, especially when
-it adds a hook that fires on a shared code path.
-
-**Say what was not verified.** Several things here are workarounds for causes
-that are still unknown, and they are labelled as such in the code and commits.
-
----
-
-## 8. Starting a session at home
-
-```bash
-git clone https://github.com/KrakenSaten/RIFT.git
-cd RIFT
-git checkout rift-tdeck
-```
-
-Then set up the venv and `PLATFORMIO_CORE_DIR` per section 1, install the host
-compiler, and confirm the baseline before changing anything:
-
-```bash
-pio test -e native -e native_kiss_modem && pio run -e LilyGo_TDeck_rift
-```
-
-60 tests and a clean build means you are where this handoff left off.
+- **Measure, do not reason.** Every hardware problem here was resolved by putting
+  the real value on screen after reasoning had failed - several of them twice. The
+  SYSTEM diagnostics were on no requirements list and are the most useful thing in
+  the firmware.
+- **Verify a review's claims first.** Every external review was substantially right
+  and most had one item where the stated mechanism was wrong, which would have
+  fixed the wrong thing.
+- **Fixes introduce bugs.** Several review findings were regressions from earlier
+  fixes. Re-check the blast radius, especially for a hook on a shared path.
+- **Say what was not verified.** Some of this is a workaround for a cause still
+  unknown, and it is labelled as such in the code.

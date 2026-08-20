@@ -38,23 +38,14 @@ formatting, which takes one to two minutes.</sub>
 
 ## Contents
 
-- [Flashing a device](#flashing-a-device) — start here
-- [Hardware](#hardware)
-- [Screens and controls](#screens-and-controls)
-- [Sending your first direct message](#sending-your-first-direct-message)
-- [How this was built](#how-this-was-built)
-- [Known limitations](#known-limitations)
-- [Status](#status)
-- [Upstream MeshCore](#upstream-meshcore)
-
-Other documents in this repository:
+GitHub renders an outline for this page; the other documents are:
 
 | File | What |
 |---|---|
-| [`BUILDING.md`](BUILDING.md) | Toolchain, environment traps, commands, CI, supply chain |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | How RIFT fits together, and why each awkward part is that way |
-| [`HANDOFF.md`](HANDOFF.md) | Working notes — hardware facts, protocol details, open items |
-| [`design/handoff.md`](design/handoff.md) | Screen design spec at 1:1 device coordinates |
+| [`BUILDING.md`](BUILDING.md) | Toolchain, environment traps, commands, CI |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | How it fits together, and why each awkward part is that way |
+| [`HANDOFF.md`](HANDOFF.md) | What the code does not say: measurements, protocol facts, open items |
+| [`design/DESIGN-HANDOFF.md`](design/DESIGN-HANDOFF.md) | Design reference — measured palette, the RGB565 constraint, the NODES problem |
 
 ---
 
@@ -266,17 +257,14 @@ core when a scan has recently been active. After the first visit to RADAR the BL
 stack stays initialised and idle until reboot, holding its heap. It transmits
 nothing in that state.
 
-**Message history is RAM-only** and does not survive a reboot. MeshCore stores no
-messages itself, so this would mean new persistence code and flash wear. The log
-holds the 48 most recent messages, each up to the full MeshCore text length of 160
-characters.
+**Message history holds 48 messages** and is persisted to SPIFFS, so it survives a
+reboot. Older messages fall off the end; MeshCore itself stores none, so nothing is
+recoverable beyond what this ring holds.
 
-**Nordic characters can be read but not typed.** Incoming UTF-8 is mapped to CP437,
-which carries æ Æ å Å ä Ä ö Ö; ø and Ø are absent from the font and are drawn as
-the base letter plus a stroke. Input is a different problem: the keyboard is a US
-QWERTY with no Nordic keys, and `SYM` is a working symbol layer rather than a spare
-key, so entering them needs a compose scheme. Not implemented — reading was the part
-that actually hurt.
+**Nordic characters are typed by double-tapping a vowel** in COMMS, which opens a
+picker. A long press cannot be used: this keyboard reports no key-up, so a hold is
+indistinguishable from a tap. Incoming UTF-8 is mapped to CP437 for display, with
+the two glyphs the font lacks synthesised by the driver.
 
 **Emoji are approximated or shown as a block.** Invisible code points are dropped
 and consecutive unmappable ones collapse to one block, so a heart with a variation
@@ -308,9 +296,10 @@ over the panel and the darker steps of a grey ramp collapse into each other.
 which is where the arrow codes live. The trackball provides directions instead, so
 this has not mattered in practice.
 
-**Uploading over USB may need two writes.** A single `pio run -t upload` fails
-reproducibly partway through on this device; see [`BUILDING.md`](BUILDING.md). The
-browser flasher is unaffected.
+**Uploading over USB needs the image split.** A long write fails part way through,
+and the threshold is the transfer length rather than the flash address. Use
+`tools/rift-flash.py`, which derives the split from the image size and retries a
+failed chunk. The cause is still unknown — see `BUILDING.md`.
 
 **An upstream bug is worked around here**, not fixed: the RTC probe leaves the I²C
 bus unusable, which cost 243 seconds of boot until the bus was restarted after it.
