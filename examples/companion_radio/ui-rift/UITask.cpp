@@ -744,6 +744,9 @@ void riftLoadSettings() {
       rift_radar_src = (src == RIFT_SRC_WIFI || src == RIFT_SRC_BLE) ? src : RIFT_SRC_BOTH;
     }
     uint8_t nw = 0;
+    // Reset, not append. Called once today, which is the only reason writing
+    // rf_watch[4..7] past a four-element array has not already happened.
+    rf_watch_count = 0;
     if (f.read(&nw, 1) == 1) {
       if (nw > RIFT_WATCH_MAX) nw = RIFT_WATCH_MAX;
       for (int i = 0; i < nw; i++) {
@@ -2627,14 +2630,29 @@ static void rfAgeOut() {
 // there was no room. The name is copied for display only - the address is what is
 // matched, because a BLE name is often absent, duplicated, or a rendering of the
 // address itself.
-static bool rfWatchToggle(const uint8_t* key, bool is_wifi, const char* name) {
+// Three outcomes, not two. A bool could not distinguish "removed" from "refused
+// because the list is full" - both leave the device absent from the list, so the
+// caller's rfWatchFind check reported a full list as a removal and told the user
+// something had been taken off when nothing had changed.
+enum RfWatchResult { RF_WATCH_ADDED, RF_WATCH_REMOVED, RF_WATCH_FULL };
+
+static RfWatchResult rfWatchToggle(const uint8_t* key, bool is_wifi, const char* name) {
+  // Under rf_mux because rfUpsert reads this table from the BLE advertisement
+  // callback on core 0, inside that same lock, to decide what it may evict. Taking
+  // it there and not here meant the reader was holding a lock the writer ignored,
+  // which is no protection: the shift below could be observed half done.
+  portENTER_CRITICAL(&rf_mux);
   int at = rfWatchFind(key, is_wifi);
   if (at >= 0) {
     for (int i = at; i + 1 < rf_watch_count; i++) rf_watch[i] = rf_watch[i + 1];
     rf_watch_count--;
-    return false;
+    portEXIT_CRITICAL(&rf_mux);
+    return RF_WATCH_REMOVED;
   }
-  if (rf_watch_count >= RIFT_WATCH_MAX) return false;
+  if (rf_watch_count >= RIFT_WATCH_MAX) {
+    portEXIT_CRITICAL(&rf_mux);
+    return RF_WATCH_FULL;
+  }
   RfWatch* w = &rf_watch[rf_watch_count++];
   memset(w, 0, sizeof(*w));
   memcpy(w->key, key, 6);
@@ -2642,7 +2660,8 @@ static bool rfWatchToggle(const uint8_t* key, bool is_wifi, const char* name) {
   StrHelper::strncpy(w->name, (name != NULL && name[0]) ? name : "(unnamed)", sizeof(w->name));
   // present false, so a device already in range announces itself on the next sweep
   // rather than being silently assumed present from the moment it was marked
-  return true;
+  portEXIT_CRITICAL(&rf_mux);
+  return RF_WATCH_ADDED;
 }
 
 // How many watched devices are currently present, and the name of one of them. The
@@ -3378,6 +3397,17 @@ public:
       // and a watch could match one of them.
       rfDropSource(!riftScanWifi(), !riftScanBle());
 
+      // And forget that those devices were present. rfWatchCheck skips a watch whose
+      // radio is off, so the flag would freeze at true and the lamp would keep
+      // claiming "NEAR" for a device nobody is listening for - the same stale reading
+      // the teardown path clears, missed here because the two features were built
+      // hours apart.
+      for (int i = 0; i < rf_watch_count; i++) {
+        if (rf_watch[i].is_wifi ? !riftScanWifi() : !riftScanBle()) {
+          rf_watch[i].present = false;
+        }
+      }
+
       // restart the cycle at a phase that is enabled
       if (_state != OFF && _state != STOPPING) {
         _state = START_WIFI;
@@ -3396,22 +3426,26 @@ public:
     if (c == KEY_ENTER && _view == VIEW_BANDS) {
       if (!_have_sel) {
         _task->showAlert("Nothing to watch", 1200);
-      } else if (rfWatchToggle(_sel_key, _sel_is_wifi, _sel_name)) {
-        riftSaveSettings();
-        char msg[40];
-        snprintf(msg, sizeof(msg), "Watching %s", _sel_name);
-        _task->showAlert(msg, 1600);
-        riftLogf("watch + %s %s", _sel_is_wifi ? "wifi" : "ble", _sel_name);
-      } else if (rfWatchFind(_sel_key, _sel_is_wifi) < 0) {
-        riftSaveSettings();
-        _task->showAlert("Watch removed", 1400);
-        riftLogf("watch - %s", _sel_name);
       } else {
-        // the toggle refused because the list is full, which is a different outcome
-        // from having removed something and must not read as success
         char msg[40];
-        snprintf(msg, sizeof(msg), "Watch list full (%d)", RIFT_WATCH_MAX);
-        _task->showAlert(msg, 1800);
+        switch (rfWatchToggle(_sel_key, _sel_is_wifi, _sel_name)) {
+          case RF_WATCH_ADDED:
+            riftSaveSettings();
+            snprintf(msg, sizeof(msg), "Watching %s", _sel_name);
+            _task->showAlert(msg, 1600);
+            riftLogf("watch + %s %s", _sel_is_wifi ? "wifi" : "ble", _sel_name);
+            break;
+          case RF_WATCH_REMOVED:
+            riftSaveSettings();
+            _task->showAlert("Watch removed", 1400);
+            riftLogf("watch - %s", _sel_name);
+            break;
+          case RF_WATCH_FULL:
+            // nothing changed, so nothing is saved either
+            snprintf(msg, sizeof(msg), "Watch list full (%d)", RIFT_WATCH_MAX);
+            _task->showAlert(msg, 1800);
+            break;
+        }
       }
       return true;
     }
