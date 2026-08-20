@@ -646,6 +646,21 @@ bool rift_day_mode = false;
 bool rift_screen_always_on = false;
 
 #ifdef RIFT_RADAR
+// Which radios RADAR sweeps. Three states rather than two switches: with both off
+// the screen has nothing to do, and leaving RADAR already powers everything down -
+// so a fourth state would be a way to reach a dead screen and nothing else.
+//
+// It shortens the sweep as well as the list, which is the other half of why it was
+// asked for: one radio per cycle instead of two.
+#define RIFT_SRC_BOTH 0
+#define RIFT_SRC_WIFI 1
+#define RIFT_SRC_BLE  2
+uint8_t rift_radar_src = RIFT_SRC_BOTH;
+static inline bool riftScanWifi() { return rift_radar_src != RIFT_SRC_BLE; }
+static inline bool riftScanBle()  { return rift_radar_src != RIFT_SRC_WIFI; }
+#endif
+
+#ifdef RIFT_RADAR
 // ------------------------------------------------------------- proximity watch
 //
 // A handful of RF devices marked from RADAR, and an alert when one of them turns
@@ -713,6 +728,11 @@ void riftLoadSettings() {
     riftApplyPalette((b[3] & 1) != 0);
     rift_screen_always_on = (b[3] & 2) != 0;
 #ifdef RIFT_RADAR
+    {
+      uint8_t src = (b[3] >> 2) & 3;
+      // 3 is not a state this ever writes; treat it as both rather than trusting it
+      rift_radar_src = (src == RIFT_SRC_WIFI || src == RIFT_SRC_BLE) ? src : RIFT_SRC_BOTH;
+    }
     uint8_t nw = 0;
     if (f.read(&nw, 1) == 1) {
       if (nw > RIFT_WATCH_MAX) nw = RIFT_WATCH_MAX;
@@ -743,7 +763,12 @@ void riftSaveSettings() {
   File f = SPIFFS.open(RIFT_SETTINGS_PATH, "w");
   if (!f) return;
   uint8_t b[4] = { RIFT_SETTINGS_MAGIC0, RIFT_SETTINGS_MAGIC1, RIFT_SETTINGS_VERSION,
-                   (uint8_t) ((rift_day_mode ? 1 : 0) | (rift_screen_always_on ? 2 : 0)) };
+                   (uint8_t) ((rift_day_mode ? 1 : 0) | (rift_screen_always_on ? 2 : 0)
+#ifdef RIFT_RADAR
+                               // bits 2-3, which were spare
+                               | ((rift_radar_src & 3) << 2)
+#endif
+                             ) };
   f.write(b, sizeof(b));
 #ifdef RIFT_RADAR
   // Appended rather than versioned. The reader below stops when the file runs out,
@@ -2474,6 +2499,22 @@ static void rfUpsert(const uint8_t* key, const char* name, int8_t rssi, uint8_t 
   portEXIT_CRITICAL(&rf_mux);
 }
 
+// Drop everything a now-disabled radio had found. Ageing would remove it eventually,
+// but "eventually" is minutes of showing devices nobody is looking for any more.
+static void rfDropSource(bool drop_wifi, bool drop_ble) {
+  if (!drop_wifi && !drop_ble) return;
+  portENTER_CRITICAL(&rf_mux);
+  int w = 0;
+  for (int i = 0; i < rf_count; i++) {
+    bool drop = rf_table[i].is_wifi ? drop_wifi : drop_ble;
+    if (drop) continue;
+    if (w != i) rf_table[w] = rf_table[i];
+    w++;
+  }
+  rf_count = w;
+  portEXIT_CRITICAL(&rf_mux);
+}
+
 static void rfClear() {
   portENTER_CRITICAL(&rf_mux);
   rf_count = 0;
@@ -2524,6 +2565,11 @@ static void rfWatchCheck(UITask* task) {
   unsigned long now = millis();
   for (int i = 0; i < rf_watch_count; i++) {
     RfWatch* w = &rf_watch[i];
+
+    // A watch on a radio that is currently switched off is left alone. Judging it
+    // absent would report a device as gone because the user stopped listening, and
+    // then alert again the moment they switched the radio back on.
+    if (w->is_wifi ? !riftScanWifi() : !riftScanBle()) continue;
 
     bool seen = false;
     portENTER_CRITICAL(&rf_mux);
@@ -2751,6 +2797,7 @@ public:
 
     switch (_state) {
       case START_WIFI:
+        if (!riftScanWifi()) { _state = START_BLE; break; }
         beginWifi();
         _state = WIFI_RUNNING;
         break;
@@ -2767,6 +2814,17 @@ public:
       }
 
       case START_BLE:
+        if (!riftScanBle()) {
+          // BLE is off, so the cycle ends here instead of in BLE_RUNNING. Ageing,
+          // the presence check and the gap all have to happen exactly once per
+          // cycle, so they are duplicated here rather than being skipped.
+          rfAgeOut();
+          rfWatchCheck(_task);
+          _state = START_WIFI;
+          _wait_since = millis();
+          _wait_ms = RIFT_SCAN_GAP_MILLIS;
+          break;
+        }
         beginBle();
         _state = BLE_RUNNING;
         break;
@@ -2947,9 +3005,15 @@ public:
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(44, 24, "DEVICES NEARBY");
-    display.setColor(rift_pal.fg);
-    sprintf(tmp, "%d wifi  %d ble", wifi_n, ble_n);
+    // A disabled radio is dimmed and labelled rather than hidden. Hiding it would
+    // make "0 ble" and "not looking for ble" the same reading, which is the
+    // distinction the whole switch exists to make.
+    display.setColor(riftScanWifi() ? rift_pal.fg : rift_pal.dim);
+    snprintf(tmp, sizeof(tmp), riftScanWifi() ? "%d wifi" : "wifi off", wifi_n);
     display.drawTextLeftAlign(44, 36, tmp);
+    display.setColor(riftScanBle() ? rift_pal.fg : rift_pal.dim);
+    snprintf(tmp, sizeof(tmp), riftScanBle() ? "%d ble" : "ble off", ble_n);
+    display.drawTextLeftAlign(120, 36, tmp);
 
     // "and is that changing" - the second half of the question
     if (new_n > 0) {
@@ -3100,8 +3164,8 @@ public:
     {
       char foot[44];
       int watched = rf_watch_count;
-      if (watched > 0) snprintf(foot, sizeof(foot), "ENTER: watch (%d)   W: waterfall", watched);
-      else             snprintf(foot, sizeof(foot), "ENTER: watch   W: waterfall");
+      if (watched > 0) snprintf(foot, sizeof(foot), "ENTER watch %d  W wave  S src", watched);
+      else             snprintf(foot, sizeof(foot), "ENTER watch  W wave  S src");
       display.drawTextLeftAlign(2, 206, foot);
     }
     // a claim the user is entitled to see on the device, not only in the README
@@ -3118,6 +3182,42 @@ public:
     // this firmware. The waterfall moves to W - it is a view swap, not a row action,
     // and having ENTER mean two different things depending on which view you were in
     // is how a keypress ends up doing the wrong thing.
+    // Cycles the source. Wi-Fi is genuinely powered down when it is not wanted;
+    // BLE is only stopped, because BLEDevice::deinit() panics in this ESP32 core
+    // once a scan has been active - see finishTeardown(), where the same limit
+    // applies. Stopped is enough: nothing is collected and nothing is transmitted.
+    if (c == 's' || c == 'S') {
+      rift_radar_src = (rift_radar_src == RIFT_SRC_BOTH) ? RIFT_SRC_WIFI
+                     : (rift_radar_src == RIFT_SRC_WIFI) ? RIFT_SRC_BLE
+                                                         : RIFT_SRC_BOTH;
+      riftSaveSettings();
+
+      if (!riftScanWifi() && _wifi_up) {
+        WiFi.scanDelete();
+        WiFi.mode(WIFI_OFF);
+        _wifi_up = false;
+      }
+      // Only stopping is needed to re-enable: beginBle() sets the callbacks, the
+      // passive flag and the window on every call, so the next cycle restores all of
+      // it. stop() does not clear the callbacks - only beginTeardown() does that.
+      if (!riftScanBle() && _ble_up) BLEDevice::getScan()->stop();
+
+      // Drop what the disabled radio had found. Leaving it would show devices that
+      // are no longer being looked for, ageing out slowly over the next minutes,
+      // and a watch could match one of them.
+      rfDropSource(!riftScanWifi(), !riftScanBle());
+
+      // restart the cycle at a phase that is enabled
+      if (_state != OFF && _state != STOPPING) {
+        _state = START_WIFI;
+        _wait_ms = 0;
+      }
+      const char* label = (rift_radar_src == RIFT_SRC_BOTH) ? "WIFI + BLE"
+                        : (rift_radar_src == RIFT_SRC_WIFI) ? "WIFI only" : "BLE only";
+      _task->showAlert(label, 1400);
+      riftLogf("radar source: %s", label);
+      return true;
+    }
     if (c == 'w' || c == 'W') {
       _view = (_view == VIEW_BANDS) ? VIEW_WATERFALL : VIEW_BANDS;
       return true;
