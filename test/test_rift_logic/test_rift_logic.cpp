@@ -656,6 +656,75 @@ TEST(ChannelColour, AllFourAreDistinctAndNotTheAccent) {
     }
 }
 
+// ------------------------------------------------------------------ civil time
+//
+// Reference values were computed with calendar.timegm rather than by hand, because
+// the whole point of the conversion is that nobody should be doing this arithmetic
+// mentally - including while writing its test.
+
+TEST(CivilTime, KnownEpochs) {
+    uint32_t e = 0;
+    // 1970 and 2000 are outside the supported range by design - see the refusal
+    // test - so the earliest value here is the low bound itself
+    ASSERT_TRUE(riftEpochFromCivil(2020, 1, 1, 0, 0, &e));  EXPECT_EQ(1577836800u, e);
+    ASSERT_TRUE(riftEpochFromCivil(2020, 2, 29, 12, 0, &e)); EXPECT_EQ(1582977600u, e);
+    ASSERT_TRUE(riftEpochFromCivil(2026, 8, 20, 14, 32, &e)); EXPECT_EQ(1787236320u, e);
+    ASSERT_TRUE(riftEpochFromCivil(2024, 3, 1, 0, 0, &e));  EXPECT_EQ(1709251200u, e);
+    ASSERT_TRUE(riftEpochFromCivil(2099, 12, 31, 23, 59, &e)); EXPECT_EQ(4102444740u, e);
+}
+
+TEST(CivilTime, RoundTripsBothWays) {
+    const uint32_t cases[] = { 1577836800u, 1582977600u, 1787236320u, 4102444740u };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int y, mo, d, h, mi;
+        riftCivilFromEpoch(cases[i], &y, &mo, &d, &h, &mi);
+        uint32_t back = 0;
+        ASSERT_TRUE(riftEpochFromCivil(y, mo, d, h, mi, &back)) << "case " << i;
+        EXPECT_EQ(cases[i], back) << "case " << i;
+    }
+}
+
+TEST(CivilTime, LeapYears) {
+    EXPECT_EQ(29, riftDaysInMonth(2024, 2));   // divisible by 4
+    EXPECT_EQ(28, riftDaysInMonth(2100, 2));   // divisible by 100, not 400
+    EXPECT_EQ(29, riftDaysInMonth(2000, 2));   // divisible by 400
+    EXPECT_EQ(28, riftDaysInMonth(2023, 2));
+    uint32_t e = 0;
+    EXPECT_TRUE (riftEpochFromCivil(2024, 2, 29, 0, 0, &e));
+    EXPECT_FALSE(riftEpochFromCivil(2023, 2, 29, 0, 0, &e));
+}
+
+TEST(CivilTime, ImpossibleDatesAreRefusedNotNormalised) {
+    // a typo turned into a different date is worse than a refusal, because the user
+    // cannot see it happen
+    uint32_t e = 0xDEADBEEF, before = e;
+    EXPECT_FALSE(riftEpochFromCivil(2026, 13, 1, 0, 0, &e));
+    EXPECT_FALSE(riftEpochFromCivil(2026, 0, 1, 0, 0, &e));
+    EXPECT_FALSE(riftEpochFromCivil(2026, 4, 31, 0, 0, &e));
+    EXPECT_FALSE(riftEpochFromCivil(2026, 1, 0, 0, 0, &e));
+    EXPECT_FALSE(riftEpochFromCivil(2026, 1, 1, 24, 0, &e));
+    EXPECT_FALSE(riftEpochFromCivil(2026, 1, 1, 0, 60, &e));
+    EXPECT_FALSE(riftEpochFromCivil(2019, 1, 1, 0, 0, &e));   // below the unset threshold
+    EXPECT_FALSE(riftEpochFromCivil(2100, 1, 1, 0, 0, &e));
+    EXPECT_EQ(before, e) << "a refused conversion must not write to the output";
+}
+
+TEST(CivilTime, ParserIsStrict) {
+    uint32_t e = 0;
+    ASSERT_TRUE(riftParseCivil("2026-08-20 14:32", &e));
+    EXPECT_EQ(1787236320u, e);
+
+    EXPECT_FALSE(riftParseCivil("2026-8-20 14:32", &e));    // one-digit month
+    EXPECT_FALSE(riftParseCivil("2026-08-20 14:32 ", &e));  // trailing space
+    EXPECT_FALSE(riftParseCivil("2026-08-20T14:32", &e));   // wrong separator
+    EXPECT_FALSE(riftParseCivil("2026-08-20 14.32", &e));
+    EXPECT_FALSE(riftParseCivil("2026-08-20", &e));         // no time
+    EXPECT_FALSE(riftParseCivil("", &e));
+    EXPECT_FALSE(riftParseCivil("abcd-ef-gh ij:kl", &e));
+    EXPECT_FALSE(riftParseCivil(NULL, &e));
+    EXPECT_FALSE(riftParseCivil("2026-02-30 00:00", &e));   // validation still applies
+}
+
 // ---------------------------------------------------------- millis deadlines
 
 TEST(Due, OrdinaryCase) {

@@ -163,6 +163,105 @@ static inline uint16_t riftChannelColour(int channel_idx) {
   }
 }
 
+// ------------------------------------------------------------------ civil time
+//
+// Setting the clock by hand needs a conversion in both directions, and neither uses
+// mktime()/gmtime(): those depend on a timezone database and a TZ setting that this
+// firmware never establishes, so the answer would depend on state nobody set.
+//
+// RIFT has no timezone. Every display of a timestamp is (epoch / 3600) % 24 with no
+// offset, so the clock is local time stored as an epoch. That is self-consistent -
+// what you type is what you read back - and it is what the rest of the screen
+// already assumes. The cost is that the value is not a true UTC epoch, which matters
+// only if it were compared against another node's absolute clock.
+//
+// Hinnant's days-from-civil, which is exact for the whole range and has no loops.
+
+static inline bool riftIsLeap(int y) {
+  return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+
+static inline int riftDaysInMonth(int y, int m) {
+  static const int D[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+  if (m < 1 || m > 12) return 0;
+  if (m == 2 && riftIsLeap(y)) return 29;
+  return D[m - 1];
+}
+
+// Returns false and leaves *out alone if the date does not exist. February 30th and
+// month 13 are refused rather than normalised: silently turning a typo into a
+// different date is worse than saying no, because the user cannot see it happen.
+static inline bool riftEpochFromCivil(int y, int mo, int d, int h, int mi, uint32_t* out) {
+  if (out == NULL) return false;
+  // 2020 is the low bound because it is also the "has the clock ever been set"
+  // threshold used elsewhere; a year below it would read as unset the moment it was
+  // written. 2099 keeps the result inside uint32_t with room to spare.
+  if (y < 2020 || y > 2099) return false;
+  if (mo < 1 || mo > 12) return false;
+  if (d < 1 || d > riftDaysInMonth(y, mo)) return false;
+  if (h < 0 || h > 23) return false;
+  if (mi < 0 || mi > 59) return false;
+
+  int yy = y;
+  yy -= (mo <= 2) ? 1 : 0;                    // shift so March is month 1
+  const int era = (yy >= 0 ? yy : yy - 399) / 400;
+  const unsigned yoe = (unsigned) (yy - era * 400);
+  const unsigned doy = (unsigned) ((153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  const long days = (long) era * 146097 + (long) doe - 719468;
+
+  *out = (uint32_t) days * 86400u + (uint32_t) h * 3600u + (uint32_t) mi * 60u;
+  return true;
+}
+
+static inline void riftCivilFromEpoch(uint32_t epoch, int* y, int* mo, int* d,
+                                      int* h, int* mi) {
+  uint32_t secs = epoch % 86400u;
+  long days = (long) (epoch / 86400u) + 719468;
+  const long era = (days >= 0 ? days : days - 146096) / 146097;
+  const unsigned doe = (unsigned) (days - era * 146097);
+  const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const long yy = (long) yoe + era * 400;
+  const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const unsigned mp = (5 * doy + 2) / 153;
+  const unsigned dd = doy - (153 * mp + 2) / 5 + 1;
+  const unsigned mm = mp + (mp < 10 ? 3 : -9);
+
+  if (y)  *y  = (int) (yy + (mm <= 2 ? 1 : 0));
+  if (mo) *mo = (int) mm;
+  if (d)  *d  = (int) dd;
+  if (h)  *h  = (int) (secs / 3600u);
+  if (mi) *mi = (int) ((secs % 3600u) / 60u);
+}
+
+// Parses exactly "YYYY-MM-DD HH:MM". Strict on purpose: a clock is one of the few
+// things where a partially understood input should be refused rather than guessed at.
+static inline bool riftParseCivil(const char* text, uint32_t* out) {
+  if (text == NULL) return false;
+  int v[5] = { 0, 0, 0, 0, 0 };
+  // Four separators for five fields: '-', '-', ' ', ':'. The first version of this
+  // had five characters in the string, so the field after the hour expected a space
+  // where a colon belongs and every well-formed input was refused.
+  const char* sep = "-- :";
+  const int width[5] = { 4, 2, 2, 2, 2 };
+  const char* p = text;
+  for (int f = 0; f < 5; f++) {
+    int acc = 0;
+    for (int i = 0; i < width[f]; i++) {
+      if (*p < '0' || *p > '9') return false;
+      acc = acc * 10 + (*p - '0');
+      p++;
+    }
+    v[f] = acc;
+    if (f < 4) {
+      if (*p != sep[f]) return false;
+      p++;
+    }
+  }
+  if (*p != 0) return false;      // trailing rubbish is a refusal, not a suffix
+  return riftEpochFromCivil(v[0], v[1], v[2], v[3], v[4], out);
+}
+
 // ------------------------------------------------------------ millis deadlines
 //
 // A plain millis() > deadline comparison is not wrap-safe. millis() wraps at

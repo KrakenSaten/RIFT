@@ -1071,9 +1071,9 @@ class RiftSystemScreen : public RiftScreen {
   // A small action menu rather than hidden letter shortcuts - discoverable, and
   // it leaves the printable keys free for the text fields.
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
-              CH_DELETE, CH_DELETE_CONFIRM, LOG };
+              CH_DELETE, CH_DELETE_CONFIRM, LOG, SET_TIME };
   enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_DELCHANNEL,
-              IT_PATHMODE, IT_SCREEN, IT_DAYMODE, IT_LOG, IT_COUNT };
+              IT_PATHMODE, IT_SCREEN, IT_DAYMODE, IT_SETTIME, IT_LOG, IT_COUNT };
 
   int _log_scroll = 0;   // 0 = pinned to the newest line
 
@@ -1086,7 +1086,18 @@ class RiftSystemScreen : public RiftScreen {
       "Add channel",
       "Delete channel",
     };
-    if (i == IT_LOG) {
+    if (i == IT_SETTIME) {
+      // the current value in the label, so a wrong clock is visible without having
+      // to open the editor to find out
+      uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+      if (now < 1600000000u) {
+        StrHelper::strncpy(buf, "Set time & date (unset)", len);
+      } else {
+        int y, mo, d, h, mi;
+        riftCivilFromEpoch(now, &y, &mo, &d, &h, &mi);
+        snprintf(buf, len, "Set time (%02d:%02d)", h, mi);
+      }
+    } else if (i == IT_LOG) {
       snprintf(buf, len, "View log (%d)", riftLog().count);
     } else if (i == IT_SCREEN) {
       // A charger that does not enumerate as a USB host reads as battery, so the
@@ -1204,6 +1215,24 @@ private:
         _log_scroll = 0;   // open at the newest, which is what you came to see
         _mode = LOG;
         break;
+
+      case IT_SETTIME: {
+        // Prefilled with the current reading rather than blank: correcting four
+        // digits of a wrong year is less work than typing sixteen characters, and
+        // it shows the format by example instead of only describing it.
+        uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+        char initial[20];
+        if (now < 1600000000u) {
+          StrHelper::strncpy(initial, "2026-01-01 12:00", sizeof(initial));
+        } else {
+          int y, mo, d, h, mi;
+          riftCivilFromEpoch(now, &y, &mo, &d, &h, &mi);
+          snprintf(initial, sizeof(initial), "%04d-%02d-%02d %02d:%02d", y, mo, d, h, mi);
+        }
+        _edit.begin(initial, 16);
+        _mode = SET_TIME;
+        break;
+      }
 
       case IT_NAME:
         _edit.begin(the_mesh.getNodeName(), sizeof(((NodePrefs*)0)->node_name) - 1);
@@ -1546,6 +1575,30 @@ private:
     return 1000;
   }
 
+  int renderSetTime(DisplayDriver& display) {
+    renderHeading(display, "SET TIME");
+    display.setTextSize(1);
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 30, "YYYY-MM-DD HH:MM");
+    // Stated because it is a real property of this firmware and not an omission:
+    // every timestamp on screen is the epoch divided down with no offset, so the
+    // clock is local time throughout. Entering UTC would make the message
+    // timestamps read as UTC.
+    display.drawTextLeftAlign(4, 42, "Local time. RIFT has no timezone,");
+    display.drawTextLeftAlign(4, 54, "so this is what timestamps show.");
+
+    _edit.render(display, 4, 84, display.width() - 8);
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 116, "ENTER set   BACKSPACE delete / back");
+    display.drawTextLeftAlign(4, 132, "An impossible date is refused, not");
+    display.drawTextLeftAlign(4, 144, "corrected - check it before ENTER.");
+
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
   int renderEditName(DisplayDriver& display) {
     renderHeading(display, "NODE NAME");
     display.setTextSize(1);
@@ -1579,6 +1632,7 @@ public:
       case CH_DELETE:      return renderDeleteList(display);
       case CH_DELETE_CONFIRM: return renderDeleteConfirm(display);
       case LOG:            return renderLog(display);
+      case SET_TIME:       return renderSetTime(display);
       default: break;
     }
 
@@ -1960,6 +2014,27 @@ public:
       // deliberately a second screen rather than an immediate delete: the key is
       // not recoverable from here and the list is one keypress from the menu
       if (c == KEY_ENTER) { _mode = CH_DELETE_CONFIRM; return true; }
+      return true;
+    }
+
+    if (_mode == SET_TIME) {
+      if (c == KEY_ENTER) {
+        uint32_t epoch = 0;
+        if (!riftParseCivil(_edit.buf, &epoch)) {
+          _task->showAlert("Need YYYY-MM-DD HH:MM", 2000);
+          return true;
+        }
+        // Set directly, including backwards. The companion protocol refuses a time
+        // earlier than the current one, which is right for an automatic sync and
+        // wrong here: correcting a clock that is running ahead is the main reason
+        // to type one in by hand.
+        the_mesh.getRTCClock()->setCurrentTime(epoch);
+        riftLogf("clock set to %s", _edit.buf);
+        _task->showAlert("Clock set", 1500);
+        _mode = MENU;
+        return true;
+      }
+      if (!_edit.handleKey(c)) _mode = MENU;   // backspace on an empty field backs out
       return true;
     }
 
