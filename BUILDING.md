@@ -108,6 +108,10 @@ therefore a default that silently stops working as the image grows.
 Override with `--chunk-kb` if 192 ever stops being enough, or `--parts N` to force a
 count. `--single` writes it in one go, which is how the failure was characterised.
 
+Ruled out, so nobody repeats them: a different cable, `upload_speed` (baud is a
+no-op on native USB CDC), and `--no-stub`. The first upload of a session has
+sometimes gone through whole, which argues for something state-dependent.
+
 A failed chunk is retried four times, three seconds apart, because the error is
 often transient. If it exhausts the retries the image is partly written and the
 device will not boot - **run the tool again before power-cycling.** It is not

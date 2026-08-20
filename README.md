@@ -54,7 +54,6 @@ Other documents in this repository:
 | [`BUILDING.md`](BUILDING.md) | Toolchain, environment traps, commands, CI, supply chain |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | How RIFT fits together, and why each awkward part is that way |
 | [`HANDOFF.md`](HANDOFF.md) | Working notes — hardware facts, protocol details, open items |
-| [`WEEKEND-HANDOVER.md`](WEEKEND-HANDOVER.md) | Session log from the machine this moved to over a weekend. Superseded by `HANDOFF.md` for open items; kept for the measurements and the two dead ends it records |
 | [`design/handoff.md`](design/handoff.md) | Screen design spec at 1:1 device coordinates |
 
 ---
@@ -152,44 +151,18 @@ Original LilyGO T-Deck — **not** T-Deck Pro:
 Five screens, reached from a nav bar along the bottom. The first is labelled
 **RIFT** and is the home screen; the wordmark doubles as the home tab.
 
-<table>
-<tr>
-<td width="50%"><img src="design/screens/mesh.png" alt="The home screen: a state word set large on the left, a radar box with one blip on the right, node count and link RSSI/SNR beneath, and the radio configuration line" width="100%"></td>
-<td width="50%"><img src="design/screens/nodes.png" alt="NODES: four columns headed DIRECT, 1 HOP, 2 HOPS and 3 HOPS, with node markers and names, a route line drawn from YOU through two repeaters to the selected node, and a detail bar showing the selected node and ENTER: DM" width="100%"></td>
-</tr>
-<tr>
-<td><strong>RIFT</strong> — is the mesh alive around me</td>
-<td><strong>NODES</strong> — who I can reach, and how far away</td>
-</tr>
-<tr>
-<td><img src="design/screens/radar.png" alt="RADAR: the device count 35 set large, DEVICES NEARBY beside it, a signal-strength band strip, and a list of the strongest devices with dBm, name and type" width="100%"></td>
-<td><img src="design/screens/system.png" alt="SYSTEM: an ACTIONS menu on the left with the first item highlighted and an explanatory note beneath it, DIAGNOSTICS in a label-and-value column on the right, and a footer reading PRIVATE KEY EXPORT DISABLED" width="100%"></td>
-</tr>
-<tr>
-<td><strong>RADAR</strong> — is there anything around me, and is that changing</td>
-<td><strong>SYSTEM</strong> — actions left, read-only diagnostics right</td>
-</tr>
-</table>
+| Screen | What it answers |
+|---|---|
+| **RIFT** | Is the mesh alive around me |
+| **NODES** | Who I can reach, and how far away |
+| **RADAR** | Is there anything around me, and is that changing |
+| **COMMS** | Conversations, channels and direct |
+| **SYSTEM** | Actions left, read-only diagnostics right |
 
-<table>
-<tr>
-<td width="50%"><img src="design/screens/nodes-night.png" alt="NODES in night mode: white text and markers on black, with the accent in orange" width="100%"></td>
-<td width="50%"><img src="design/screens/nodes-day.png" alt="NODES in day mode: black text and markers on white, with the same orange accent used as a fill rather than as text" width="100%"></td>
-</tr>
-<tr>
-<td colspan="2"><strong>Night and day</strong> — the same geometry with a swapped colour table, toggled from SYSTEM. The accent is the same value in both, but on white it becomes a fill with the text reversed out of it rather than text in its own right.</td>
-</tr>
-</table>
+Night and day are the same geometry with a swapped colour table, toggled from
+SYSTEM. The accent keeps its value in both, but on white it becomes a fill with the
+text reversed out of it rather than text in its own right.
 
-> These are design renderings from `design/`, drawn at 1:1 device resolution and
-> shown at 2x — not photographs of the panel. The firmware has since moved past
-> them in a few places, all deliberate: **there is no longer a title bar across
-> the top** — the wordmark and battery live in the nav bar and each screen carries
-> its own heading — the home screen headlines mesh receive activity rather than the
-> companion link, the SYSTEM menu carries a sixth item for day mode, the
-> diagnostics column has two extra rows for boot timings, and the wordmark is
-> drawn as `setTextSize(3)` text because a 1-bit bitmap would need hand-pixelling
-> first.
 
 **Trackball click is Enter** — it selects, activates and sends, the same as the
 keyboard's Enter. Screen changes are covered by **rolling the trackball
@@ -357,106 +330,16 @@ limitations above are real.
 over the companion protocol next to `FIRMWARE_VER_CODE`.
 
 Every screen from the original design concept is implemented and verified on
-physical hardware. Resource use: ~50 % of internal static RAM, ~25 % of the 6.5 MB
-app partition. 123 native tests across eight suites.
+physical hardware. Resource use: ~53 % of internal static RAM, ~25 % of the 6.5 MB
+app partition. 128 native tests across eight suites.
 
-**0.6.0** adds two things and fixes the data underneath one of them.
+**0.6.0** colour-codes channels, adds an event log under SYSTEM, and fixes the node
+data underneath NODES: the path cache evicted by wall clock, so a node whose RTC was
+never set - RIFT's own case - cached exactly one neighbour however many it heard.
 
-**Channels are colour-coded.** Four colours, and the count is a result rather than a
-choice: a channel's identity cannot swap between night and day mode, so one value has
-to clear 4.5:1 against both black and white, which leaves a luminance band of
-0.175–0.183 and forbids any variation in lightness. They differ by hue alone, at least
-88° apart, at least 45° from the accent. The tab border carries the colour for
-channels you are not on; the name beside each message carries it in the history. Along
-the way the analysis turned out to have computed contrast on the source hex rather than
-the RGB565 the panel is given — every candidate failed against white once quantised,
-so they were re-chosen by sweeping RGB565 directly. `design/channel-colours.md` has the
-sweep.
-
-**SYSTEM has a log.** 128 lines, RAM only. The diagnostics on that screen show the
-current value of everything and the history of nothing, so a fault that had passed
-left no trace. It records adverts heard and sent, messages in and out with their text,
-acks — and their absence, which is the worst silent failure this firmware has — saves
-and save failures, GPS fixes gained and lost, battery crossing downward through 20, 10
-and 5 percent, channels added and deleted, the boot time with its slowest phase, and
-the reset reason, which in the log survives the next boot. The five-line note about
-adverts left the screen to make room; it is in this README now.
-
-**And the node data underneath NODES was wrong.** The path cache evicted by wall
-clock, so on a node whose RTC was never set — no companion app, no GPS fix, which is
-RIFT's own case — every timestamp was zero, the eviction scan never moved off the
-first slot, and the cache held exactly one node however many it heard. Age was wall
-clock minus wall clock, so every node read as just heard, forever. `AdvertPath` now
-carries a monotonic stamp and an explicit occupancy flag: monotonic time for
-durations, wall clock for dates, and the two not mixed. SYSTEM reports the cache
-occupancy and eviction count, because whether 16 slots is enough is a question to
-measure rather than answer.
-
-A selected node in NODES could also have no marker drawn — columns hold three, the
-selection indexes all of them, and touch could only reach the plotted ones. The
-selected node is now placed before its column can fill.
-
-Flashing no longer needs `--parts`: the tool derives the split from the image size,
-because the length a write survives does not grow with the firmware, and retries a
-failed chunk rather than leaving the image half written.
-
-**0.5.0** is a correctness release. Nothing on screen moved except the bottom of
-SYSTEM, and everything that changed was something that would have gone wrong
-quietly.
-
-The message log no longer writes through a temporary file. The swap it performed
-was never atomic — `remove` and `rename` are two operations, with a window between
-them holding no log at all — and it cost four filesystem operations to buy a
-guarantee it did not deliver. The write is now one buffered call per 512 bytes
-instead of three per message, in place, and `load()` is what makes that safe: it
-keeps the records that arrived and discards the rest. A save that is interrupted
-costs the newest messages rather than the file. SYSTEM still reports what the write
-cost, because that number is the only evidence the main loop is not being starved.
-
-Every `millis()` deadline is wrap-safe. The one that mattered was the render
-interval: for the last interval before the 49.7-day wrap it would have redrawn the
-whole screen on every pass through the main loop, contending with the radio on the
-shared SPI bus, with no watchdog to notice the mesh going quiet. Fixing it exposed
-a second trap — `_next_refresh = 0` meant "redraw now" only because the comparison
-was naive, and under a wrap-safe one it would have been ignored for 25 days of
-every cycle. "Due now" is written relative to now.
-
-Two input bugs. Choosing a Nordic form deleted two characters on the assumption
-that two had just been typed; typing `Hei`, then `a`, backspace, `a` produced
-`Heæ`. The pair is now a fact read from the buffer rather than inferred from
-keypress history. And a keystroke arriving in the same loop iteration as a tap that
-navigated away is dropped rather than delivered to a screen the user can no longer
-see.
-
-The UTF-8 decoder rejects overlong forms, surrogates and anything above U+10FFFF.
-Only the overlong forms had a consequence: they decode into the ASCII range and
-were then dropped as control characters, so a sender could put bytes on the wire
-that this display silently swallowed while other clients rendered them.
-
-**0.4.0** answers a different question on the home screen and reworks the chrome.
-It headlines mesh receive activity — whether this radio is somewhere with a live
-network — instead of the USB/BLE companion link, which a standalone node read as
-`STANDBY` forever. Screens gained a lifecycle, so an arriving message no longer
-disturbs a RADAR scan or wipes a channel key being read, and dismissing the popup
-hands back the screen you were on rather than dropping you home. The popup lists
-six messages instead of paging one at a time. Incoming emoji no longer arrive as
-runs of blocks. The title bar is gone: the wordmark and battery moved into the nav
-bar, and each screen carries its own heading, which gives COMMS one more message
-of history.
-
-Earlier: 0.3.1 closed a stack overflow in the channel-key decoder and seven places
-where the interface stated something it could not know. 0.3.0 rebuilt all five
-screens to the design in `design/` and fixed four real bugs found along the way.
-0.2.0 added the browser flasher and the boot screen, disabled MeshCore's private-key
-export, and took boot from 243 seconds to 5.1.
-
-Next, roughly by value:
-
-- Hand-drawn glyphs for the emoji that still show as a block
-- Rebucket the NODES hop columns; on a real mesh nearly everything lands in `3+`
-- Per-contact detail view (paths, keys, last-heard history)
-
-[`HANDOFF.md`](HANDOFF.md) carries the full open-items list with the reasoning.
+Release notes for every version, in full, are on the
+[releases page](https://github.com/KrakenSaten/RIFT/releases). Each tag carries its
+own, so they are not repeated here.
 
 ---
 

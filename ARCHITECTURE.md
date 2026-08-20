@@ -222,6 +222,5 @@ backlight is on or off with no level to read.
 
 The chrome has since moved on from the spec: the 16px title bar was removed, its
 wordmark and battery moved into the nav bar, and per-screen context became a
-heading in each screen's own body. `design/handoff.md` records that as superseded
-rather than rewriting it, so the renderings in `design/screens/` still match what
-they were drawn for.
+heading in each screen's own body. `design/DESIGN-HANDOFF.md` is the current
+reference; `design/handoff.md` is the original concept.

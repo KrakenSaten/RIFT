@@ -16,97 +16,38 @@ with no phone app.
 
 ---
 
-## 1. Environment — three things that will waste your time otherwise
+## 1. Environment
 
-**PlatformIO in its own venv.** Installing it into a shared Python upgraded
-another project's pinned dependencies once already.
+`BUILDING.md` has the setup, the three gotchas that waste an afternoon (PlatformIO
+in its own venv, an ASCII-only `PLATFORMIO_CORE_DIR`, and no host compiler for the
+tests), the upload failures and what does not fix them. It is not repeated here -
+two copies means one of them is wrong and you cannot tell which.
 
-```bash
-python -m venv C:/dev/RIFT/.venv
-C:/dev/RIFT/.venv/Scripts/python.exe -m pip install platformio
-```
-
-**`PLATFORMIO_CORE_DIR` must be ASCII-only.** A profile path containing `é`
-makes the toolchain fail to find `Arduino.h` / `Stream.h` — a completely
-misleading error.
+This machine:
 
 ```bash
-export PLATFORMIO_CORE_DIR="C:/dev/.platformio"
+cd /c/dev/RIFT
+export PLATFORMIO_CORE_DIR=C:/dev/.platformio
+.venv/Scripts/pio.exe run -e LilyGo_TDeck_rift
+.venv/Scripts/python.exe tools/rift-flash.py --port COM5
 ```
 
-**Unit tests need a host compiler.** PlatformIO does not bring one; without it
-`pio test -e native` fails with `'g++' is not recognized` and the suite can only
-run in CI. That is how a missing `main()` once reached the branch. On Windows,
-MSYS2: install from msys2.org, then in the UCRT64 shell
+Build all five T-Deck environments before committing. RIFT edits shared code, so
+`_companion_radio_usb`, `_companion_radio_ble`, `_repeater` and `_kiss_modem` are
+the regression check:
 
 ```bash
-pacman -S --needed mingw-w64-ucrt-x86_64-gcc
+.venv/Scripts/pio.exe run -e LilyGo_TDeck_rift -e LilyGo_TDeck_companion_radio_usb -e LilyGo_TDeck_companion_radio_ble -e LilyGo_TDeck_repeater -e LilyGo_TDeck_kiss_modem
 ```
 
-and put `C:\msys64\ucrt64\bin` on PATH. Verified with GCC 16.1.0 and 16.2.0.
-
-### Commands
+There is no host g++ on this box, so `pio test` cannot run here. The suite is built
+with the zig compiler from the venv instead, which is how it gets verified before a
+push rather than by CI discovering it:
 
 ```bash
-pio test -e native -e native_kiss_modem
+GT=.pio/libdeps/native/googletest/googletest
+.venv/Scripts/python.exe -m ziglang c++ -std=c++17 -w -I "$GT/include" -I "$GT"   test/test_rift_logic/test_rift_logic.cpp "$GT/src/gtest-all.cc" -o /tmp/rl.exe && /tmp/rl.exe
 ```
-
-```bash
-pio run -e LilyGo_TDeck_rift
-```
-
-```bash
-pio run -e LilyGo_TDeck_rift -t upload --upload-port COM5
-```
-
-Always build all five T-Deck environments before committing — RIFT edits shared
-code, so `_companion_radio_usb`, `_companion_radio_ble`, `_repeater` and
-`_kiss_modem` are the regression check:
-
-```bash
-pio run -e LilyGo_TDeck_rift -e LilyGo_TDeck_companion_radio_usb -e LilyGo_TDeck_companion_radio_ble -e LilyGo_TDeck_repeater -e LilyGo_TDeck_kiss_modem
-```
-
-**Upload says "Could not open COM5, the port doesn't exist" while the port is
-clearly listed?** Something holds it. Usually a serial monitor — or the browser
-tab with the web flasher, since WebSerial keeps the port until the tab closes.
-
-**Upload dies partway through with the USB device dropping off the bus?**
-`pio run -t upload` cannot always write the whole app partition in one
-operation. Seen failing reproducibly after roughly 1.2 MB, with
-`Cannot configure port` or `The chip stopped responding` — and the failure point
-moves with the transfer, not with the address, so it is the transport rather than
-the image.
-
-What does not help: a different cable, and `upload_speed`. Baud is a no-op here;
-this is native USB CDC, so lowering it changes nothing and the run takes exactly
-as long. `--no-stub` only moved the failure earlier.
-
-**Flash with `tools/rift-flash.py --port COMn`, and let it choose the split.** A
-long write fails part way through, and the threshold is the transfer length rather
-than the flash address. The tool aims for 192KB per write and derives the count from
-the image size, because the count that works grows with the firmware: four parts was
-fine at 1.54MB and fails at 1.55MB, where eight works. A failed chunk is retried
-four times three seconds apart; if it gives up, the image is partly written and the
-device will not boot, so run the tool again before power-cycling. Why the transport
-gives up on a long write is still unknown.
-
-What works is splitting the write. The app is one image at `0x10000`, so cut
-`firmware.bin` at a sector-aligned offset and write the pieces separately —
-786432 (`0xC0000`) was used while two halves still worked, giving `0x10000` and
-`0xD0000`. Each half
-completes in under five seconds with its hash verified, and esptool verifies per
-chunk, so the two together cover the whole image.
-
-Use `--after no_reset` on the first half only if the second can reconnect
-without a reset — it could not, so `--before default_reset` on both is what
-actually worked. The chip is never at risk: the ROM bootloader is in ROM and
-still enumerates after a failed write, so a half-written app is always
-recoverable.
-
-Cause not established. The first upload of that session went through in 8.9 s,
-which argues for something state-dependent rather than a hard size limit. The
-firmware is 1.61 MB and growing, so expect to need this every time.
 
 ---
 
@@ -239,7 +180,9 @@ than any amount of code reading.
 
 ## 5. The screen design
 
-`design/handoff.md` is the specification, with 1:1 device coordinates. `design/screens/`
+`design/DESIGN-HANDOFF.md` is the current reference: measured palette and contrast,
+the RGB565 constraint, and the NODES problem stated so it can be acted on.
+`design/handoff.md` is the original concept and predates the chrome rework.
 holds renderings. Two rules run through it:
 
 - **Never encode data in brightness where shape can carry it.** Reflected light
@@ -405,10 +348,6 @@ confusing the wire form with the display form is this feature's sharpest trap.
    antialiasing, so the list has to be chosen for shapes that survive that size.
    An unrecognisable custom glyph is worse than a block: a block admits it cannot
    draw the thing, a vague shape looks like it means something specific.
-9. **The design renderings in `design/screens/` show the old chrome.** They still
-    match `design/handoff.md` as originally written, which is why both are marked
-    superseded rather than rewritten, but the README now has to caveat them. Either
-    redraw them or accept the caveat permanently.
 
 ---
 

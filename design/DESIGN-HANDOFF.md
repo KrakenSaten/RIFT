@@ -162,8 +162,9 @@ the home screen reporting a USB link nobody cared about.
 | **COMMS** | Conversations | Works. Channel strip along the top, history bottom-up, compose line. Channel colours in the strip border and beside each message |
 | **SYSTEM** | Settings, and what is this device doing? | Works, and crowded. Left column actions, right column diagnostics, and a 128-line event log |
 
-Renderings in `design/screens/` are **stale**: they show the removed title bar and
-the old chrome. Treat them as intent, not as reference.
+There are no current screen renderings. The old ones showed the removed title bar
+and were deleted rather than kept behind a caveat: a wrong picture of a UI is worse
+than none. New ones come out of this design pass.
 
 ---
 
@@ -291,8 +292,6 @@ Worth keeping whatever the design becomes.
 |---|---|
 | `channel-colours.md` | Current. The RGB565 sweep, and the record of getting it wrong first |
 | `handoff.md` | The original design concept. Superseded in places; the chrome it describes is gone |
-| `screens/*.png` | **Stale.** Show the removed title bar |
-| `RIFT design review.zip` | Earlier review material |
 
 The firmware itself is the reference for anything visual:
 `examples/companion_radio/ui-rift/UITask.cpp`.
