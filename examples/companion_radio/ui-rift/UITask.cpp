@@ -120,6 +120,15 @@ static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::path
 #define RIFT_CHAR_W         6   // Adafruit GFX classic font cell at setTextSize(1)
 #define RIFT_LINE_H        12   // row pitch used throughout this codebase
 
+// The CP437 middle dot, built from its byte rather than written as an escape. This
+// file is UTF-8, so a typed dot is two bytes and the panel draws two unrelated
+// blocks - the same trap the full block 0xDB fell into, and the first attempt at
+// this line fell into it again: the escape was interpreted on the way into the file
+// and the macro ended up holding U+00FA as two bytes. A byte array cannot be
+// mis-encoded by anything between here and the compiler. Used as a %s argument, not
+// concatenated, because it is an array and not a literal.
+static const char RIFT_DOT[] = { (char) 0xFA, 0 };
+
 // Shared in-memory message log. MeshCore keeps no message history of its own
 // (DataStore holds identity/prefs/contacts/channels only, and MyMesh's offline
 // queue is private raw protocol frames), so the UI owns this - same approach as
@@ -1052,7 +1061,11 @@ public:
     char tmp[40];
     display.setTextSize(1);
     display.setColor(rift_pal.fg);
-    sprintf(tmp, "NODES %d", the_mesh.getNumContacts());
+    // "NODES 256" answered neither question: 256 is how many contacts are stored,
+    // which says nothing about whether any of them are around right now. Stored comes
+    // from the persisted contact table, heard from the session path cache.
+    sprintf(tmp, "%d STORED %s %d HEARD", the_mesh.getNumContacts(),
+            RIFT_DOT, the_mesh.getPathCacheUsed());
     display.drawTextLeftAlign(2, 170, tmp);
 
     sprintf(tmp, "LINK %.0f / %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
@@ -4180,14 +4193,29 @@ public:
       // that is what the channel is named.
       uint16_t chan_col = originColour(p->origin);
       display.setColor(chan_col != RIFT_CHAN_COL_NONE ? chan_col : rift_pal.mid);
-      display.drawTextEllipsized(42, y, 190, filtered_origin);
+      display.drawTextEllipsized(38, y, 232, filtered_origin);
 
+      // The right end of this row answers "what happened to this packet", and the
+      // hop count is the same kind of answer as the delivery state - so it goes
+      // here rather than in front of the name, where "14:52 (6) Public:" read as
+      // two clock times. Delivery wins the slot when there is one: a channel
+      // message has no ack truth, so the hop count stands alone there.
       if (ack != NULL) {
-        // green for delivered, accent for a send that never landed. Channel
-        // messages get nothing, because no ack exists to report.
+        // green for delivered, accent for a send that never landed
         bool ok = (strncmp(ack, "ACK", 3) == 0);
         display.setColor(ok ? rift_pal.ok : (ack[0] == '.' ? rift_pal.mid : rift_pal.accent));
         display.drawTextRightAlign(display.width() - 2, y, ack);
+      } else {
+        int hops = 0;
+        bool direct = false;
+        if (riftOriginHops(p->origin, &hops, &direct)) {
+          char hb[12];
+          if (direct)        strcpy(hb, "direct");
+          else if (hops == 1) strcpy(hb, "1 hop");
+          else                snprintf(hb, sizeof(hb), "%d hops", hops);
+          display.setColor(rift_pal.mid);
+          display.drawTextRightAlign(display.width() - 2, y, hb);
+        }
       }
 
       display.setColor(rift_pal.fg);

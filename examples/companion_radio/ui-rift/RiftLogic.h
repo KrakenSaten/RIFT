@@ -144,6 +144,35 @@ static inline bool riftOriginName(const char* origin, char* out, size_t out_size
   return true;
 }
 
+// The hop count out of the same decoration riftOriginName strips off. newMsg writes
+// "(2) name:" for a routed message and "(D) name:" for a direct one, and until now
+// that number was thrown away by every reader - so the sender line showed
+// "14:52 (6) Public:", which reads as two clock times.
+//
+// Returns false for an outgoing entry ("to name:") and for anything without the
+// marker: there is no hop count to report for a message this node sent.
+static inline bool riftOriginHops(const char* origin, int* hops, bool* direct) {
+  if (origin == NULL || origin[0] != '(') return false;
+  const char* close = strchr(origin, ')');
+  if (close == NULL || close[1] != ' ') return false;
+
+  if (origin[1] == 'D' && close == origin + 2) {
+    if (direct) *direct = true;
+    if (hops) *hops = 0;
+    return true;
+  }
+  int v = 0, digits = 0;
+  for (const char* p = origin + 1; p < close; p++) {
+    if (*p < '0' || *p > '9') return false;
+    v = v * 10 + (*p - '0');
+    if (++digits > 2) return false;      // a hop count is never three digits
+  }
+  if (digits == 0) return false;
+  if (direct) *direct = false;
+  if (hops) *hops = v;
+  return true;
+}
+
 #define RIFT_CHAN_COL_NONE  0x0000
 
 static inline uint16_t riftChannelColour(int channel_idx) {

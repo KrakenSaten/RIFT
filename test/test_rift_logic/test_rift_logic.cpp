@@ -524,6 +524,30 @@ static double relativeLuminance(uint16_t v) {
 // the feature was broken on the device. These strings are the ones the device
 // printed when it was asked.
 
+TEST(OriginHops, ReadsWhatOriginNameStrips) {
+    int h = -1; bool d = true;
+    ASSERT_TRUE(riftOriginHops("(0) #test:", &h, &d));  EXPECT_EQ(0, h);  EXPECT_FALSE(d);
+    ASSERT_TRUE(riftOriginHops("(6) Public:", &h, &d)); EXPECT_EQ(6, h);  EXPECT_FALSE(d);
+    ASSERT_TRUE(riftOriginHops("(12) mesh:", &h, &d));  EXPECT_EQ(12, h); EXPECT_FALSE(d);
+    // "(D)" is a direct path, not a count
+    ASSERT_TRUE(riftOriginHops("(D) Bob:", &h, &d));    EXPECT_TRUE(d);
+}
+
+TEST(OriginHops, RefusesWhatCarriesNoCount) {
+    int h = 99; bool d = false;
+    // an outgoing entry: this node sent it, so there is no hop count to report
+    EXPECT_FALSE(riftOriginHops("to #test:", &h, &d));
+    EXPECT_FALSE(riftOriginHops("#test", &h, &d));
+    EXPECT_FALSE(riftOriginHops("(x) name:", &h, &d));
+    EXPECT_FALSE(riftOriginHops("(1", &h, &d));          // unclosed
+    EXPECT_FALSE(riftOriginHops("(1)name:", &h, &d));     // no space after
+    EXPECT_FALSE(riftOriginHops("(123) name:", &h, &d));  // never three digits
+    EXPECT_FALSE(riftOriginHops("() name:", &h, &d));
+    EXPECT_FALSE(riftOriginHops("", &h, &d));
+    EXPECT_FALSE(riftOriginHops(NULL, &h, &d));
+    EXPECT_EQ(99, h) << "a refusal must not write to the output";
+}
+
 TEST(OriginName, IncomingCarriesTheHopMarker) {
     char out[64];
     ASSERT_TRUE(riftOriginName("(0) #test:", out, sizeof(out)));
