@@ -61,6 +61,9 @@ extern int rift_nav_unread;
 // Computed once per frame in loop(); the title bar used to read the ADC on every
 // call instead.
 extern int rift_nav_batt_pct;
+// Which SYSTEM page is showing. The nav bar reads it to print 1/2 where the battery
+// percentage sits on the other four screens; only SYSTEM writes it.
+extern int rift_system_page;
 
 // RIFT's screens need four things UIScreen has no notion of. They live here
 // rather than in src/helpers/ui/UIScreen.h deliberately: that header is shared

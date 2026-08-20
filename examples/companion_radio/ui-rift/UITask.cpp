@@ -592,8 +592,16 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   // mid rather than fg: this is chrome, and fg would make it compete with the
   // active nav label. accent when low, which is the one case worth interrupting.
   char batt[8];
-  sprintf(batt, "%d%%", rift_nav_batt_pct);
-  display.setColor(rift_nav_batt_pct <= 15 ? rift_pal.accent : rift_pal.mid);
+  if (curr_idx == RIFT_NAV_SYSTEM) {
+    // SYSTEM has two pages and nowhere else to say which one you are on. The
+    // battery is on the other four screens, so nothing is lost by borrowing the
+    // slack here for the page number.
+    sprintf(batt, "%d/2", rift_system_page + 1);
+    display.setColor(rift_pal.mid);
+  } else {
+    sprintf(batt, "%d%%", rift_nav_batt_pct);
+    display.setColor(rift_nav_batt_pct <= 15 ? rift_pal.accent : rift_pal.mid);
+  }
   display.drawTextRightAlign(display.width() - 2, 228, batt);
 }
 
@@ -810,6 +818,10 @@ void riftSaveSettings() {
 }
 int rift_nav_unread = 0;
 int rift_nav_batt_pct = 0;
+// Which SYSTEM page is showing, so the nav bar can say 1/2 in the slack where the
+// battery percentage normally sits. Only SYSTEM writes it; the other four screens
+// never look at it, and the percentage is still on all of them.
+int rift_system_page = 0;
 
 void riftApplyPalette(bool day) {
   rift_day_mode = day;
@@ -861,11 +873,34 @@ void riftDrawBootScreen(DisplayDriver& display, const char* status) {
   display.setTextSize(3);
   display.drawTextLeftAlign(x, 78, "RIFT");
 
-  // the accent rule cuts through the wordmark and runs past it. The design has
-  // it slightly sloped; DisplayDriver exposes no line primitive, only rects, so
-  // this is the horizontal equivalent.
-  display.setColor(UIColor::corp_blue);
-  display.fillRect(x - 4, 92, 140, 2);
+  // Wordmark 2c: the letters cut along a shallow diagonal with the accent lying in
+  // the cut, edge to edge. The horizontal blue rule that used to be here was the
+  // stand-in for a slope the driver could not draw; a slope per column can be, and
+  // the design now asks for one.
+  //
+  // seamY is the design's: y 96 at x=0 falling to y 48 at x=319, about -8.8 degrees.
+  //
+  // DEVIATION FROM THE SPEC, deliberately. The recipe asks for two text draws offset
+  // 3px so the two halves shear along the seam. That cannot be composed with this
+  // driver: it has fillRect and drawRect and no clipping, so whichever text is drawn
+  // second spills across the seam, and the blank that removes the spill also removes
+  // the half it was meant to keep - in either order. The rendering was produced in a
+  // browser, where clipping exists. What is here is the same cut, the same accent in
+  // the same gap, edge to edge, crossing no letter stem - without the lateral shear.
+  // Adding the shear needs a hand-pixelled bitmap or a clip the driver lacks.
+  #define RIFT_SEAM_Y(px) (92 - ((px) - 30) * 12 / 78)
+
+  // the gap. 4px, so the 2px accent has a pixel of air either side - which is what
+  // keeps it reading as a seam rather than as a line struck through the glyphs.
+  display.setColor(rift_pal.bg);
+  for (int px = x; px < x + 132; px++) {
+    display.fillRect(px, RIFT_SEAM_Y(px) - 1, 1, 4);
+  }
+
+  display.setColor(rift_pal.accent);
+  for (int px = 0; px < display.width(); px++) {
+    display.fillRect(px, RIFT_SEAM_Y(px), 1, 2);
+  }
 
   // wide tracking, as drawn - Adafruit GFX has no letter-spacing control
   display.setColor(UIColor::secondary_txt);
@@ -1102,6 +1137,11 @@ class RiftSystemScreen : public RiftScreen {
               IT_PATHMODE, IT_SCREEN, IT_DAYMODE, IT_SETTIME, IT_LOG, IT_COUNT };
 
   int _log_scroll = 0;   // 0 = pinned to the newest line
+
+  // 0 = actions, 1 = readings. Two pages rather than two columns with scrollbars:
+  // neither column got more room that way, and the right one is the one that grows
+  // every time a diagnostic is added.
+  int _page = 0;
 
   // most labels are fixed; the path-mode row shows its current value
   void itemLabel(int i, char* buf, size_t len) {
@@ -1655,33 +1695,56 @@ public:
       default: break;
     }
 
+    rift_system_page = _page;
+    return (_page == 0) ? renderActions(display) : renderReadings(display);
+  }
+
+  int renderActions(DisplayDriver& display) {
     display.setTextSize(1);
 
     char tmp[72];
 
-    // Two columns: things you can do on the left, things you can only read on
-    // the right. As one mixed list the actions scrolled away underneath the
-    // diagnostics as the latter grew.
-    //
-    // The divider is at 160 rather than the midpoint because the longest action
-    // is "Send advert (neighbours)" - 24 chars, 144px.
-    display.setColor(rift_pal.rule);
-    display.fillRect(160, 2, 1, 224);
-
+    // Full width now. The actions and the readings used to share the screen as two
+    // columns, which meant neither got more room as the readings grew - and the
+    // readings are the half that grows. They are two pages instead.
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 4, "ACTIONS");
+    display.drawTextLeftAlign(2, 2, "ACTIONS");
+    display.drawTextRightAlign(318, 2, "PAGE 1/2 - RIGHT: READINGS");
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 16, display.width(), 1);
 
     int y = MENU_TOP;
-    for (int i = 0; i < IT_COUNT; i++, y += RIFT_LINE_H) {
+    for (int i = 0; i < IT_COUNT; i++) {
       itemLabel(i, tmp, sizeof(tmp));
-      if (i == _sel) {
+      bool sel = (i == _sel);
+      if (sel) {
         display.setColor(rift_pal.accent);
-        display.fillRect(0, y - 2, 158, 12);
+        display.fillRect(0, y - 2, display.width(), 12);
         display.setColor(0xFFFF);
       } else {
         display.setColor(rift_pal.fg);
       }
       display.drawTextLeftAlign(4, y, tmp);
+      y += RIFT_LINE_H;
+
+      // One line under the selected action, and only for the four that cost
+      // something you cannot get back. These are not descriptions - they are the
+      // warnings that used to be spread over five lines of prose, attached to the
+      // action they belong to and shown only when it is the one selected.
+      if (sel) {
+        const char* note = NULL;
+        switch (i) {
+          case IT_ADVERT:     note = "direct RF only - use whole mesh before a first DM"; break;
+          case IT_CHANNEL:    note = "#hashtag channels are not secret"; break;
+          case IT_DELCHANNEL: note = "the key is lost with it"; break;
+          default: break;
+        }
+        if (note != NULL) {
+          display.setColor(rift_pal.mid);
+          display.drawTextLeftAlign(4, y, note);
+          y += RIFT_LINE_H;
+        }
+      }
     }
 
     // The five-line note explaining neighbours-vs-whole-mesh used to sit here.
@@ -1690,25 +1753,70 @@ public:
     // had grown to nine items and needed the room. The explanation is not lost -
     // it moved to the README, which is where a first-time question gets asked.
 
-    // ---- right column: read-only ----
-    const int LX = 166;
+    // ---- footer, left column only ----
+    // This was a full-width band with a rule at y=178. The diagnostics column
+    // has grown to fifteen rows, which puts its last row at y=188, so BOOT and
+    // SLOWEST were drawn underneath the footer text and neither was readable.
+    // The footer only ever described the left column, so it moves there, into
+    // the space below the note, and the right column gets the full height.
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 196, display.width(), 1);
+    // Back to the full name now that the row is 320px wide rather than 158: it was
+    // shortened to "KEY EXPORT" only because that plus "DISABLED" came to 156px in
+    // a 158px column with no gap between them.
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, 4, "DIAGNOSTICS");
+    display.drawTextLeftAlign(2, 202, "PRIVATE KEY EXPORT");
+    display.setColor(rift_pal.ok);
+    display.drawTextRightAlign(318, 202, "DISABLED");
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(2, 214, "up/down select, ENTER activates");
+    display.setColor(rift_pal.mid);
+    sprintf(tmp, "v%s", RIFT_VERSION);
+    display.drawTextRightAlign(318, 214, tmp);
 
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
+  // One group heading: the label, and a rule under it that stops at the column edge
+  // so the two columns read as two lists rather than one wrapped one.
+  void group(DisplayDriver& display, const char* label, int x, int y) {
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(x, y, label);
+    display.setColor(rift_pal.rule);
+    display.fillRect(x, y + 10, (x < 160) ? 154 : 152, 1);
+  }
+
+  // Page 2 - readings. Grouped rather than one long column: seventeen label/value
+  // rows in a single list is a wall, and the groups say which subsystem a row
+  // belongs to, which is the first thing you want when a value looks wrong.
+  int renderReadings(DisplayDriver& display) {
+    display.setTextSize(1);
+    char tmp[72];
+    static const int GROUP_TOP = 20;
+    int CX = 2, CR = 158;
+    int y = GROUP_TOP;
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(160, 2, 1, 224);
+
+    group(display, "DEVICE", CX, 4);
+
+    
     // 14px further up than before, which this column can use: it grows downward
     // as boot timings are appended and was the closest to running out of room.
-    y = 20;
-    display.drawTextLeftAlign(LX, y, "NODE");
+    y = GROUP_TOP;
+    display.drawTextLeftAlign(CX, y, "NODE");
     display.setColor(rift_pal.fg);
-    display.drawTextRightAlign(display.width() - 2, y, the_mesh.getNodeName());
+    display.drawTextRightAlign(CR, y, the_mesh.getNodeName());
     y += RIFT_LINE_H;
 
 #ifdef RIFT_INPUT_KEYBOARD
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "KEYBOARD");
+    display.drawTextLeftAlign(CX, y, "KEYBOARD");
     // status is the only thing colour carries here, and only pass or fail
     display.setColor(rift_keyboard.isPresent() ? rift_pal.ok : rift_pal.accent);
-    display.drawTextRightAlign(display.width() - 2, y,
+    display.drawTextRightAlign(CR, y,
                                rift_keyboard.isPresent() ? "ok" : "not found");
     y += RIFT_LINE_H;
 
@@ -1719,14 +1827,14 @@ public:
     // thrown away rather than not existing - which is the case for the arrow keys,
     // and is how to find out whether SYM emits anything at all.
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "LAST KEY");
+    display.drawTextLeftAlign(CX, y, "LAST KEY");
     display.setColor(rift_pal.fg);
     sprintf(tmp, "%d / %d", _task->lastKeyCode(), (int) rift_keyboard.lastSeen());
-    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    display.drawTextRightAlign(CR, y, tmp);
     y += RIFT_LINE_H;
 
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "I2C BUS");
+    display.drawTextLeftAlign(CX, y, "I2C BUS");
     display.setColor(rift_pal.fg);
     tmp[0] = 0;
     for (int i = 0; i < rift_keyboard.seenCount() && i < 4; i++) {
@@ -1735,13 +1843,13 @@ public:
       strcat(tmp, hex);
     }
     if (rift_keyboard.seenCount() == 0) strcpy(tmp, "empty");
-    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    display.drawTextRightAlign(CR, y, tmp);
     y += RIFT_LINE_H;
 #endif
 
 #ifdef RIFT_INPUT_TOUCH
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "TOUCH");
+    display.drawTextLeftAlign(CX, y, "TOUCH");
     if (rift_touch.isPresent()) {
       display.setColor(rift_pal.fg);
       sprintf(tmp, "%d,%d", _task->lastTouchX(), _task->lastTouchY());
@@ -1749,13 +1857,13 @@ public:
       display.setColor(rift_pal.accent);
       strcpy(tmp, "not found");
     }
-    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    display.drawTextRightAlign(CR, y, tmp);
     y += RIFT_LINE_H;
 #endif
 
 #if ENV_INCLUDE_GPS == 1
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "GPS");
+    display.drawTextLeftAlign(CX, y, "GPS");
     // accent because GPS varies between units and people ask about it, not
     // because anything is wrong
     if (_task->hasGPSHardware()) {
@@ -1771,7 +1879,7 @@ public:
       display.setColor(rift_pal.accent);
       strcpy(tmp, "not found");
     }
-    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    display.drawTextRightAlign(CR, y, tmp);
     y += RIFT_LINE_H;
 #endif
 
@@ -1781,7 +1889,7 @@ public:
     // the normal state of a standalone node - no companion app to set it, and no GPS
     // fix. It also explains message timestamps reading 00:00.
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "CLOCK");
+    display.drawTextLeftAlign(CX, y, "CLOCK");
     {
       uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
       // 1600000000 is September 2020. Anything below it is not a clock that was
@@ -1794,7 +1902,7 @@ public:
         snprintf(tmp, sizeof(tmp), "%02u:%02u", (unsigned) ((now / 3600u) % 24u),
                  (unsigned) ((now / 60u) % 60u));
       }
-      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      display.drawTextRightAlign(CR, y, tmp);
       y += RIFT_LINE_H;
     }
 
@@ -1804,14 +1912,17 @@ public:
     // screen cannot show all of, which is a different problem from a layout that
     // cannot fit it.
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "PATH CACHE");
+    group(display, "MESH", CX, y + 4);
+    y += RIFT_LINE_H + 6;
+
+    display.drawTextLeftAlign(CX, y, "PATH CACHE");
     {
       int used = the_mesh.getPathCacheUsed(), size = the_mesh.getPathCacheSize();
       unsigned evicted = the_mesh.getPathEvictions();
       display.setColor(evicted > 0 ? rift_pal.accent : rift_pal.fg);
       if (evicted > 0) snprintf(tmp, sizeof(tmp), "%d/%d, %u lost", used, size, evicted);
       else             snprintf(tmp, sizeof(tmp), "%d/%d", used, size);
-      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      display.drawTextRightAlign(CR, y, tmp);
       y += RIFT_LINE_H;
     }
 
@@ -1842,10 +1953,10 @@ public:
         if (h >= RIFT_HOP_COLS - 1) beyond++;
       }
       display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(LX, y, "HOPS");
+      display.drawTextLeftAlign(CX, y, "HOPS");
       display.setColor(rift_pal.fg);
       sprintf(tmp, "n%d max%d 3+%d", live, maxhop, beyond);
-      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      display.drawTextRightAlign(CR, y, tmp);
       y += RIFT_LINE_H;
     }
 
@@ -1854,38 +1965,44 @@ public:
     // radio silently - this is the number that says whether the debounce is
     // enough or whether the write has to be broken up.
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "MSGLOG");
+    display.drawTextLeftAlign(CX, y, "MSGLOG");
     display.setColor(rift_pal.fg);
     sprintf(tmp, "%d msg %ums", msg_log.count, (unsigned) msg_log.last_save_ms);
-    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    display.drawTextRightAlign(CR, y, tmp);
     y += RIFT_LINE_H;
 
     // open / write / close, so the 553ms can be attributed rather than guessed
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "  phases");
+    display.drawTextLeftAlign(CX, y, "  phases");
     display.setColor(rift_pal.fg);
     sprintf(tmp, "%u %u %u", (unsigned) msg_log.t_open, (unsigned) msg_log.t_write,
                              (unsigned) msg_log.t_close);
-    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    display.drawTextRightAlign(CR, y, tmp);
     y += RIFT_LINE_H;
 
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "FREE HEAP");
+    // second column. The right one is where new diagnostics land, because it is
+    // the one with room - the left two groups are a fixed set.
+    CX = 166; CR = 318;
+    group(display, "RUNTIME", CX, 4);
+    y = GROUP_TOP;
+
+    display.drawTextLeftAlign(CX, y, "FREE HEAP");
     display.setColor(rift_pal.fg);
     sprintf(tmp, "%uK", (unsigned) (ESP.getFreeHeap() / 1024));
-    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    display.drawTextRightAlign(CR, y, tmp);
     y += RIFT_LINE_H;
 
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "EXT POWER");
+    display.drawTextLeftAlign(CX, y, "EXT POWER");
     display.setColor(rift_pal.fg);
     sprintf(tmp, "%s %umV", board.isExternalPowered() ? "yes" : "no",
             (unsigned) _task->getBattMilliVolts());
-    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    display.drawTextRightAlign(CR, y, tmp);
     y += RIFT_LINE_H;
 
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "MSG WAKE");
+    display.drawTextLeftAlign(CX, y, "MSG WAKE");
     display.setColor(rift_pal.fg);
     if (rift_msg_wakes == 0) {
       strcpy(tmp, "none yet");
@@ -1895,11 +2012,11 @@ public:
       else if (age < 3600000u) sprintf(tmp, "%u, %um ago", rift_msg_wakes, (unsigned) (age / 60000u));
       else                     sprintf(tmp, "%u, %uh ago", rift_msg_wakes, (unsigned) (age / 3600000u));
     }
-    display.drawTextRightAlign(display.width() - 2, y, tmp);
+    display.drawTextRightAlign(CR, y, tmp);
     y += RIFT_LINE_H;
 
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(LX, y, "LAST RESET");
+    display.drawTextLeftAlign(CX, y, "LAST RESET");
     esp_reset_reason_t reason = esp_reset_reason();
     const char* rr;
     switch (reason) {
@@ -1915,15 +2032,15 @@ public:
     }
     display.setColor((reason == ESP_RST_PANIC || reason == ESP_RST_BROWNOUT)
                      ? rift_pal.accent : rift_pal.fg);
-    display.drawTextRightAlign(display.width() - 2, y, rr);
+    display.drawTextRightAlign(CR, y, rr);
     y += RIFT_LINE_H;
 
     if (rift_boot_mark_count > 0) {
       display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(LX, y, "BOOT");
+      display.drawTextLeftAlign(CX, y, "BOOT");
       display.setColor(rift_pal.fg);
       sprintf(tmp, "%ums", (unsigned) rift_boot_marks[rift_boot_mark_count - 1].at_ms);
-      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      display.drawTextRightAlign(CR, y, tmp);
       y += RIFT_LINE_H;
 
       int worst = 0;
@@ -1934,33 +2051,48 @@ public:
         if (gap > worst_ms) { worst = i; worst_ms = gap; }
       }
       display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(LX, y, "SLOWEST");
+      display.drawTextLeftAlign(CX, y, "SLOWEST");
       display.setColor(rift_pal.fg);
       sprintf(tmp, "%s %u", rift_boot_marks[worst].name, (unsigned) worst_ms);
-      display.drawTextRightAlign(display.width() - 2, y, tmp);
+      display.drawTextRightAlign(CR, y, tmp);
       y += RIFT_LINE_H;
     }
 
-    // ---- footer, left column only ----
-    // This was a full-width band with a rule at y=178. The diagnostics column
-    // has grown to fifteen rows, which puts its last row at y=188, so BOOT and
-    // SLOWEST were drawn underneath the footer text and neither was readable.
-    // The footer only ever described the left column, so it moves there, into
-    // the space below the note, and the right column gets the full height.
-    display.setColor(rift_pal.rule);
-    display.fillRect(0, 162, 158, 1);
-    display.setColor(rift_pal.mid);
-    // shortened from "PRIVATE KEY EXPORT": that plus "DISABLED" is 156px and the
-    // column is 158 wide, which left no gap between the two at all
-    display.drawTextLeftAlign(2, 168, "KEY EXPORT");
-    display.setColor(rift_pal.ok);
-    display.drawTextRightAlign(156, 168, "DISABLED");
+    // ---- event log, the one group that is not label/value
+    group(display, "EVENT LOG", CX, y + 4);
+    y += RIFT_LINE_H + 6;
+    {
+      display.setColor(rift_pal.fg);
+      snprintf(tmp, sizeof(tmp), "%d lines", riftLog().count);
+      display.drawTextLeftAlign(CX, y, tmp);
+      if (riftLog().dropped > 0) {
+        display.setColor(rift_pal.mid);
+        snprintf(tmp, sizeof(tmp), "+%u lost", (unsigned) riftLog().dropped);
+        display.drawTextRightAlign(CR, y, tmp);
+      }
+      y += RIFT_LINE_H;
+
+      // The two newest lines, so the log answers its own question from here in the
+      // common case and only has to be opened when it does not.
+      display.setColor(rift_pal.dim);
+      for (int k = 1; k >= 0; k--) {
+        const RiftEventLog::Line* l = riftLog().peek(k);
+        if (l == NULL) continue;
+        char shown[RIFT_LOG_TEXT * 2];
+        riftTranslateUTF8(shown, l->text, sizeof(shown));
+        display.drawTextEllipsized(CX, y, CR - CX, shown);
+        y += RIFT_LINE_H;
+      }
+
+      display.setColor(rift_pal.accent);
+      display.drawTextLeftAlign(CX, y, "ENTER: open log");
+    }
+
     display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(2, 182, "up/down select,");
-    display.drawTextLeftAlign(2, 194, "ENTER activates");
+    display.drawTextLeftAlign(2, 214, "left: actions");
     display.setColor(rift_pal.mid);
-    sprintf(tmp, "v%s", RIFT_VERSION);
-    display.drawTextRightAlign(156, 194, tmp);
+    snprintf(tmp, sizeof(tmp), "PAGE 2/2 " "%s" " v%s", RIFT_DOT, RIFT_VERSION);
+    display.drawTextRightAlign(318, 214, tmp);
 
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
@@ -2097,8 +2229,26 @@ public:
       return true;   // keep the key on screen until acknowledged
     }
 
-    if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
-    if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
+    // The pages sit inside SYSTEM, and the edges still navigate out of it - so
+    // right from page 1 is the readings, right from page 2 leaves, and the trackball
+    // never becomes the only way out of a screen.
+    if (c == KEY_NEXT || c == KEY_RIGHT) {
+      if (_mode == MENU && _page == 0) { _page = 1; return true; }
+      _task->cycleNavScreen(1);
+      return true;
+    }
+    if (c == KEY_PREV || c == KEY_LEFT) {
+      if (_mode == MENU && _page == 1) { _page = 0; return true; }
+      _task->cycleNavScreen(-1);
+      return true;
+    }
+    // Page 2 has nothing to select, so up and down are consumed rather than moving
+    // a cursor the user cannot see, and ENTER opens the log the page is summarising.
+    if (_page == 1) {
+      if (c == KEY_ENTER) { _log_scroll = 0; _mode = LOG; return true; }
+      if (c == KEY_UP || c == KEY_DOWN) return true;
+      return false;
+    }
     if (c == KEY_UP) { _sel = (_sel + IT_COUNT - 1) % IT_COUNT; return true; }
     if (c == KEY_DOWN) { _sel = (_sel + 1) % IT_COUNT; return true; }
     if (c == KEY_ENTER) { activate(); return true; }
@@ -2121,85 +2271,142 @@ public:
 #define RIFT_HOP_ROWS 3
 #define RIFT_NODE_NAME_MAX 10
 
+// NODES (1c) - buckets, a scrollable list, and the route expanding the selected row.
+//
+// Replaces the constellation, which tried to place every node in a fixed hop column
+// three rows deep. Real meshes are not evenly distributed: almost everything lands
+// beyond the third column, so the layout spent three quarters of its width on the
+// minority and hid the majority. This answers the same four questions in order -
+// how big is the mesh, how spread out, who is active, and how did the selected one
+// reach me - without pretending a 320x240 panel can draw a graph faithfully.
+//
+// Bucket ranges are fixed. A column that means something different from one look to
+// the next means nothing.
 class RiftConstellationScreen : public RiftScreen {
   UITask* _task;
   AdvertPath _paths[RIFT_CONST_MAX];
-  int _plot_x[RIFT_CONST_MAX];   // where each node was drawn, for tap hit-testing
-  int _plot_y[RIFT_CONST_MAX];
   int _count;
   int _sel;
-  // "elapsed since last" rather than "deadline in the future": millis() wraps
-  // after ~49 days, and a deadline computed just before the wrap compares as
-  // already-past, which would pin this to a redraw every single frame until the
-  // counter caught up. Unsigned subtraction wraps correctly.
+  int _scroll;
+  // Where each row was actually drawn, so touch hits what the eye sees rather than
+  // what the layout intended - the selected row is 36px tall, so a fixed pitch
+  // would put every tap below it on the wrong node.
+  int _row_y[RIFT_CONST_MAX];
   unsigned long _last_refresh;
   bool _refreshed_once;
 
-  // 68px column pitch; markers on three rows with the name on the row below
-  static const int COL_X[RIFT_HOP_COLS];
-  static const int ROW_MARK_Y[RIFT_HOP_ROWS];
+  static const int BUCKET_X[4];
+  static const char* BUCKET_LABEL[4];
 
-  // A hop byte is a prefix of that repeater's public key (Identity::copyHashTo is
-  // a straight memcpy from pub_key), so it can be matched against any node we
-  // have heard an advert from. Returns -1 when the repeater is not one of them,
-  // which is normal - we may never have heard it directly.
-  // Resolved against every node we have heard from, not only the ones drawn.
-  // Excluding the hidden ones did not make the answer safer - it made a hash
-  // shared with an overflowed node look unique, so the route was confidently
-  // labelled with the wrong repeater. Whether the answer can be *drawn* is a
-  // separate question, asked at the call site.
-  //
-  // The resolution itself lives in RiftLogic.h so it can be tested; see
-  // test/test_rift_logic.
+  // Which bucket a hop count belongs in, or -1 for none. A node whose route is not
+  // known is in no bucket, so the four counts can sum to less than the heard total -
+  // that difference is real and the `?` rows in the list are where it lives.
+  static int bucketOf(uint8_t path_len) {
+    if (path_len == 0xFF) return -1;            // flood, route unknown
+    int h = (int) riftHopCount(path_len);
+    if (h == 0) return 0;
+    if (h <= 2) return 1;
+    if (h <= 5) return 2;
+    return 3;
+  }
+
+  // Relative, and four characters wide. "14:32" says nothing about how long ago that
+  // was without the reader doing arithmetic, which is the question the list asks.
+  // Monotonic, so it is right whether or not the clock has ever been set.
+  static void ageText(uint32_t recv_millis, char* out, size_t out_size) {
+    uint32_t s = ((uint32_t) millis() - recv_millis) / 1000u;
+    if (s < 60u)         StrHelper::strncpy(out, "now", out_size);
+    else if (s < 5400u)  snprintf(out, out_size, "%um", (unsigned) (s / 60u));
+    else if (s < 86400u) snprintf(out, out_size, "%uh", (unsigned) (s / 3600u));
+    else if (s < 864000u) snprintf(out, out_size, "%ud", (unsigned) (s / 86400u));
+    else                 StrHelper::strncpy(out, "9d+", out_size);
+  }
+
   int resolveHash(const uint8_t* hash, uint8_t len) {
     if (len > sizeof(AdvertPath::pubkey_prefix)) len = sizeof(AdvertPath::pubkey_prefix);
-
     const uint8_t* candidates[RIFT_CONST_MAX];
     int n = (_count < RIFT_CONST_MAX) ? _count : RIFT_CONST_MAX;
     for (int i = 0; i < n; i++) candidates[i] = _paths[i].pubkey_prefix;
     return riftResolveHash(hash, len, candidates, n);
   }
 
-  // DisplayDriver has no line primitive, but every segment here is axis-aligned,
-  // so a 1px fillRect is a line. The first leg leaves YOU along a short spine at
-  // x=40 before turning, which keeps it clear of the DIRECT column's rows.
-  void drawElbow(DisplayDriver& display, int x1, int y1, int x2, int y2, bool from_you) {
-    if (from_you) {
-      int spine = 40;
-      display.fillRect(min(x1, spine), y1, abs(spine - x1) + 1, 1);
-      display.fillRect(spine, min(y1, y2), 1, abs(y2 - y1) + 1);
-      display.fillRect(min(spine, x2), y2, abs(x2 - spine) + 1, 1);
-      return;
-    }
-    display.fillRect(min(x1, x2), y1, abs(x2 - x1) + 1, 1);
-    display.fillRect(x2, min(y1, y2), 1, abs(y2 - y1) + 1);
-  }
-
   void refresh() {
     int n = the_mesh.getRecentlyHeard(_paths, RIFT_CONST_MAX);
-    // getRecentlyHeard always returns max_num entries including empty slots and
-    // sorts newest-first, so the live ones *look* like a prefix - but only while
-    // the timestamps differ. recv_timestamp comes from the RTC, and a standalone
-    // node with no companion app and no GPS fix never sets it, so every filled
-    // entry carries 0. Treating 0 as empty then hid every node this device had
-    // heard, and with all timestamps equal the sort cannot order them anyway.
-    //
-    // The name is the emptiness test - the fill always writes it, and unused slots
-    // are memset to zero - and the live entries are compacted to the front so the
-    // rest of this screen can keep indexing a prefix.
+    // Occupancy is the valid flag, not a timestamp or a name: recv_timestamp is
+    // legitimately zero on a node whose RTC was never set, and inferring emptiness
+    // from it hid every node this device had heard.
     int live = 0;
     for (int i = 0; i < n; i++) {
-      if (!_paths[i].valid) continue;       // explicit, not inferred from a value
+      if (!_paths[i].valid) continue;
       if (live != i) _paths[live] = _paths[i];
       live++;
     }
     _count = live;
     if (_sel >= _count) _sel = _count > 0 ? _count - 1 : 0;
+    if (_sel < 0) _sel = 0;
   }
 
-public:
-  RiftConstellationScreen(UITask* task) : _task(task), _count(0), _sel(0), _last_refresh(0),
-                                          _refreshed_once(false) { }
+  // The route as text, one hop per name. An unresolved or colliding hash is drawn
+  // `?` and never the first candidate: a hop byte is only a prefix of a repeater's
+  // public key, so two nodes can share one.
+  void routeText(const AdvertPath* p, char* out, size_t out_size, int* ambiguous) {
+    out[0] = 0;
+    *ambiguous = 0;
+    int hops = (int) riftHopCount(p->path_len);
+    uint8_t hsz = riftHashSize(p->path_len);
+    if (p->path_len == 0xFF || hops == 0 || hsz == 0) return;
+
+    size_t used = 0;
+    for (int k = 0; k < hops; k++) {
+      const char* label = "?";
+      int via = resolveHash(&p->path[k * hsz], hsz);
+      if (via == RIFT_HASH_AMBIGUOUS) (*ambiguous)++;
+      else if (via >= 0 && via < _count) label = _paths[via].name;
+
+      size_t need = strlen(label) + (used ? 3 : 0);
+      if (used + need >= out_size - 4) {              // room for " ..."
+        StrHelper::strncpy(out + used, " ...", out_size - used);
+        return;
+      }
+      if (used) { memcpy(out + used, " > ", 3); used += 3; }
+      size_t n = strlen(label);
+      memcpy(out + used, label, n);
+      used += n;
+      out[used] = 0;
+    }
+  }
+
+  // How tall a row is: 12, or 36 for the selected one because the route and the
+  // detail line sit inside its block rather than in a bar at the bottom of the
+  // screen. A detail bar cost four list rows for information about one node.
+  int rowHeight(int i) const { return (i == _sel) ? 36 : 12; }
+
+  // Scrolled so the selected row *and* its two detail rows are drawn. A selection
+  // that is not on screen does not exist for the user.
+  void clampScroll() {
+    const int TOP = 68, BOTTOM = 226;
+    if (_scroll > _sel) _scroll = _sel;
+    if (_scroll < 0) _scroll = 0;
+    for (;;) {
+      int y = TOP;
+      bool fits = false;
+      for (int i = _scroll; i < _count; i++) {
+        int h = rowHeight(i);
+        if (y + h > BOTTOM) break;
+        if (i == _sel) { fits = true; break; }
+        y += h;
+      }
+      if (fits || _scroll >= _sel) break;
+      _scroll++;
+    }
+  }
+
+ public:
+  RiftConstellationScreen(UITask* task)
+     : _task(task), _count(0), _sel(0), _scroll(0), _last_refresh(0),
+       _refreshed_once(false) {
+    for (int i = 0; i < RIFT_CONST_MAX; i++) _row_y[i] = -1;
+  }
 
   int render(DisplayDriver& display) override {
     if (!_refreshed_once || millis() - _last_refresh >= 3000) {
@@ -2207,260 +2414,205 @@ public:
       _last_refresh = millis();
       _refreshed_once = true;
     }
+    display.setTextSize(1);
 
     char tmp[64];
-    sprintf(tmp, "%d HEARD", _count);
-    renderHeading(display, tmp);
-
-    // Column headers. Distance is a column, not a ring: the old squares-as-rings
-    // could not say how far anything was without counting boxes outward.
-    display.setTextSize(1);
-    display.setColor(rift_pal.mid);
-    // the last column is a catch-all: anything further than three hops is
-    // clamped into it, so it must not claim to be exactly three
-    static const char* HEADS[RIFT_HOP_COLS] = { "DIRECT", "1 HOP", "2 HOPS", "3+ HOPS" };
-    for (int c = 0; c < RIFT_HOP_COLS; c++) {
-      display.drawTextLeftAlign(COL_X[c], 20, HEADS[c]);
-    }
-    display.setColor(rift_pal.rule);
-    display.fillRect(0, 31, display.width(), 1);
-
-    display.setColor(rift_pal.accent);
-    display.fillRect(10, 90, 5, 5);
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(4, 98, "YOU");
-
-    // Assign every node a column from its real hop count and a row within it.
-    //
-    // The selected node is placed first, before the column can fill up. Without
-    // that, a column with more nodes than rows dropped whatever came after the
-    // third - and the selection is a logical index over all of them, so the
-    // trackball could land on a node with no marker drawn: the detail panel below
-    // changed while nothing on the plot moved, and touch could not reach it at all
-    // because touch only hit-tests plotted nodes. Two input methods with different
-    // reachable sets, and a selection the screen would not admit to having.
-    //
-    // Placing it first costs one visible slot in a crowded column, which is a
-    // better trade than a selection that cannot be seen.
-    int col_fill[RIFT_HOP_COLS] = { 0, 0, 0, 0 };
-    int overflow = 0;
-    for (int i = 0; i < RIFT_CONST_MAX; i++) { _plot_x[i] = -1; _plot_y[i] = -1; }
-
-    int order_first = (_count > 0 && _sel >= 0 && _sel < _count) ? _sel : -1;
-    for (int pass = 0; pass < 2; pass++) {
-      for (int i = 0; i < _count; i++) {
-        bool is_sel = (i == order_first);
-        if (pass == 0 ? !is_sel : is_sel) continue;   // selected first, then the rest
-
-        int hops = riftHopCount(_paths[i].path_len);
-        int c = hops;
-        if (c > RIFT_HOP_COLS - 1) c = RIFT_HOP_COLS - 1;
-        if (col_fill[c] >= RIFT_HOP_ROWS) { overflow++; continue; }
-        int r = col_fill[c]++;
-        _plot_x[i] = COL_X[c];
-        _plot_y[i] = ROW_MARK_Y[r];
-      }
-    }
-
-    // The selected node's route, drawn before the markers so the markers sit on
-    // top of it. Each hop byte is a prefix of that repeater's public key, so a
-    // hop can be resolved to a node we have actually heard - when it can, the
-    // line bends through its marker. When it cannot, the leg is drawn straight
-    // rather than inventing a waypoint.
-    if (_count > 0 && _plot_x[_sel] >= 0) {
-      AdvertPath* sp = &_paths[_sel];
-      int hops = riftHopCount(sp->path_len);
-      uint8_t hsz = riftHashSize(sp->path_len);
-
-      display.setColor(rift_pal.accent);
-      int px = 12, py = 92;          // centre of the YOU marker
-      bool first = true;
-      for (int k = 0; k < hops; k++) {
-        int via = resolveHash(&sp->path[k * hsz], hsz);
-        // unknown, ambiguous, or known but not on screen: draw the leg straight
-        // rather than bending it through a node that is not there
-        if (via < 0 || _plot_x[via] < 0) continue;
-        drawElbow(display, px, py, _plot_x[via] + 2, _plot_y[via] + 2, first);
-        px = _plot_x[via] + 2; py = _plot_y[via] + 2;
-        first = false;
-      }
-      drawElbow(display, px, py, _plot_x[_sel] + 2, _plot_y[_sel] + 2, first);
-    }
-
+    int counts[4] = { 0, 0, 0, 0 };
+    int maxhop = -1;
     for (int i = 0; i < _count; i++) {
-      if (_plot_x[i] < 0) continue;
-      AdvertPath* p = &_paths[i];
-      int x = _plot_x[i], y = _plot_y[i];
-
-      // Freshness is shape, not brightness. Four grey levels collapse into each
-      // other outdoors once reflected light lays a veil over the panel; a filled
-      // versus hollow rect survives it, and both stay at full contrast.
-      // Monotonic, so this is right whether or not the RTC was ever set. It used to
-      // be wall clock minus wall clock, which with an unset RTC is 0 - 0 = 0, and
-      // every node read as just heard forever; and if the RTC were then set, every
-      // stored entry would jump to being decades old at once.
-      uint32_t age = ((uint32_t) millis() - p->recv_millis) / 1000u;
-      display.setColor(rift_pal.fg);
-      if (age < 1800) display.fillRect(x, y, 5, 5);
-      else            display.drawRect(x, y, 5, 5);
-
-      if (i == _sel) {
-        // one pixel larger, so selection reads at both freshness states
-        display.setColor(rift_pal.accent);
-        display.drawRect(x - 1, y - 1, 7, 7);
+      int b = bucketOf(_paths[i].path_len);
+      if (b >= 0) counts[b]++;
+      if (_paths[i].path_len != 0xFF) {
+        int h = (int) riftHopCount(_paths[i].path_len);
+        if (h > maxhop) maxhop = h;
       }
-
-      char filtered[sizeof(p->name)];
-      riftTranslateUTF8(filtered, p->name, sizeof(filtered));
-      // 10 chars = 60px in a 68px column. At 11 the gap is 2px and two names
-      // read as one word.
-      if (strlen(filtered) > RIFT_NODE_NAME_MAX) filtered[RIFT_NODE_NAME_MAX] = 0;
-      display.setColor(rift_pal.fg);
-      display.drawTextLeftAlign(x, y + 8, filtered);
     }
+
+    // ---- heading
+    display.setColor(rift_pal.mid);
+    snprintf(tmp, sizeof(tmp), "%d HEARD", _count);
+    display.drawTextLeftAlign(2, 2, tmp);
+    if (maxhop >= 0) {
+      snprintf(tmp, sizeof(tmp), "MAX %d HOPS", maxhop);
+      display.drawTextRightAlign(318, 2, tmp);
+    }
+
+    // ---- bucket band. The bars compare the four with each other, not against an
+    // absolute scale: on a mesh of six nodes an absolute scale draws four stubs.
+    int maxc = 0;
+    for (int b = 0; b < 4; b++) if (counts[b] > maxc) maxc = counts[b];
+    for (int b = 0; b < 4; b++) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(BUCKET_X[b], 14, BUCKET_LABEL[b]);
+      if (counts[b] > 0 && maxc > 0) {
+        int w = (counts[b] * 64 + maxc / 2) / maxc;
+        if (w < 2) w = 2;
+        display.setColor(rift_pal.fg);
+        display.fillRect(BUCKET_X[b], 26, w, 6);
+      }
+      display.setColor(rift_pal.fg);
+      snprintf(tmp, sizeof(tmp), "%d", counts[b]);
+      display.drawTextLeftAlign(BUCKET_X[b], 36, tmp);
+    }
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 52, display.width(), 1);
 
     display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(14, 56, "NODE");
+    display.drawTextRightAlign(278, 56, "HOPS");
+    display.drawTextRightAlign(318, 56, "HEARD");
+
+    for (int i = 0; i < RIFT_CONST_MAX; i++) _row_y[i] = -1;
+
     if (_count == 0) {
-      // "since boot", not "yet". The path cache this reads lives in RAM and is
-      // cleared at startup, so an empty list after a restart is the normal state
-      // and not a fault - which is how it was read, repeatedly, including by me.
-      // Seeding it from the persisted contacts was tried and reverted: a stored
-      // contact with no known route carries out_path_len 0xFF, which is "flood,
-      // route unknown" rather than a hop count, and this screen sorts by hops. It
-      // put every contact in a 63-hop column, which is a claim the device cannot
-      // support. Doing it properly needs somewhere honest to put "route unknown",
-      // and that is part of the column redesign, not a change to make ahead of it.
-      display.drawTextLeftAlign(2, 132, "no adverts heard since boot");
-    } else {
-      display.drawTextLeftAlign(2, 132, "solid = heard under 30m");
-      display.drawTextLeftAlign(2, 144, "hollow = older");
-      if (overflow > 0) {
-        sprintf(tmp, "%d more not shown", overflow);
-        display.drawTextLeftAlign(2, 156, tmp);
-      }
+      display.setColor(rift_pal.mid);
+      // "since boot" is part of the claim: this cache is cleared at startup, so an
+      // empty list after a restart is the normal state and not a fault.
+      display.drawTextLeftAlign(2, 68, "No adverts heard since boot");
+      renderNavBar(display, RIFT_NAV_NODES);
+      return 1000;
     }
 
-    // detail for the selected node
-    display.setColor(rift_day_mode ? 0x2104 : rift_pal.accent);
-    display.fillRect(0, 176, display.width(), 1);
+    clampScroll();
 
-    if (_count > 0) {
-      AdvertPath* p = &_paths[_sel];
-      int hops = riftHopCount(p->path_len);
+    const int BOTTOM = 226;
+    int y = 68;
+    int shown = 0;
+    for (int i = _scroll; i < _count; i++) {
+      int h = rowHeight(i);
+      if (y + h > BOTTOM) break;
+      _row_y[i] = y;
+      shown++;
 
-      char filtered[sizeof(p->name)];
-      riftTranslateUTF8(filtered, p->name, sizeof(filtered));
-      display.setColor(rift_pal.fg);
-      display.drawTextEllipsized(2, 182, 220, filtered);
+      bool sel = (i == _sel);
+      AdvertPath* p = &_paths[i];
+      bool known = (p->path_len != 0xFF);
+      int hops = known ? (int) riftHopCount(p->path_len) : 0;
 
-      display.setColor(rift_pal.mid);
-      if (hops == 0) strcpy(tmp, "direct");
-      else sprintf(tmp, "%d hop%s", hops, hops == 1 ? "" : "s");
-      display.drawTextRightAlign(display.width() - 2, 182, tmp);
-
-      // Monotonic, so this is right whether or not the RTC was ever set. It used to
-      // be wall clock minus wall clock, which with an unset RTC is 0 - 0 = 0, and
-      // every node read as just heard forever; and if the RTC were then set, every
-      // stored entry would jump to being decades old at once.
-      uint32_t age = ((uint32_t) millis() - p->recv_millis) / 1000u;
-      char when[24];
-      if (age < 60) sprintf(when, "%lus ago", (unsigned long) age);
-      else if (age < 3600) sprintf(when, "%lum ago", (unsigned long) (age / 60));
-      else sprintf(when, "%luh ago", (unsigned long) (age / 3600));
-
-      uint8_t hsz = riftHashSize(p->path_len);
-      int via = (hops > 0) ? resolveHash(p->path, hsz) : RIFT_HASH_NONE;
-      if (via == RIFT_HASH_AMBIGUOUS) {
-        snprintf(tmp, sizeof(tmp), "via ?, heard %s", when);
-      } else if (via >= 0) {
-        char vname[sizeof(p->name)];
-        riftTranslateUTF8(vname, _paths[via].name, sizeof(vname));
-        if (strlen(vname) > RIFT_NODE_NAME_MAX) vname[RIFT_NODE_NAME_MAX] = 0;
-        snprintf(tmp, sizeof(tmp), "via %s, heard %s", vname, when);
-      } else {
-        snprintf(tmp, sizeof(tmp), "heard %s", when);
+      if (sel) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y, display.width(), 12);
       }
-      display.drawTextLeftAlign(2, 194, tmp);
+      uint16_t ink = sel ? 0xFFFF : rift_pal.fg;
 
-      // Only some node types can be sent a direct message - riftCanDirectMessage()
-      // is the one place that decides, shared with the COMMS picker, which used to
-      // disagree with this screen. Rather than dropping the
-      // prompt on anything else - a missing affordance with no explanation reads
-      // as a bug - the slot names what the node is, which is information this
-      // screen does not otherwise show and which explains the absence by itself.
-      //
-      // The accent is reserved for the case you can actually act on.
-      ContactInfo* sel_contact = the_mesh.lookupContactByPubKey(
-          (uint8_t*) _paths[_sel].pubkey_prefix, 6);
-      const char* dm_label;
-      bool can_dm = false;
-      if (sel_contact == NULL) {
-        dm_label = "not a contact";
+      // Freshness is shape, not brightness: four grey levels collapse into each
+      // other in sunlight, a filled versus hollow square does not.
+      display.setColor(ink);
+      uint32_t age_s = ((uint32_t) millis() - p->recv_millis) / 1000u;
+      if (age_s < 1800u) display.fillRect(2, y + 3, 5, 5);
+      else               display.drawRect(2, y + 3, 5, 5);
+
+      char shown_name[24];
+      riftTranslateUTF8(shown_name, p->name, sizeof(shown_name));
+      display.setColor(ink);
+      display.drawTextEllipsized(14, y + 2, 120, shown_name);
+
+      if (known) {
+        snprintf(tmp, sizeof(tmp), "%d", hops);
+        display.setColor(ink);
       } else {
-        can_dm = riftCanDirectMessage(sel_contact->type);
-        dm_label = can_dm ? "ENTER: DM" : riftAdvertTypeName(sel_contact->type);
+        StrHelper::strncpy(tmp, "?", sizeof(tmp));
+        display.setColor(sel ? 0xFFFF : rift_pal.mid);
       }
+      display.drawTextRightAlign(278, y + 2, tmp);
 
-      if (can_dm) {
-        // width follows the label rather than being hardcoded, so the day-mode
-        // fill cannot end up shorter or longer than the text it reverses out
-        int lw = (int) strlen(dm_label) * RIFT_CHAR_W + 4;
-        if (rift_day_mode) {
-          display.setColor(rift_pal.accent);
-          display.fillRect(display.width() - 2 - lw, 193, lw, 10);
-          display.setColor(0xFFFF);
-        } else {
-          display.setColor(rift_pal.accent);
-        }
-      } else {
+      ageText(p->recv_millis, tmp, sizeof(tmp));
+      display.setColor(ink);
+      display.drawTextRightAlign(318, y + 2, tmp);
+
+      if (sel) {
+        int dy = y + 12;
+        int ambiguous = 0;
+        char route[64];
+        routeText(p, route, sizeof(route), &ambiguous);
+
         display.setColor(rift_pal.mid);
+        if (!known) {
+          display.drawTextLeftAlign(14, dy + 2, "flood, route unknown");
+        } else if (ambiguous > 0) {
+          snprintf(tmp, sizeof(tmp), "%d candidates, not resolved", ambiguous);
+          display.drawTextLeftAlign(14, dy + 2, tmp);
+        } else if (route[0]) {
+          snprintf(tmp, sizeof(tmp), "via %s", route);
+          display.drawTextEllipsized(14, dy + 2, 300, tmp);
+        } else {
+          display.drawTextLeftAlign(14, dy + 2, "heard direct");
+        }
+
+        // Type and absolute time. The RSSI the design asks for here does not exist:
+        // adverts are cached without it, so the segment is omitted rather than
+        // filled with a number this device does not have.
+        ContactInfo* contact = the_mesh.lookupContactByPubKey(p->pubkey_prefix, 6);
+        const char* type = (contact != NULL) ? riftAdvertTypeName(contact->type) : "unknown";
+        uint32_t clk = the_mesh.getRTCClock()->getCurrentTime();
+        char detail[48];
+        if (clk >= 1600000000u && p->recv_timestamp >= 1600000000u) {
+          int hh, mm;
+          riftCivilFromEpoch(p->recv_timestamp, NULL, NULL, NULL, &hh, &mm);
+          snprintf(detail, sizeof(detail), "%s %s %02d:%02d", type, RIFT_DOT, hh, mm);
+        } else {
+          // no invented time, and no --:-- either
+          StrHelper::strncpy(detail, type, sizeof(detail));
+        }
+        display.setColor(rift_pal.mid);
+        display.drawTextLeftAlign(14, dy + 14, detail);
+
+        // Offered only when it would work. A repeater cannot receive a message, and
+        // an action that will be refused is worse than no action shown.
+        if (contact != NULL && riftCanDirectMessage(contact->type)) {
+          if (rift_day_mode) {
+            display.setColor(rift_pal.accent);
+            display.fillRect(240, dy + 12, 78, 12);
+            display.setColor(0xFFFF);
+          } else {
+            display.setColor(rift_pal.accent);
+          }
+          display.drawTextRightAlign(316, dy + 14, "ENTER: message");
+        }
       }
-      display.drawTextRightAlign(display.width() - 2, 194, dm_label);
+
+      y += h;
+    }
+
+    int remaining = _count - _scroll - shown;
+    if (remaining > 0 && y + 12 <= BOTTOM) {
+      display.setColor(rift_pal.dim);
+      snprintf(tmp, sizeof(tmp), "%d more", remaining);
+      display.drawTextLeftAlign(14, y + 2, tmp);
     }
 
     renderNavBar(display, RIFT_NAV_NODES);
-    return 2000;
+    return 1000;
   }
 
-  // tapping a node in the plot area selects the nearest one
   bool handleTouch(int x, int y) override {
-    if (_count == 0 || y > 170) return false;
-    int best = -1, best_d = 0;
+    (void) x;
+    if (_count == 0) return false;
+    // Hit-tested against where the rows were drawn, because the selected one is
+    // three rows tall and a fixed pitch would select the wrong node below it.
     for (int i = 0; i < _count; i++) {
-      if (_plot_x[i] < 0) continue;   // not shown this frame
-      int dx = x - _plot_x[i], dy = y - _plot_y[i];
-      int d = dx * dx + dy * dy;
-      if (best < 0 || d < best_d) { best = i; best_d = d; }
+      if (_row_y[i] < 0) continue;
+      if (y >= _row_y[i] && y < _row_y[i] + rowHeight(i)) { _sel = i; return true; }
     }
-    if (best >= 0 && best_d < 40 * 40) { _sel = best; return true; }
     return false;
   }
 
   bool handleInput(char c) override {
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
-    if (c == KEY_UP) {
-      if (_count > 0) _sel = (_sel + _count - 1) % _count;
-      return true;
-    }
-    if (c == KEY_DOWN) {
-      if (_count > 0) _sel = (_sel + 1) % _count;
-      return true;
-    }
+    // Not wrapped: this is a position in a list, and jumping from the last node to
+    // the first reads as the list having moved rather than the cursor.
+    if (c == KEY_UP)   { if (_sel > 0) _sel--; return true; }
+    if (c == KEY_DOWN) { if (_sel + 1 < _count) _sel++; return true; }
     if (c == KEY_ENTER) {
       if (_count == 0) return true;
       const uint8_t* key = _paths[_sel].pubkey_prefix;
-      // an advert can be heard from a node that is not in the contact book, and
-      // then there is nothing to send to - say so rather than opening a compose
-      // box whose message could never leave
       ContactInfo* contact = the_mesh.lookupContactByPubKey((uint8_t*) key, 6);
       if (contact == NULL) {
         _task->showAlert("Not a contact yet", 1400);
         return true;
       }
-      // Repeaters and sensors do not read messages, so a DM to one goes nowhere
-      // and reports nothing. COMMS' target picker already filters them out; this
-      // screen reaches setDirectTarget() directly and bypassed that.
       if (!riftCanDirectMessage(contact->type)) {
         _task->showAlert("Repeaters can't receive a DM", 1600);
         return true;
@@ -2472,8 +2624,8 @@ public:
   }
 };
 
-const int RiftConstellationScreen::COL_X[RIFT_HOP_COLS] = { 46, 114, 182, 250 };
-const int RiftConstellationScreen::ROW_MARK_Y[RIFT_HOP_ROWS] = { 36, 64, 92 };
+const int RiftConstellationScreen::BUCKET_X[4] = { 2, 81, 160, 239 };
+const char* RiftConstellationScreen::BUCKET_LABEL[4] = { "DIRECT", "1-2", "3-5", "6+" };
 
 // Placeholder nav screen - visual only, real functionality lands in a later milestone.
 class RiftPlaceholderScreen : public RiftScreen {
