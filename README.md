@@ -158,7 +158,23 @@ Five screens, reached from a nav bar along the bottom. The first is labelled
 | **NODES** | Who I can reach, and how far away |
 | **RADAR** | Is there anything around me, and is that changing |
 | **COMMS** | Conversations, channels and direct |
-| **SYSTEM** | Actions left, read-only diagnostics right |
+| **SYSTEM** | Actions on page 1, readings on page 2 |
+
+<table>
+<tr>
+<td width="50%"><img src="design/screens/system-1d-page1-day.png" alt="SYSTEM page 1 in day mode: a full-width ACTIONS list with the selected row filled in orange and a warning line beneath it, each action's current state right-aligned, and a footer reading PRIVATE KEY EXPORT DISABLED" width="100%"></td>
+<td width="50%"><img src="design/screens/system-1d-page2-day.png" alt="SYSTEM page 2 in day mode: readings in two columns, grouped DEVICE and MESH on the left, RUNTIME and EVENT LOG on the right, each row a label and a value" width="100%"></td>
+</tr>
+<tr>
+<td colspan="2"><strong>SYSTEM</strong> — actions on page 1, readings on page 2, trackball left and right between them. The nav bar prints the page number where the battery percentage sits on the other four screens.</td>
+</tr>
+</table>
+
+> Design renderings at 1:1 device resolution, shown at 2x — not photographs of the
+> panel. Only screens whose renderings match the shipping firmware are here: the
+> NODES and splash renderings from the same design round differ from what is built,
+> so they are left out rather than captioned. Photographs of the rest are wanted.
+
 
 Night and day are the same geometry with a swapped colour table, toggled from
 SYSTEM. The accent keeps its value in both, but on white it becomes a fill with the
