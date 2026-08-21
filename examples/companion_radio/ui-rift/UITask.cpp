@@ -2931,7 +2931,7 @@ class RiftRadarScreen : public RiftScreen {
   UITask* _task;
 
   enum ScanState { OFF, START_WIFI, WIFI_RUNNING, START_BLE, BLE_RUNNING, STOPPING };
-  enum View { VIEW_BANDS, VIEW_WATERFALL };
+  enum View { VIEW_BANDS, VIEW_WATERFALL, VIEW_WATCHES };
   ScanState _state;
   View _view;
   bool _want_active;   // set by screen changes; acted on from the main loop
@@ -2947,6 +2947,7 @@ class RiftRadarScreen : public RiftScreen {
   unsigned long _wait_ms;
   int _scroll;
   int _last_n;
+  int _watch_sel;      // cursor in the watch list
 
   // The selection is an identity, not a row. The list is sorted by signal strength
   // and re-sorts every sweep, so a cursor held as an index would slide onto a
@@ -3018,7 +3019,7 @@ public:
      : _task(task), _state(OFF), _view(VIEW_BANDS), _want_active(false),
        _wifi_up(false), _ble_up(false), _torn_down(true),
        _wait_since(0), _wait_ms(0), _scroll(0), _last_n(0),
-       _sel_is_wifi(false), _have_sel(false), _sel_idx(0), _resel(false) {
+       _watch_sel(0), _sel_is_wifi(false), _have_sel(false), _sel_idx(0), _resel(false) {
     memset(_sel_key, 0, sizeof(_sel_key));
     _sel_name[0] = 0;
   }
@@ -3268,6 +3269,7 @@ public:
 
   int render(DisplayDriver& display) override {
     if (_view == VIEW_WATERFALL) return renderWaterfall(display);
+    if (_view == VIEW_WATCHES) return renderWatches(display);
 
     // No heading while scanning. `LIVE` said nothing the screen did not already
     // show - the device count below it is the evidence that scanning is happening,
@@ -3470,7 +3472,9 @@ public:
     {
       char foot[44];
       int watched = rf_watch_count;
-      if (watched > 0) snprintf(foot, sizeof(foot), "ENTER watch %d  W wave  S src", watched);
+      // the count doubles as the way in: it is the only hint that a list of them
+      // exists, and W is how you reach it
+      if (watched > 0) snprintf(foot, sizeof(foot), "ENTER watch  W wave/%d  S src", watched);
       else             snprintf(foot, sizeof(foot), "ENTER watch  W wave  S src");
       display.drawTextLeftAlign(2, 206, foot);
     }
@@ -3537,9 +3541,105 @@ public:
     return true;
   }
 
+  // The watch list, as a list.
+  //
+  // Marking was reachable and unmarking was not. A watch could only be toggled from
+  // the scan list, and the scan list holds what is in range now: rfAgeOut drops
+  // anything not heard recently, watched or not, and switching source drops a whole
+  // radio at once. So a device marked and then carried out of the room - the case a
+  // proximity watch exists for - vanished from the only place it could be unmarked,
+  // permanently. The watch list was state the user had no way to see.
+  int renderWatches(DisplayDriver& display) {
+    if (!renderWatchLamp(display)) renderHeading(display, "WATCHES");
+    display.setTextSize(1);
+
+    if (rf_watch_count == 0) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(2, 40, "Nothing marked.");
+      display.setColor(rift_pal.dim);
+      display.drawTextLeftAlign(2, 56, "W goes back. ENTER on a device");
+      display.drawTextLeftAlign(2, 68, "in that list marks it.");
+      renderNavBar(display, RIFT_NAV_RADAR);
+      return 1000;
+    }
+
+    if (_watch_sel >= rf_watch_count) _watch_sel = rf_watch_count - 1;
+    if (_watch_sel < 0) _watch_sel = 0;
+
+    int y = 30;
+    for (int i = 0; i < rf_watch_count; i++, y += RIFT_LINE_H * 2) {
+      bool sel = (i == _watch_sel);
+      if (sel) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y - 2, display.width(), 13);
+      }
+      uint16_t ink = sel ? 0xFFFF : rift_pal.fg;
+
+      // present is a fill, absent an outline - the shape-not-brightness rule the
+      // lamp uses, so the two say the same thing the same way
+      display.setColor(ink);
+      if (rf_watch[i].present) display.fillRect(4, y + 1, 6, 6);
+      else                     display.drawRect(4, y + 1, 6, 6);
+
+      char shown[28];
+      riftTranslateUTF8(shown, rf_watch[i].name, sizeof(shown));
+      display.setColor(ink);
+      display.drawTextEllipsized(16, y, 190, shown);
+
+      char tag[16];
+      bool off = rf_watch[i].is_wifi ? !riftScanWifi() : !riftScanBle();
+      if (off)                      StrHelper::strncpy(tag, "radio off", sizeof(tag));
+      else if (rf_watch[i].present) StrHelper::strncpy(tag, "near", sizeof(tag));
+      else                          StrHelper::strncpy(tag, "not heard", sizeof(tag));
+      display.setColor(sel ? 0xFFFF : rift_pal.mid);
+      display.drawTextRightAlign(display.width() - 2, y, tag);
+
+      // The address, because a BLE name is often absent or shared and the key is what
+      // is actually being matched. It is also the only way to tell two "AirPods"
+      // apart in this list.
+      const uint8_t* k = rf_watch[i].key;
+      char addr[44];
+      snprintf(addr, sizeof(addr), "%s  %02X:%02X:%02X:%02X:%02X:%02X",
+               rf_watch[i].is_wifi ? "wifi" : "ble ",
+               k[0], k[1], k[2], k[3], k[4], k[5]);
+      display.setColor(rift_pal.dim);
+      display.drawTextLeftAlign(16, y + RIFT_LINE_H, addr);
+    }
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 196, display.width(), 1);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 206, "ENTER unwatch   up/down   W back");
+    renderNavBar(display, RIFT_NAV_RADAR);
+    return 1000;
+  }
+
+
   bool handleInput(char c) override {
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
+    if (_view == VIEW_WATCHES) {
+      if (c == 'w' || c == 'W' || c == RIFT_KEY_BACK) { _view = VIEW_BANDS; return true; }
+      if (rf_watch_count == 0) return true;
+      if (c == KEY_UP)   { if (_watch_sel > 0) _watch_sel--; return true; }
+      if (c == KEY_DOWN) { if (_watch_sel + 1 < rf_watch_count) _watch_sel++; return true; }
+      if (c == KEY_ENTER) {
+        char gone[24];
+        StrHelper::strncpy(gone, rf_watch[_watch_sel].name, sizeof(gone));
+        // removed by key rather than by index: the toggle is the one place that knows
+        // how to take an entry out, and it matches on identity
+        rfWatchToggle(rf_watch[_watch_sel].key, rf_watch[_watch_sel].is_wifi, gone);
+        riftSaveSettings();
+        riftLogf("watch - %s", gone);
+        _task->showAlert("Watch removed", 1400);
+        if (_watch_sel >= rf_watch_count) _watch_sel = rf_watch_count - 1;
+        if (_watch_sel < 0) _watch_sel = 0;
+        return true;
+      }
+      return true;
+    }
+
+
     // ENTER acts on the selected row, which is what it does in every other list in
     // this firmware. The waterfall moves to W - it is a view swap, not a row action,
     // and having ENTER mean two different things depending on which view you were in
@@ -3592,7 +3692,10 @@ public:
       return true;
     }
     if (c == 'w' || c == 'W') {
-      _view = (_view == VIEW_BANDS) ? VIEW_WATERFALL : VIEW_BANDS;
+      // bands -> waterfall -> watches -> bands. Three on one key rather than a second
+      // letter: they are all "which view of the same scan", and the footer names it.
+      _view = (_view == VIEW_BANDS) ? VIEW_WATERFALL
+            : (_view == VIEW_WATERFALL) ? VIEW_WATCHES : VIEW_BANDS;
       return true;
     }
     if (c == KEY_ENTER && _view == VIEW_BANDS) {
