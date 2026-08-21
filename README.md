@@ -336,7 +336,7 @@ Boot is now 5.1 seconds. Why the probe does that is still not established — se
 
 ## Status
 
-**Current release: 0.6.0** — set by the `RIFT_VERSION` build flag and shown on the
+**Current release: 0.7.0** — set by the `RIFT_VERSION` build flag and shown on the
 boot screen and SYSTEM, alongside the MeshCore version it is built on. Deliberately
 0.x: it works and is verified on hardware, but it has had no external users and the
 limitations above are real.
@@ -346,7 +346,10 @@ over the companion protocol next to `FIRMWARE_VER_CODE`.
 
 Every screen from the original design concept is implemented and verified on
 physical hardware. Resource use: ~53 % of internal static RAM, ~25 % of the 6.5 MB
-app partition. 128 native tests across eight suites.
+app partition. 133 native tests across eight suites.
+
+**0.7.0** rebuilds NODES, splits SYSTEM into two pages, adds a proximity watch on
+RADAR and a live RX log, and closes a bounds check on remote mesh input.
 
 **0.6.0** colour-codes channels, adds an event log under SYSTEM, and fixes the node
 data underneath NODES: the path cache evicted by wall clock, so a node whose RTC was
