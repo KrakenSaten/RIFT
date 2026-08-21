@@ -1153,6 +1153,11 @@ class RiftSystemScreen : public RiftScreen {
   int _page = 0;
   int _rx_scroll = 0;    // 0 = pinned to the newest packet
 
+  // Where each action row was drawn. The selected row grows a warning line beneath
+  // it, so the rows below it move - a fixed pitch selected the wrong action, which
+  // on this screen means activating Delete channel instead of Add channel.
+  int _item_y[IT_COUNT];
+
   // most labels are fixed; the path-mode row shows its current value
   void itemLabel(int i, char* buf, size_t len) {
     static const char* FIXED[] = {
@@ -1793,6 +1798,9 @@ public:
   RiftSystemScreen(UITask* task) : _task(task), _mode(MENU), _sel(0), _key_choice(0) {
     _ch_name[0] = 0;
     _ch_key[0] = 0;
+    // -1 so a tap arriving before the first render hits nothing, rather than
+    // matching whatever the uninitialised array happened to contain
+    for (int i = 0; i < IT_COUNT; i++) _item_y[i] = -1;
   }
 
   int render(DisplayDriver& display) override {
@@ -1840,6 +1848,7 @@ public:
         display.setColor(rift_pal.fg);
       }
       display.drawTextLeftAlign(4, y, tmp);
+      _item_y[i] = y - 2;              // the fill starts 2px above the text
       y += RIFT_LINE_H;
 
       // One line under the selected action, and only for the four that cost
@@ -1923,7 +1932,16 @@ public:
     y = GROUP_TOP;
     display.drawTextLeftAlign(CX, y, "NODE");
     display.setColor(rift_pal.fg);
-    display.drawTextRightAlign(CR, y, the_mesh.getNodeName());
+    // Truncated, then right-aligned like every other value on this page. It is the
+    // only row here taking free text - node_name is 32 bytes and the column is 156px
+    // - so a long name ran through its own label and off the left edge. Cut rather
+    // than left-aligned, because a value that changes alignment when it grows reads
+    // as a different kind of row.
+    {
+      char nm[20];
+      StrHelper::strncpy(nm, the_mesh.getNodeName(), sizeof(nm));
+      display.drawTextRightAlign(CR, y, nm);
+    }
     y += RIFT_LINE_H;
 
 #ifdef RIFT_INPUT_KEYBOARD
@@ -2214,16 +2232,25 @@ public:
   }
 
   bool handleTouch(int x, int y) override {
+    (void) x;
     if (_mode != MENU) return false;
-    if (x > 158) return false;   // the right column is read-only
-    // integer division truncates toward zero, so without this a tap just above
-    // the first row lands on row 0 and activates it
-    if (y < MENU_TOP) return false;
-    int row = (y - MENU_TOP) / RIFT_LINE_H;
-    if (row >= 0 && row < IT_COUNT) {
-      _sel = row;
-      activate();
-      return true;
+    // Page 2 has no actions. Without this a tap on the readings page was mapped to
+    // an action row and activated - and depending on where the finger landed that
+    // was Delete channel or an advert to the whole mesh, from a screen that gives
+    // no sign of being interactive at all.
+    if (_page != 0) return false;
+
+    // Hit-tested against where the rows were actually drawn. The full width now,
+    // because the rows are 320px wide: the old x > 158 bound was left over from the
+    // two-column layout and made the right half of every row - the half showing the
+    // setting's current value - dead to touch.
+    for (int i = 0; i < IT_COUNT; i++) {
+      if (_item_y[i] < 0) continue;
+      if (y >= _item_y[i] && y < _item_y[i] + 12) {
+        _sel = i;
+        activate();
+        return true;
+      }
     }
     return false;
   }
