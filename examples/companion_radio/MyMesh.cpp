@@ -455,10 +455,6 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
   if (!is_new) dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY); // only schedule lazy write for contacts that are in contacts[]
 }
 
-static int sort_by_recent(const void *a, const void *b) {
-  return ((AdvertPath *) b)->recv_timestamp - ((AdvertPath *) a)->recv_timestamp;
-}
-
 int MyMesh::getPathCacheSize() const { return ADVERT_PATH_TABLE_SIZE; }
 
 int MyMesh::getPathCacheUsed() const {
@@ -467,12 +463,41 @@ int MyMesh::getPathCacheUsed() const {
   return used;
 }
 
+// Recency is monotonic. Sorting on recv_timestamp was wrong for the reason the
+// eviction was wrong: on a node whose RTC was never set every entry carries 0, so the
+// order was arbitrary - and if the clock is later set, or steps, the order changes
+// without any advert having arrived.
+//
+// This also no longer reorders the cache. qsort on advert_paths mutated shared state
+// because a screen wanted sorted output; the copy the caller asked for is the thing
+// that gets sorted. An insertion sort over sixteen entries is a few hundred
+// comparisons at worst and is easier to be sure of than a comparator contract.
 int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
+  if (dest == NULL || max_num <= 0) return 0;
   if (max_num > ADVERT_PATH_TABLE_SIZE) max_num = ADVERT_PATH_TABLE_SIZE;
-  qsort(advert_paths, ADVERT_PATH_TABLE_SIZE, sizeof(advert_paths[0]), sort_by_recent);
 
-  for (int i = 0; i < max_num; i++) {
-    dest[i] = advert_paths[i];
+  uint32_t now = millis();
+  int n = 0;
+  for (int i = 0; i < ADVERT_PATH_TABLE_SIZE && n < max_num; i++) {
+    if (!advert_paths[i].valid) continue;
+
+    // insert by elapsed-since-now, smallest first. Unsigned subtraction, so this is
+    // correct across the millis wrap where comparing the stamps directly is not.
+    uint32_t age = now - advert_paths[i].recv_millis;
+    int at = n;
+    while (at > 0 && (now - dest[at - 1].recv_millis) > age) {
+      dest[at] = dest[at - 1];
+      at--;
+    }
+    dest[at] = advert_paths[i];
+    n++;
+  }
+
+  // The rest is cleared rather than left as whatever the caller's array held. Callers
+  // are written to stop at the first invalid entry, and a stale one here would read as
+  // a node that is still around.
+  for (int i = n; i < max_num; i++) {
+    memset(&dest[i], 0, sizeof(dest[i]));
   }
   return max_num;
 }
@@ -853,7 +878,13 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
 
 uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_timestamp, const uint8_t *data,
                                  uint8_t len, uint8_t *reply) {
+  // Remote input again: data[0] was read with no guarantee a byte arrived, and the
+  // permission mask below reads data[1] on a request that may be one byte long. A
+  // request that cannot be understood gets no reply, which is what returning 0 means.
+  if (data == NULL || len < 1) return 0;
+
   if (data[0] == REQ_TYPE_GET_TELEMETRY_DATA) {
+    if (len < 2) return 0;
     uint8_t permissions = 0;
     uint8_t cp = contact.flags >> 1; // LSB used as 'favourite' bit (so only use upper bits)
 
@@ -901,6 +932,13 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
 }
 
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
+  // Remote input. Every read below is into a buffer whose length a sender chose, and
+  // the tag read was unconditional - a four-byte response, or an empty one, read past
+  // the end. The bytes do not come from unmapped memory on this part, so it does not
+  // fault; it copies whatever is adjacent into out_frame and hands it to the
+  // companion, which is worse than a crash because nothing reports it.
+  if (data == NULL || len < 4) return;
+
   uint32_t tag;
   memcpy(&tag, data, 4);
 
@@ -909,12 +947,14 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     pending_login = 0;
 
     int i = 0;
-    if (memcmp(&data[4], "OK", 2) == 0) { // legacy Repeater login OK response
+    // The legacy form needs data[4..5] and the new one reads as far as data[12], so
+    // each branch states the length it requires rather than trusting the other's.
+    if (len >= 6 && memcmp(&data[4], "OK", 2) == 0) { // legacy Repeater login OK response
       out_frame[i++] = PUSH_CODE_LOGIN_SUCCESS;
       out_frame[i++] = 0; // legacy: is_admin = false
       memcpy(&out_frame[i], contact.id.pub_key, 6);
       i += 6;                                     // pub_key_prefix
-    } else if (data[4] == RESP_SERVER_LOGIN_OK) { // new login response
+    } else if (len >= 13 && data[4] == RESP_SERVER_LOGIN_OK) { // new login response
       uint16_t keep_alive_secs = ((uint16_t)data[5]) * 16;
       if (keep_alive_secs > 0) {
         startConnection(contact, keep_alive_secs);

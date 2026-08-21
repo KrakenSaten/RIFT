@@ -1723,8 +1723,13 @@ private:
       display.drawTextLeftAlign(48, y, riftPayloadTypeName(pt));
 
       display.setColor(rift_pal.mid);
-      snprintf(tmp, sizeof(tmp), "%s %uh", riftRouteTypeName(riftHeaderRouteType(e->header)),
-               (unsigned) riftHopCount(e->path_len));
+      if (e->path_len == 0xFF) {
+        // no path recorded, which is not 63 hops
+        snprintf(tmp, sizeof(tmp), "%s  -", riftRouteTypeName(riftHeaderRouteType(e->header)));
+      } else {
+        snprintf(tmp, sizeof(tmp), "%s %uh", riftRouteTypeName(riftHeaderRouteType(e->header)),
+                 (unsigned) riftHopCount(e->path_len));
+      }
       display.drawTextLeftAlign(108, y, tmp);
 
       // RSSI and SNR are what say whether a packet was comfortable or marginal, and
@@ -2441,6 +2446,14 @@ class RiftConstellationScreen : public RiftScreen {
   int _count;
   int _sel;
   int _scroll;
+
+  // The selection is an identity. _sel is where it was last drawn; the key is what it
+  // means. getRecentlyHeard returns the list ordered by recency, so a single advert
+  // arriving reorders it - and a cursor held only as an index then points at a
+  // different node while the user believes it has not moved. ENTER would message the
+  // wrong one. The identical fix went into RADAR first and this screen did not get it.
+  uint8_t _sel_key[7];
+  bool _have_sel;
   // Where each row was actually drawn, so touch hits what the eye sees rather than
   // what the layout intended - the selected row is 36px tall, so a fixed pitch
   // would put every tap below it on the wrong node.
@@ -2495,8 +2508,28 @@ class RiftConstellationScreen : public RiftScreen {
       live++;
     }
     _count = live;
+
+    // Re-find the selection by key. If it is gone the cursor stays where it is and
+    // adopts what is there now, which is a visible change; silently carrying the
+    // selection onto a different identity is not.
+    if (_have_sel) {
+      int at = -1;
+      for (int i = 0; i < _count; i++) {
+        if (memcmp(_paths[i].pubkey_prefix, _sel_key, sizeof(_sel_key)) == 0) { at = i; break; }
+      }
+      if (at >= 0) _sel = at;
+      else _have_sel = false;
+    }
     if (_sel >= _count) _sel = _count > 0 ? _count - 1 : 0;
     if (_sel < 0) _sel = 0;
+    if (!_have_sel && _count > 0) captureSelection();
+  }
+
+  // Remembers which node the cursor is on, so the next refresh can follow it.
+  void captureSelection() {
+    if (_sel < 0 || _sel >= _count) { _have_sel = false; return; }
+    memcpy(_sel_key, _paths[_sel].pubkey_prefix, sizeof(_sel_key));
+    _have_sel = true;
   }
 
   // The route as text, one hop per name. An unresolved or colliding hash is drawn
@@ -2556,8 +2589,9 @@ class RiftConstellationScreen : public RiftScreen {
 
  public:
   RiftConstellationScreen(UITask* task)
-     : _task(task), _count(0), _sel(0), _scroll(0), _last_refresh(0),
-       _refreshed_once(false) {
+     : _task(task), _count(0), _sel(0), _scroll(0), _have_sel(false),
+       _last_refresh(0), _refreshed_once(false) {
+    memset(_sel_key, 0, sizeof(_sel_key));
     for (int i = 0; i < RIFT_CONST_MAX; i++) _row_y[i] = -1;
   }
 
@@ -2583,7 +2617,17 @@ class RiftConstellationScreen : public RiftScreen {
 
     // ---- heading
     display.setColor(rift_pal.mid);
-    snprintf(tmp, sizeof(tmp), "%d HEARD", _count);
+    // "RECENT", not "HEARD". The cache holds a bounded number of the most recently
+    // heard nodes, so on a mesh larger than the cache "28 HEARD" read as a claim that
+    // 28 is all there are. When it is at capacity the eviction count says so, because
+    // that is the number which decides whether the cache is too small.
+    int cache_used = the_mesh.getPathCacheUsed(), cache_size = the_mesh.getPathCacheSize();
+    if (cache_used >= cache_size && the_mesh.getPathEvictions() > 0) {
+      snprintf(tmp, sizeof(tmp), "%d RECENT, %u LOST", _count,
+               (unsigned) the_mesh.getPathEvictions());
+    } else {
+      snprintf(tmp, sizeof(tmp), "%d RECENT", _count);
+    }
     display.drawTextLeftAlign(2, 2, tmp);
     if (maxhop >= 0) {
       snprintf(tmp, sizeof(tmp), "MAX %d HOPS", maxhop);
@@ -2684,7 +2728,10 @@ class RiftConstellationScreen : public RiftScreen {
         if (!known) {
           display.drawTextLeftAlign(14, dy + 2, "flood, route unknown");
         } else if (ambiguous > 0) {
-          snprintf(tmp, sizeof(tmp), "%d candidates, not resolved", ambiguous);
+          // "ambiguous hops", not "candidates": this counts positions in the route
+          // that could not be resolved, and one such position may itself have had
+          // several candidate nodes behind it.
+          snprintf(tmp, sizeof(tmp), "%d ambiguous hop%s", ambiguous, ambiguous == 1 ? "" : "s");
           display.drawTextLeftAlign(14, dy + 2, tmp);
         } else if (route[0]) {
           snprintf(tmp, sizeof(tmp), "via %s", route);
@@ -2746,7 +2793,11 @@ class RiftConstellationScreen : public RiftScreen {
     // three rows tall and a fixed pitch would select the wrong node below it.
     for (int i = 0; i < _count; i++) {
       if (_row_y[i] < 0) continue;
-      if (y >= _row_y[i] && y < _row_y[i] + rowHeight(i)) { _sel = i; return true; }
+      if (y >= _row_y[i] && y < _row_y[i] + rowHeight(i)) {
+        _sel = i;
+        captureSelection();
+        return true;
+      }
     }
     return false;
   }
@@ -2756,8 +2807,8 @@ class RiftConstellationScreen : public RiftScreen {
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
     // Not wrapped: this is a position in a list, and jumping from the last node to
     // the first reads as the list having moved rather than the cursor.
-    if (c == KEY_UP)   { if (_sel > 0) _sel--; return true; }
-    if (c == KEY_DOWN) { if (_sel + 1 < _count) _sel++; return true; }
+    if (c == KEY_UP)   { if (_sel > 0) { _sel--; captureSelection(); } return true; }
+    if (c == KEY_DOWN) { if (_sel + 1 < _count) { _sel++; captureSelection(); } return true; }
     if (c == KEY_ENTER) {
       if (_count == 0) return true;
       const uint8_t* key = _paths[_sel].pubkey_prefix;
@@ -5054,7 +5105,14 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   // The text as well as the header. The message history already holds it, but the
   // log is where it sits next to the advert that preceded it and the ack that
   // followed, and that ordering is the thing the history cannot show.
-  riftLogf("rx %dh %s: %s", (int) riftHopCount(path_len), origin, text);
+  // path_len 0xFF means "no path recorded", and riftHopCount masks the low six bits,
+  // so a direct message logged as "63h" - next to an origin that already said "(D)".
+  // A diagnostic that knowingly misreports protocol metadata is worse than none.
+  if (path_len == 0xFF) {
+    riftLogf("rx direct %s: %s", origin, text);
+  } else {
+    riftLogf("rx %dh %s: %s", (int) riftHopCount(path_len), origin, text);
+  }
   ((RiftMsgPreviewScreen *) msg_preview)->onNewMsg();
 
   // Don't take the screen away from someone mid-input: a half-typed line in
