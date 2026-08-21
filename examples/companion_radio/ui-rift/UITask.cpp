@@ -4924,20 +4924,28 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 
   if (_display != NULL) {
     // The only notification this board has. There is no sounder and no vibration
-    // motor in this variant, so a message arriving while the screen is dark has
-    // exactly one way to announce itself. Suppressed only when a companion app is
-    // attached, because then the phone is doing the notifying.
-    // Logged because afterwards "no notification arrived" and "the screen was
-    // already on" and "a companion was attached so the phone was notifying" all
-    // look identical, and the first is a bug while the other two are the design.
-    if (!_display->isOn() && hasConnection()) {
-      riftLogf("wake: suppressed, companion attached");
-    }
-    if (!_display->isOn() && !hasConnection()) {
+    // motor in this variant, so notify() compiles away to nothing - a message
+    // arriving while the screen is dark has exactly one way to announce itself, and
+    // this line is it.
+    //
+    // It used to be suppressed while hasConnection() was true, on the reasoning that
+    // a companion app was attached and the phone would be notifying. That reasoning
+    // was wrong, and it is the same wrong as isExternalPowered() earlier in this
+    // project: hasConnection() is _serial->isConnected(), and with ENABLE_USB_INTERFACE
+    // that is the USB CDC state - true as soon as any host opens the port. A PC used
+    // for flashing, a serial monitor, a charger that enumerates: all of them made it
+    // true with no companion app anywhere near the device, and the notification the
+    // user cared about most was silently switched off.
+    //
+    // The costs are not symmetric. A wake that was not needed costs a lit screen. A
+    // wake that was needed and suppressed costs the message. So it always wakes, and
+    // the link state is logged rather than acted on - if a phone really is attached
+    // and notifying, the line in the log says so and the duplicate is visible.
+    if (!_display->isOn()) {
       _display->turnOn();
       if (rift_msg_wakes < 0xFFFF) rift_msg_wakes++;
       rift_last_wake_ms = (uint32_t) millis();
-      riftLogf("wake: screen on for message");
+      riftLogf("wake: screen on%s", hasConnection() ? " (link up)" : "");
     }
     if (_display->isOn()) {
       _auto_off = millis() + AUTO_OFF_MILLIS;
