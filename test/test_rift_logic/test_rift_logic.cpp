@@ -749,6 +749,51 @@ TEST(CivilTime, ParserIsStrict) {
     EXPECT_FALSE(riftParseCivil("2026-02-30 00:00", &e));   // validation still applies
 }
 
+// ------------------------------------------------------------- packet decoding
+
+TEST(PacketNames, HeaderSplitsIntoRouteAndType) {
+    // MeshCore packs the route in bits 0-1 and the payload type in bits 2-5. An
+    // ADVERT (0x04) sent as flood (0x01) is therefore 0x11.
+    EXPECT_EQ(0x04, riftHeaderPayloadType(0x11));
+    EXPECT_EQ(0x01, riftHeaderRouteType(0x11));
+    // and a direct TXT_MSG (0x02, route 0x02) is 0x0A
+    EXPECT_EQ(0x02, riftHeaderPayloadType(0x0A));
+    EXPECT_EQ(0x02, riftHeaderRouteType(0x0A));
+    // bits above 5 belong to neither and must not leak into either
+    EXPECT_EQ(0x04, riftHeaderPayloadType(0xD1));
+    EXPECT_EQ(0x01, riftHeaderRouteType(0xD1));
+}
+
+TEST(PacketNames, EveryDefinedTypeHasAName) {
+    // The table is the kind of thing an off-by-one hides in, and a reading of the
+    // screen would not catch a shifted row - every value would still show *a* name.
+    EXPECT_STREQ("REQ",     riftPayloadTypeName(0x00));
+    EXPECT_STREQ("RESP",    riftPayloadTypeName(0x01));
+    EXPECT_STREQ("TXT",     riftPayloadTypeName(0x02));
+    EXPECT_STREQ("ACK",     riftPayloadTypeName(0x03));
+    EXPECT_STREQ("ADVERT",  riftPayloadTypeName(0x04));
+    EXPECT_STREQ("GRP TXT", riftPayloadTypeName(0x05));
+    EXPECT_STREQ("GRP DAT", riftPayloadTypeName(0x06));
+    EXPECT_STREQ("ANONREQ", riftPayloadTypeName(0x07));
+    EXPECT_STREQ("PATH",    riftPayloadTypeName(0x08));
+    EXPECT_STREQ("TRACE",   riftPayloadTypeName(0x09));
+    EXPECT_STREQ("MULTI",   riftPayloadTypeName(0x0A));
+    EXPECT_STREQ("CONTROL", riftPayloadTypeName(0x0B));
+    EXPECT_STREQ("RAW",     riftPayloadTypeName(0x0F));
+    // the gaps are reserved and must read as unknown rather than as a neighbour
+    EXPECT_STREQ("?", riftPayloadTypeName(0x0C));
+    EXPECT_STREQ("?", riftPayloadTypeName(0x0E));
+}
+
+TEST(PacketNames, RouteNamesFitTheColumn) {
+    EXPECT_STREQ("TF", riftRouteTypeName(0x00));
+    EXPECT_STREQ("F",  riftRouteTypeName(0x01));
+    EXPECT_STREQ("D",  riftRouteTypeName(0x02));
+    EXPECT_STREQ("TD", riftRouteTypeName(0x03));
+    // masked, so a whole header can be passed by mistake without producing rubbish
+    EXPECT_STREQ("F",  riftRouteTypeName(0x11));
+}
+
 // ---------------------------------------------------------- millis deadlines
 
 TEST(Due, OrdinaryCase) {

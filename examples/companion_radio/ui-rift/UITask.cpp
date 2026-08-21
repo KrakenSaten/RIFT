@@ -1,6 +1,7 @@
 #include "UITask.h"
 #include "RiftLogic.h"
 #include "RiftEventLog.h"
+#include "RiftRxLog.h"
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/UTF8Helpers.h>
 #include "../MyMesh.h"
@@ -1139,9 +1140,10 @@ class RiftSystemScreen : public RiftScreen {
   // A small action menu rather than hidden letter shortcuts - discoverable, and
   // it leaves the printable keys free for the text fields.
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
-              CH_DELETE, CH_DELETE_CONFIRM, LOG, SET_TIME };
+              CH_DELETE, CH_DELETE_CONFIRM, LOG, SET_TIME, RXLOG };
   enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_DELCHANNEL,
-              IT_PATHMODE, IT_SCREEN, IT_DAYMODE, IT_SETTIME, IT_LOG, IT_COUNT };
+              IT_PATHMODE, IT_SCREEN, IT_DAYMODE, IT_SETTIME, IT_LOG, IT_RXLOG,
+              IT_COUNT };
 
   int _log_scroll = 0;   // 0 = pinned to the newest line
 
@@ -1149,6 +1151,7 @@ class RiftSystemScreen : public RiftScreen {
   // neither column got more room that way, and the right one is the one that grows
   // every time a diagnostic is added.
   int _page = 0;
+  int _rx_scroll = 0;    // 0 = pinned to the newest packet
 
   // most labels are fixed; the path-mode row shows its current value
   void itemLabel(int i, char* buf, size_t len) {
@@ -1159,7 +1162,9 @@ class RiftSystemScreen : public RiftScreen {
       "Add channel",
       "Delete channel",
     };
-    if (i == IT_SETTIME) {
+    if (i == IT_RXLOG) {
+      snprintf(buf, len, "View RX log (%u)", (unsigned) riftRxLog().total);
+    } else if (i == IT_SETTIME) {
       // the current value in the label, so a wrong clock is visible without having
       // to open the editor to find out
       uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
@@ -1287,6 +1292,11 @@ private:
       case IT_LOG:
         _log_scroll = 0;   // open at the newest, which is what you came to see
         _mode = LOG;
+        break;
+
+      case IT_RXLOG:
+        _rx_scroll = 0;
+        _mode = RXLOG;
         break;
 
       case IT_SETTIME: {
@@ -1648,6 +1658,103 @@ private:
     return 1000;
   }
 
+  // Every packet the radio hears, live.
+  //
+  // The event log says what happened to messages; this says what arrived on the air,
+  // including everything not addressed to this node - other people's traffic, adverts,
+  // acks, routed packets passing through. It is the difference between "my messages
+  // are not arriving" and "this radio is not hearing anything", which are two
+  // problems and were previously one symptom.
+  int renderRxLog(DisplayDriver& display) {
+    renderHeading(display, "RX LOG");
+    display.setTextSize(1);
+
+    RiftRxLog& log = riftRxLog();
+    char tmp[64];
+
+    display.setColor(rift_pal.mid);
+    snprintf(tmp, sizeof(tmp), "%u heard", (unsigned) log.total);
+    display.drawTextLeftAlign(2, 20, tmp);
+    // drawn at the same x as the data below it, not as one right-aligned string:
+    // a header that does not sit over its column is worse than no header
+    display.drawTextLeftAlign(48, 20, "TYPE");
+    display.drawTextLeftAlign(108, 20, "RT HOP");
+    display.drawTextRightAlign(206, 20, "RSSI");
+    display.drawTextRightAlign(262, 20, "SNR");
+    display.drawTextRightAlign(316, 20, "LEN");
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 32, display.width(), 1);
+
+    if (log.count == 0) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(2, 40, "Nothing heard yet.");
+      display.setColor(rift_pal.dim);
+      display.drawTextLeftAlign(2, 56, "This counts every packet on the air,");
+      display.drawTextLeftAlign(2, 68, "not only messages for this node.");
+      renderNavBar(display, RIFT_NAV_SYSTEM);
+      return 400;
+    }
+
+    if (_rx_scroll > log.count - 1) _rx_scroll = log.count - 1;
+    if (_rx_scroll < 0) _rx_scroll = 0;
+
+    const int TOP = 38, BOTTOM = 196;
+    int rows = (BOTTOM - TOP) / RIFT_LINE_H;
+    int y = TOP;
+    for (int i = 0; i < rows; i++, y += RIFT_LINE_H) {
+      const RiftRxLog::Entry* e = log.peek(_rx_scroll + i);
+      if (e == NULL) break;
+
+      // seconds since boot, like the event log, so the two can be read against each
+      // other - and monotonic, so it holds with no clock set
+      display.setColor(rift_pal.dim);
+      snprintf(tmp, sizeof(tmp), "%u.%u", (unsigned) (e->at_ms / 1000u),
+               (unsigned) ((e->at_ms % 1000u) / 100u));
+      display.drawTextRightAlign(42, y, tmp);
+
+      uint8_t pt = riftHeaderPayloadType(e->header);
+      display.setColor(rift_pal.fg);
+      display.drawTextLeftAlign(48, y, riftPayloadTypeName(pt));
+
+      display.setColor(rift_pal.mid);
+      snprintf(tmp, sizeof(tmp), "%s %uh", riftRouteTypeName(riftHeaderRouteType(e->header)),
+               (unsigned) riftHopCount(e->path_len));
+      display.drawTextLeftAlign(108, y, tmp);
+
+      // RSSI and SNR are what say whether a packet was comfortable or marginal, and
+      // a marginal one that decoded is the interesting case
+      display.setColor(rift_pal.fg);
+      snprintf(tmp, sizeof(tmp), "%d", (int) e->rssi);
+      display.drawTextRightAlign(206, y, tmp);
+      // Formatted from the magnitude with an explicit sign. Dividing a negative by
+      // four truncates toward zero, so an SNR of -0.5 came out as "0.5" - the sign
+      // vanished for exactly the marginal packets this column exists to show.
+      {
+        int q = (int) e->snr4;
+        bool neg = q < 0;
+        if (neg) q = -q;
+        snprintf(tmp, sizeof(tmp), "%s%d.%d", neg ? "-" : "", q / 4, (q % 4) * 25 / 10);
+      }
+      display.drawTextRightAlign(262, y, tmp);
+      snprintf(tmp, sizeof(tmp), "%u", (unsigned) e->len);
+      display.drawTextRightAlign(316, y, tmp);
+    }
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 200, display.width(), 1);
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(2, 206, "up/down line  L/R page  ENTER back");
+    display.setColor(rift_pal.mid);
+    display.drawTextRightAlign(318, 206, _rx_scroll == 0 ? "live" : "held");
+
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    // Faster than the other screens because this one is meant to be watched. Still
+    // coarse enough that the full redraw does not fight the radio for the SPI bus,
+    // which is the thing that would make the log it is showing get shorter.
+    return 400;
+  }
+
   int renderSetTime(DisplayDriver& display) {
     renderHeading(display, "SET TIME");
     display.setTextSize(1);
@@ -1699,6 +1806,7 @@ public:
       case CH_DELETE_CONFIRM: return renderDeleteConfirm(display);
       case LOG:            return renderLog(display);
       case SET_TIME:       return renderSetTime(display);
+      case RXLOG:          return renderRxLog(display);
       default: break;
     }
 
@@ -2193,6 +2301,17 @@ public:
         return true;
       }
       if (!_edit.handleKey(c)) _mode = MENU;   // backspace on an empty field backs out
+      return true;
+    }
+
+    if (_mode == RXLOG) {
+      // Scrolling away from the newest freezes the view - the footer says "held" -
+      // because a list that reflows under the eye while packets arrive cannot be read.
+      if (c == KEY_UP)    { _rx_scroll++; return true; }
+      if (c == KEY_DOWN)  { if (_rx_scroll > 0) _rx_scroll--; return true; }
+      if (c == KEY_LEFT)  { _rx_scroll += 13; return true; }
+      if (c == KEY_RIGHT) { _rx_scroll = _rx_scroll > 13 ? _rx_scroll - 13 : 0; return true; }
+      _mode = MENU;
       return true;
     }
 

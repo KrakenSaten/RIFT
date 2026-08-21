@@ -7,6 +7,7 @@
 // RIFT-only. Both headers are standalone, and every call site below is guarded,
 // so the other T-Deck builds are untouched by this.
 #include "ui-rift/RiftEventLog.h"
+#include "ui-rift/RiftRxLog.h"
 #include "ui-rift/RiftLogic.h"
 #endif
 // Channel PSKs are shared between nodes as base64. Declared rather than
@@ -305,6 +306,19 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
   _last_rx_millis = millis();
   _rx_ever = true;
   _rx_count++;
+
+#ifdef RIFT_VERSION
+  // Every packet, not only the ones addressed to this node. Six fields copied and
+  // nothing formatted: this runs on the packet path, and there is no watchdog on the
+  // main loop, so the string work waits until somebody opens the screen.
+  //
+  // The header is raw[0] and the path length raw[1] - Packet's own layout - and both
+  // are read defensively because a runt frame would otherwise index past the buffer.
+  riftRxLog().add(snr, rssi,
+                  (len > 0) ? raw[0] : 0,
+                  (len > 1) ? raw[1] : 0,
+                  len);
+#endif
 
   if (_serial->isConnected() && len + 3 <= MAX_FRAME_SIZE) {
     int i = 0;

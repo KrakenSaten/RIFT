@@ -291,6 +291,49 @@ static inline bool riftParseCivil(const char* text, uint32_t* out) {
   return riftEpochFromCivil(v[0], v[1], v[2], v[3], v[4], out);
 }
 
+// ------------------------------------------------------------- packet decoding
+//
+// The names for a raw packet header, for the RX log. Kept here rather than beside
+// the ring so they can be tested without an Arduino: the mapping is a table, and a
+// table with an off-by-one is exactly the thing a test catches and a reading does
+// not. Values are MeshCore's PAYLOAD_TYPE_* and ROUTE_TYPE_*; the header packs the
+// route in bits 0-1 and the type in bits 2-5.
+//
+// Short on purpose. The log row also carries time, hops, RSSI, SNR and length, and
+// at 6px a character the type has about eight to spend.
+static inline const char* riftPayloadTypeName(uint8_t payload_type) {
+  switch (payload_type) {
+    case 0x00: return "REQ";
+    case 0x01: return "RESP";
+    case 0x02: return "TXT";
+    case 0x03: return "ACK";
+    case 0x04: return "ADVERT";
+    case 0x05: return "GRP TXT";
+    case 0x06: return "GRP DAT";
+    case 0x07: return "ANONREQ";
+    case 0x08: return "PATH";
+    case 0x09: return "TRACE";
+    case 0x0A: return "MULTI";
+    case 0x0B: return "CONTROL";
+    case 0x0F: return "RAW";
+    default:   return "?";
+  }
+}
+
+// F and D are flood and direct; the T prefix means the packet also carries transport
+// codes. Two characters, because this column sits between two numbers.
+static inline const char* riftRouteTypeName(uint8_t route_type) {
+  switch (route_type & 0x03) {
+    case 0x00: return "TF";
+    case 0x01: return "F";
+    case 0x02: return "D";
+    default:   return "TD";
+  }
+}
+
+static inline uint8_t riftHeaderPayloadType(uint8_t header) { return (header >> 2) & 0x0F; }
+static inline uint8_t riftHeaderRouteType(uint8_t header)   { return header & 0x03; }
+
 // ------------------------------------------------------------ millis deadlines
 //
 // A plain millis() > deadline comparison is not wrap-safe. millis() wraps at
