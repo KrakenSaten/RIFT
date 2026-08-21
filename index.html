@@ -68,7 +68,23 @@
 Version <strong id="ver">(loading)</strong>.</p>
 
 <div class="flash">
-  <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+  <esp-web-install-button manifest="manifest.json">
+    <!-- Overrides ESP Web Tools' own unsupported message, which names Firefox.
+         Firefox has never implemented WebSerial and has declined to, so that
+         message sends people to a browser that cannot work - and it contradicted
+         the line directly below it on this page. -->
+    <span slot="unsupported">
+      <strong>This browser cannot flash an ESP device.</strong>
+      Use <strong>Chrome</strong> or <strong>Edge</strong> on a desktop or laptop,
+      or take the command-line route below. Firefox and Safari do not implement
+      WebSerial, and no browser on a phone or tablet does.
+    </span>
+    <span slot="not-allowed">
+      Flashing needs this page over https and permission to open a serial port.
+      If you are on https and still see this, the port was refused or is already
+      open in another program - close any serial monitor and reload.
+    </span>
+  </esp-web-install-button>
   <p style="color:var(--dim);margin:.9rem 0 0;font-size:13px">
     Requires Chrome or Edge on desktop. Firefox and Safari have no WebSerial —
     use the command-line route below.
