@@ -1236,6 +1236,75 @@ TEST(Settings, EncodeAndDecodeRoundTrip) {
     }
 }
 
+// ------------------------------------------- unread as the single source of truth
+
+// The reviewer's first scenario. A message arrives in the conversation already on
+// screen: it is marked, the frame showing it clears it, and nothing is left lit.
+TEST(UnreadModel, AMessageInTheOpenConversationLeavesNothingLit) {
+    RiftUnread u;
+    u.mark(riftConvChannel(0));
+    EXPECT_TRUE(u.any());
+    u.clear(riftConvChannel(0));           // what COMMS does on the next render
+    EXPECT_FALSE(u.any());
+    EXPECT_EQ(0, u.total());
+}
+
+// The reviewer's second scenario, and the behaviour change. Dismissing the popup used
+// to zero a global counter, marking every conversation read including ones whose
+// messages had scrolled past the six rows it shows.
+TEST(UnreadModel, DismissingThePreviewDoesNotMarkConversationsRead) {
+    RiftUnread u;
+    u.mark(riftConvChannel(0));
+    u.mark(riftConvDM((const uint8_t*) "PEER01"));
+    ASSERT_EQ(2, u.total());
+
+    u.onPreviewDismissed();
+
+    EXPECT_TRUE(u.any());                  // the dot stays on
+    EXPECT_EQ(2, u.total());
+    EXPECT_EQ(1, u.count(riftConvChannel(0)));
+    EXPECT_EQ(1, u.count(riftConvDM((const uint8_t*) "PEER01")));
+}
+
+// Opening each one in turn is what clears it, which is the defined action that
+// replaced dismissal as the way the dot goes out.
+TEST(UnreadModel, OpeningEachConversationIsWhatClearsTheDot) {
+    RiftUnread u;
+    u.mark(riftConvChannel(0));
+    u.mark(riftConvDM((const uint8_t*) "PEER01"));
+
+    u.clear(riftConvChannel(0));
+    EXPECT_TRUE(u.any());                  // the DM is still unread
+    u.clear(riftConvDM((const uint8_t*) "PEER01"));
+    EXPECT_FALSE(u.any());
+}
+
+// A message with no conversation identity cannot be given a row or opened, so it is
+// counted rather than dropped - a model that silently loses a notification is worse
+// than one that admits it cannot place it.
+TEST(UnreadModel, AnUnattributableMessageStillLightsTheDot) {
+    RiftUnread u;
+    u.mark(riftConvUnknown());
+    EXPECT_TRUE(u.any());
+    EXPECT_EQ(1, u.total());
+    EXPECT_EQ(0, u.n);                     // and occupies no conversation row
+
+    u.onPreviewDismissed();                // the only acknowledgement available
+    EXPECT_FALSE(u.any());
+}
+
+TEST(UnreadModel, TotalCountsEveryConversationAndSaturates) {
+    RiftUnread u;
+    u.mark(riftConvChannel(0));
+    u.mark(riftConvChannel(0));
+    u.mark(riftConvChannel(1));
+    u.mark(riftConvUnknown());
+    EXPECT_EQ(4, u.total());
+
+    for (int i = 0; i < 300; i++) u.mark(riftConvChannel(2));
+    EXPECT_EQ(255 + 4, u.total());         // per-conversation saturates, total does not wrap
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

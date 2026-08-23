@@ -53,9 +53,6 @@ void riftLoadSettings();
 void riftSaveSettings();
 void riftApplyPalette(bool day);
 
-// Unread count mirrored out of UITask so the nav bar - a free function called
-// from thirteen places - can draw its dot without changing every signature.
-extern int rift_nav_unread;
 
 // Battery percentage, mirrored for the same reason. It moved from the title bar
 // to the nav bar, which had 32px of unused width to the right of SYSTEM.

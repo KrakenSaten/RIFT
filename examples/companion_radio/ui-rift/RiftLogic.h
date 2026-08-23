@@ -992,8 +992,35 @@ struct RiftUnread {
   uint8_t counts[RIFT_UNREAD_MAX];   // capped at 255; the dot only needs "any"
   int n = 0;
 
+  // Arrived with no conversation identity, so there is no row to put a dot on and no
+  // conversation to open in order to clear it. Counted rather than dropped: this is
+  // the authoritative unread model now, and a model that silently loses a
+  // notification is worse than one that admits it cannot place it. Nothing in RIFT
+  // produces these today - both MyMesh paths carry identity - so a non-zero value here
+  // means some caller is using the older entry point.
+  uint8_t unattributable = 0;
+
+  // True if anything at all is unread. This is what the nav dot means.
+  bool any() const { return n > 0 || unattributable > 0; }
+
+  // Saturating, because the caller only ever prints it.
+  uint16_t total() const {
+    uint32_t t = unattributable;
+    for (int i = 0; i < n; i++) t += counts[i];
+    return (uint16_t) (t > 0xFFFFu ? 0xFFFFu : t);
+  }
+
+  // Dismissing the preview is the only acknowledgement possible for something with no
+  // conversation to open, so it is the only thing that clears these. It must not touch
+  // the per-conversation counts: those are cleared by opening the conversation, and
+  // resetting them here was half of what made two models disagree.
+  void onPreviewDismissed() { unattributable = 0; }
+
   void mark(const RiftConvKey& k) {
-    if (k.kind == RIFT_CONV_UNKNOWN) return;   // nothing to attribute it to
+    if (k.kind == RIFT_CONV_UNKNOWN) {
+      if (unattributable < 255) unattributable++;
+      return;
+    }
     for (int i = 0; i < n; i++) {
       if (!riftConvSame(keys[i], k)) continue;
       uint8_t c = counts[i] < 255 ? counts[i] + 1 : 255;

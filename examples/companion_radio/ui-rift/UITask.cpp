@@ -640,8 +640,15 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
     display.drawTextCentered(NAV_CENTRE_X[i], 228, NAV_LABELS[i]);
   }
 
-  // unread was not surfaced in the nav at all - you had to open COMMS to find out
-  if (rift_nav_unread > 0) {
+  // Straight from the unread model, which is the only thing that tracks this now.
+  //
+  // It used to come from a counter the message preview owned, and the two could
+  // disagree in both directions. The bad case was easy to reach: with COMMS open on a
+  // channel, a message arriving in that same channel marked the model, the popup was
+  // correctly suppressed because the message was already on screen - and so nothing
+  // ever dismissed the popup, which was the only thing that cleared the counter. The
+  // dot stayed lit permanently for a message that had been read.
+  if (msg_unread.any()) {
     display.setColor(rift_pal.accent);
     display.fillRect(246, 227, 3, 3);
   }
@@ -944,7 +951,6 @@ void riftSaveSettings() {
   f.close();
 #endif
 }
-int rift_nav_unread = 0;
 int rift_nav_batt_pct = 0;
 // Which SYSTEM page is showing, so the nav bar can say 1/2 in the slack where the
 // battery percentage normally sits. Only SYSTEM writes it; the other four screens
@@ -4215,20 +4221,14 @@ public:
 
 class RiftMsgPreviewScreen : public RiftScreen {
   UITask* _task;
-  int num_unread;
 
 public:
-  RiftMsgPreviewScreen(UITask* task) : _task(task) { num_unread = 0; }
+  RiftMsgPreviewScreen(UITask* task) : _task(task) { }
 
   // A popup over whatever the user is doing, not somewhere they navigated to.
   // This is what keeps RADAR's teardown and SYSTEM's secret wipe from firing
   // when a message arrives; both used to, and both were bugs.
   bool isOverlay() const override { return true; }
-
-  void onNewMsg() {
-    if (num_unread < RIFT_MSG_LOG_SIZE) num_unread++;
-    rift_nav_unread = num_unread;   // what the nav dot means: unread *here*
-  }
 
   // Drawn over the screen the user is on, after its own render() and inside the
   // same frame - the mechanism showAlert() already used. It is a panel rather
@@ -4259,7 +4259,10 @@ public:
     display.drawTextLeftAlign(x + 6, y + 6, "MESSAGES");
 
     char tmp[40];
-    sprintf(tmp, "Unread: %d", num_unread);
+    // From the model rather than from a count of its own. This panel presents the
+    // newest few entries of the message log; how much is unread is not a fact about
+    // the panel.
+    sprintf(tmp, "Unread: %d", (int) msg_unread.total());
     display.setColor(rift_pal.mid);
     display.drawTextRightAlign(x + w - 6, y + 6, tmp);
 
@@ -4331,13 +4334,19 @@ public:
   }
 
 private:
-  // Dismissing zeroes the count even when more than RIFT_PREVIEW_ROWS arrived, so
-  // strictly it claims more was read than was shown. Accepted deliberately: the
-  // full history is in COMMS and the nav dot means "unread here". Leaving the dot
-  // lit for what scrolled past would recreate the nagging this replaced.
+  // Dismissing no longer clears the unread state, and that is the behaviour change.
+  //
+  // It used to zero a global counter, which meant glancing at a popup marked every
+  // conversation read - including ones whose messages had scrolled past the six rows
+  // this panel shows. The old comment accepted that deliberately, on the grounds that
+  // leaving the dot lit would nag. What actually removes the nag is that the dot now
+  // clears per conversation as each one is opened, which is a defined action rather
+  // than a side effect of dismissing a popup.
+  //
+  // What dismissal does still acknowledge is anything that arrived without a
+  // conversation to open, because nothing else can.
   void clearUnread() {
-    num_unread = 0;
-    rift_nav_unread = 0;
+    msg_unread.onPreviewDismissed();
   }
 };
 
@@ -5929,7 +5938,6 @@ void UITask::newMsgConv(uint8_t path_len, const char* from_name, const char* tex
   // that have to agree.
   msg_unread.mark(conv);
 
-  ((RiftMsgPreviewScreen *) msg_preview)->onNewMsg();
 
   // Don't take the screen away from someone mid-input: a half-typed line in
   // COMMS, a channel name being entered, or a one-time key being read. Each
