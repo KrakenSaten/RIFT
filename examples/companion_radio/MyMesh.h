@@ -125,6 +125,42 @@ public:
   int  getPathCacheSize() const;   // defined out of line: the table size is #defined below
   uint16_t getPathEvictions() const { return path_evictions; }
 
+  // ------------------------------------------------- zero-hop repeater discovery
+  //
+  // An active question the rest of this firmware cannot ask: which repeaters can
+  // hear *me*, right now, and how well in both directions.
+  //
+  // A DISCOVER_REQ control packet is sent zero-hop with a type filter, and every
+  // repeater in direct range answers with its own SNR reading of our request plus
+  // its identity. So a response carries both halves of the link - how they heard
+  // us and how we heard them - and asymmetric links are common. Adverts only ever
+  // tell us the inbound half.
+  //
+  // The wire format is not invented here: examples/simple_repeater/MyMesh.cpp
+  // implements the responder and its own `discover.neighbors`, and this mirrors it
+  // byte for byte. docs/payloads.md documents it.
+  //
+  // Responses trickle in. Repeaters deliberately answer after a widened random
+  // delay, because many of them reply at once, so the window stays open for
+  // RIFT_DISCOVER_WINDOW_MS rather than expecting an immediate answer.
+  struct DiscoveredRepeater {
+    uint8_t pubkey[32];
+    int8_t  snr_they_heard_us;   // from the response payload, SNR*4
+    int8_t  snr_we_heard_them;   // from the radio on the response itself, SNR*4
+    uint32_t at_millis;
+  };
+  #define MAX_DISCOVERED_REPEATERS  16
+  #define RIFT_DISCOVER_WINDOW_MS   30000
+
+  // Starts a round. Returns false if the packet could not be allocated.
+  bool startRepeaterDiscovery();
+  bool isDiscovering() const;
+  uint32_t discoveryElapsedMs() const;
+  int  getDiscoveredCount() const { return discovered_count; }
+  const DiscoveredRepeater* getDiscovered(int i) const {
+    return (i >= 0 && i < discovered_count) ? &discovered[i] : NULL;
+  }
+
   // Mesh receive activity. Nothing tracked this before, so the only "is the
   // network there" signal any UI could reach was the USB/BLE companion link -
   // a different question entirely.
@@ -296,6 +332,11 @@ private:
   unsigned long dirty_contacts_expiry;
 
   TransportKey send_scope;
+
+  DiscoveredRepeater discovered[MAX_DISCOVERED_REPEATERS];
+  int discovered_count;
+  uint32_t discover_tag;        // 0 when no round is open
+  unsigned long discover_until;
 
   bool _rx_ever;
   unsigned long _last_rx_millis;

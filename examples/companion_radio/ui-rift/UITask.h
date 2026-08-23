@@ -193,6 +193,8 @@ private:
 
   // Nordic character picker, raised by double-tapping a base vowel on COMMS.
   RiftScreen* nordic_picker;
+  // zero-hop repeater discovery result, raised from the home screen
+  RiftScreen* discover_overlay;
 
   void userLedHandler();
 
@@ -213,6 +215,7 @@ public:
     curr = NULL;
     _overlay = NULL;
     nordic_picker = NULL;
+    discover_overlay = NULL;
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
@@ -228,6 +231,9 @@ public:
   // Offer a held key to the Nordic picker. Does nothing unless COMMS is showing
   // and the key actually has variants.
   void openNordicPicker(char base);
+
+  // Ask which repeaters can hear us, right now. Zero-hop: direct neighbours only.
+  void startRepeaterDiscovery();
 
   // Real navigation to COMMS, dismissing any popup on the way. The message
   // preview needs it: Enter there means "show me the full history", and the

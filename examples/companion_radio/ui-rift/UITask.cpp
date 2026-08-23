@@ -1006,6 +1006,8 @@ class RiftMeshScreen : public RiftScreen {
   UITask* _task;
   NodePrefs* _node_prefs;
   int _tick;
+  // recorded at render so a tap hits the box actually drawn, like the COMMS tabs
+  int _btn_x0 = 0, _btn_x1 = 0;
 
 public:
   RiftMeshScreen(UITask* task, NodePrefs* node_prefs)
@@ -1118,17 +1120,44 @@ public:
     sprintf(tmp, "%.3fMHz  SF%d  %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
     display.drawTextCentered(display.width() / 2, 182, tmp);
 
-    display.setColor(rift_pal.dim);
-    display.drawTextCentered(display.width() / 2, 202, "roll trackball L/R to change screen");
+    // The one action on this screen, drawn as a button because it is one - an
+    // outlined box with the accent, rather than a line of hint text that happens to
+    // be pressable. Both ENTER and a tap on it start a round.
+    //
+    // Zero-hop is in the label on purpose. It asks direct neighbours only, and a
+    // name that implied it searched the mesh would be a promise it cannot keep.
+    {
+      const char* label = the_mesh.isDiscovering() ? "DISCOVERING..." : "ENTER: DISCOVER 0-HOP REPEATERS";
+      int lw = (int) strlen(label) * RIFT_CHAR_W + 12;
+      int bx = (display.width() - lw) / 2;
+      display.setColor(rift_pal.accent);
+      display.drawRect(bx, DISCOVER_BTN_Y, lw, 14);
+      display.setColor(the_mesh.isDiscovering() ? rift_pal.accent : rift_pal.fg);
+      display.drawTextCentered(display.width() / 2, DISCOVER_BTN_Y + 3, label);
+      _btn_x0 = bx;
+      _btn_x1 = bx + lw;
+    }
 
     renderNavBar(display, RIFT_NAV_MESH);
-    return 700;   // drives the blip; slow enough that the full redraw does not flicker
+    // while a round is open the button label and the result count both move, so
+    // refresh faster than the blip alone would need
+    return the_mesh.isDiscovering() ? 300 : 700;
   }
 
+  static const int DISCOVER_BTN_Y = 198;
+
   bool handleInput(char c) override {
+    if (c == KEY_ENTER) { _task->startRepeaterDiscovery(); return true; }
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
     return false;
+  }
+
+  bool handleTouch(int x, int y) override {
+    if (y < DISCOVER_BTN_Y - 2 || y > DISCOVER_BTN_Y + 14) return false;
+    if (_btn_x0 <= 0 || x < _btn_x0 || x > _btn_x1) return false;   // not drawn yet, or a miss
+    _task->startRepeaterDiscovery();
+    return true;
   }
 };
 
@@ -4919,6 +4948,108 @@ public:
   }
 };
 
+// Result of a zero-hop repeater discovery round.
+//
+// An overlay, so the home screen keeps answering its own question underneath and
+// gets handed back untouched. Fourth use of that mechanism.
+//
+// The two SNR columns are the point of the feature. `rx` is how well we heard the
+// response; `tx` is the SNR the repeater reported for our request. Nothing else in
+// this firmware can show the second one - adverts only ever tell us the inbound
+// half - and an asymmetric link is exactly the thing worth knowing before you rely
+// on a route.
+class RiftDiscoverScreen : public RiftScreen {
+  UITask* _task;
+
+public:
+  RiftDiscoverScreen(UITask* task) : _task(task) { }
+
+  bool isOverlay() const override { return true; }
+
+  int render(DisplayDriver& display) override {
+    const int x = 6, w = display.width() - 12;
+    const int y = 22, h = 186;
+    const int inner = w - 12;
+
+    display.setColor(rift_pal.bg);
+    display.fillRect(x, y, w, h);
+    display.setColor(rift_pal.accent);
+    display.drawRect(x, y, w, h);
+
+    display.setTextSize(1);
+    display.setColor(rift_pal.accent);
+    display.drawTextLeftAlign(x + 6, y + 5, "0-HOP REPEATERS");
+
+    char tmp[48];
+    int n = the_mesh.getDiscoveredCount();
+    bool live = the_mesh.isDiscovering();
+
+    // Say which state it is in. Responses arrive over seconds by design - repeaters
+    // answer after a widened random delay because many reply at once - so an empty
+    // list one second in means nothing yet, and must not read as "none found".
+    display.setColor(rift_pal.mid);
+    if (live) snprintf(tmp, sizeof(tmp), "listening %us", (unsigned) (the_mesh.discoveryElapsedMs() / 1000));
+    else      snprintf(tmp, sizeof(tmp), "%d found", n);
+    display.drawTextRightAlign(x + w - 6, y + 5, tmp);
+
+    // column headings for the two directions
+    display.setColor(rift_pal.dim);
+    display.drawTextRightAlign(x + inner - 46, y + 20, "rx");
+    display.drawTextRightAlign(x + inner + 6, y + 20, "tx");
+
+    int row_y = y + 34;
+    for (int i = 0; i < n && row_y < y + h - 20; i++) {
+      const MyMesh::DiscoveredRepeater* d = the_mesh.getDiscovered(i);
+      if (d == NULL) continue;
+
+      // Name it if we know it. A repeater can answer a discovery without ever
+      // having sent us an advert, so there may be no name at all - then the key
+      // prefix is what we honestly have.
+      ContactInfo* c = the_mesh.lookupContactByPubKey((uint8_t*) d->pubkey, PUB_KEY_SIZE);
+      char label[32];
+      if (c != NULL && c->name[0] != 0) {
+        riftTranslateUTF8(label, c->name, sizeof(label));
+      } else {
+        snprintf(label, sizeof(label), "%02X%02X%02X%02X...",
+                 d->pubkey[0], d->pubkey[1], d->pubkey[2], d->pubkey[3]);
+      }
+      display.setColor(rift_pal.fg);
+      display.drawTextEllipsized(x + 6, row_y, inner - 100, label);
+
+      // SNR arrives as a signed value times four, from both sides
+      display.setColor(rift_pal.mid);
+      snprintf(tmp, sizeof(tmp), "%.1f", d->snr_we_heard_them / 4.0f);
+      display.drawTextRightAlign(x + inner - 46, row_y, tmp);
+      snprintf(tmp, sizeof(tmp), "%.1f", d->snr_they_heard_us / 4.0f);
+      display.drawTextRightAlign(x + inner + 6, row_y, tmp);
+
+      row_y += RIFT_LINE_H;
+    }
+
+    if (n == 0) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(x + 6, y + 34,
+        live ? "waiting for replies" : "no repeater answered");
+    }
+
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(x + 6, y + h - 14,
+      live ? "BKSP dismiss - keeps listening" : "BKSP dismiss");
+
+    return live ? 500 : 1000;
+  }
+
+  bool handleInput(char c) override {
+    if (c == RIFT_KEY_BACK || c == KEY_CANCEL || c == KEY_ENTER) {
+      // Dismissing does not cancel the round. The window stays open in MyMesh, so
+      // late replies are still collected and reopening the panel shows them.
+      _task->dismissOverlay();
+      return true;
+    }
+    return false;
+  }
+};
+
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs) {
   _display = display;
   _sensors = sensors;
@@ -4988,6 +5119,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   // holds the concrete type: the picker edits the compose line directly, which is
   // the whole point of it
   nordic_picker = new RiftNordicPickerScreen(this, comms);
+  discover_overlay = new RiftDiscoverScreen(this);
   nav_idx = 0;
   setCurrScreen(splash);
 }
@@ -5198,6 +5330,22 @@ void UITask::pushOverlay(RiftScreen* o) {
 void UITask::dismissOverlay() {
   _overlay = NULL;
   refreshNow();
+}
+
+// Starts a zero-hop repeater discovery and shows the result panel. Refuses rather
+// than restarting a round already in progress: the tag identifies the round, so a
+// restart would discard replies still arriving from the first one.
+void UITask::startRepeaterDiscovery() {
+  if (the_mesh.isDiscovering()) {
+    if (discover_overlay != NULL) pushOverlay(discover_overlay);
+    return;
+  }
+  if (!the_mesh.startRepeaterDiscovery()) {
+    showAlert("No packet free - try again", 1400);
+    return;
+  }
+  notify(UIEventType::ack);
+  if (discover_overlay != NULL) pushOverlay(discover_overlay);
 }
 
 void UITask::gotoCommsScreen() {

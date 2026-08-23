@@ -1045,7 +1045,75 @@ bool MyMesh::onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t i
   return BaseChatMesh::onContactPathRecv(contact, in_path, in_path_len, out_path, out_path_len, extra_type, extra, extra_len);
 }
 
+// Mirrors examples/simple_repeater/MyMesh.cpp - the responder side of this exchange
+// lives there, and the byte layout is copied from it rather than from the docs so the
+// two cannot drift.
+#define CTL_TYPE_NODE_DISCOVER_REQ   0x80
+#define CTL_TYPE_NODE_DISCOVER_RESP  0x90
+
+bool MyMesh::startRepeaterDiscovery() {
+  uint8_t data[10];
+  data[0] = CTL_TYPE_NODE_DISCOVER_REQ;      // prefix_only = 0, so we get full keys
+  data[1] = (1 << ADV_TYPE_REPEATER);        // type filter: repeaters only
+  getRNG()->random(&data[2], 4);             // tag, reflected in every response
+  uint32_t since = 0;                        // no "changed since" filter
+  memcpy(&data[6], &since, 4);
+
+  auto pkt = createControlData(data, sizeof(data));
+  if (!pkt) return false;                    // packet pool exhausted - say so
+
+  memcpy(&discover_tag, &data[2], 4);
+  // a tag of zero would read as "no round open", and the RNG can produce it
+  if (discover_tag == 0) discover_tag = 1;
+  discover_until = futureMillis(RIFT_DISCOVER_WINDOW_MS);
+  discovered_count = 0;
+
+  sendZeroHop(pkt);
+  return true;
+}
+
+bool MyMesh::isDiscovering() const {
+  return discover_tag != 0 && !millisHasNowPassed(discover_until);
+}
+
+uint32_t MyMesh::discoveryElapsedMs() const {
+  if (discover_tag == 0) return 0;
+  // discover_until is window-end; elapsed is what the caller wants for a progress bar
+  uint32_t remain = millisHasNowPassed(discover_until)
+                    ? 0 : (uint32_t) (discover_until - millis());
+  return RIFT_DISCOVER_WINDOW_MS - remain;
+}
+
 void MyMesh::onControlDataRecv(mesh::Packet *packet) {
+  // Repeater discovery responses are consumed here as well as forwarded. A
+  // connected companion app still gets the frame below - this does not replace that
+  // path, because an app may be driving its own discovery at the same time.
+  if (packet->payload_len >= 6 + PUB_KEY_SIZE
+      && (packet->payload[0] & 0xF0) == CTL_TYPE_NODE_DISCOVER_RESP
+      && (packet->payload[0] & 0x0F) == ADV_TYPE_REPEATER
+      && discover_tag != 0 && !millisHasNowPassed(discover_until)) {
+    uint32_t tag;
+    memcpy(&tag, &packet->payload[2], 4);
+    if (tag == discover_tag) {
+      mesh::Identity id(&packet->payload[6]);
+      if (!id.matches(self_id)) {
+        // one entry per node: a repeater can answer twice if the request was
+        // repeated, and two rows for one node reads as two repeaters
+        int slot = -1;
+        for (int i = 0; i < discovered_count; i++) {
+          if (memcmp(discovered[i].pubkey, &packet->payload[6], PUB_KEY_SIZE) == 0) { slot = i; break; }
+        }
+        if (slot < 0 && discovered_count < MAX_DISCOVERED_REPEATERS) slot = discovered_count++;
+        if (slot >= 0) {
+          memcpy(discovered[slot].pubkey, &packet->payload[6], PUB_KEY_SIZE);
+          discovered[slot].snr_they_heard_us = (int8_t) packet->payload[1];
+          discovered[slot].snr_we_heard_them = (int8_t) (_radio->getLastSNR() * 4);
+          discovered[slot].at_millis = millis();
+        }
+      }
+    }
+  }
+
   if (packet->payload_len + 4 > sizeof(out_frame)) {
     MESH_DEBUG_PRINTLN("onControlDataRecv(), payload_len too long: %d", packet->payload_len);
     return;
@@ -1140,6 +1208,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   dirty_contacts_expiry = 0;
   memset(advert_paths, 0, sizeof(advert_paths));   // clears valid on every slot
   path_evictions = 0;
+  discovered_count = 0;
+  discover_tag = 0;
+  discover_until = 0;
   _rx_ever = false;
   _last_rx_millis = 0;
   _rx_count = 0;
