@@ -153,6 +153,15 @@ delivery status, SYSTEM has actions, diagnostics and a 128-line event log. Boot 
 5.1 s. Screens have a lifecycle, so an arriving message no longer disturbs a scan
 or wipes a key being read.
 
+The home screen also has one action: **discover 0-hop repeaters**. It broadcasts a
+`DISCOVER_REQ` control packet with the type filter set to repeaters, and every
+repeater in direct range answers. The response carries two SNR readings — the one
+the repeater measured on our request, and the one our radio measured on the reply —
+so this is the only thing in the firmware that can say whether they hear *us*.
+Confirmed on hardware: the two values do differ. The responder side lives in
+`examples/simple_repeater`, and the byte layout here is copied from it rather than
+from `docs/payloads.md` so the two cannot drift. Zero-hop, and the label says so.
+
 What changed in each release is on the
 [releases page](https://github.com/KrakenSaten/RIFT/releases); the reasoning is in
 the commit messages. Neither is repeated here.
