@@ -34,7 +34,12 @@ public:
 
   // Replaces whatever is playing. Alerts are short and the newest one is the one
   // that matters, so there is no queue to fall behind.
-  void play(const Step* steps, int count);
+  //
+  // gain is 0..100 percent of the driver's own amplitude. Discretion is partly
+  // loudness and not only pitch: a low note at full scale is still an interruption,
+  // and the difference between "you have a message" and "something is near you"
+  // should be audible in how much it insists.
+  void play(const Step* steps, int count, uint8_t gain = 100);
 
   bool isPlaying() const { return _ok && _step < _count; }
   void stop();
@@ -57,4 +62,5 @@ private:
   uint32_t _step_started = 0;
   uint32_t _phase = 0;         // 16.16 fixed point, so no float in the inner loop
   uint32_t _frames = 0;
+  uint8_t  _gain = 100;
 };

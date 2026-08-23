@@ -748,16 +748,28 @@ static TDeckSpeaker rift_speaker;
 // beeps is not always wanted, so it is a setting.
 bool rift_sound_on = true;
 
-// Three patterns, distinguishable without looking. A DM rises, because it is for
-// you; a channel message is two flat notes, because it is not; a proximity alert is
-// a double blip, because it is about the world rather than about a message.
-static const TDeckSpeaker::Step SND_DM[]     = { {880,70}, {1175,70}, {1568,110} };
-static const TDeckSpeaker::Step SND_CHAN[]   = { {660,60}, {0,40}, {660,60} };
-static const TDeckSpeaker::Step SND_PROX[]   = { {1568,50}, {0,60}, {1568,50} };
-static const TDeckSpeaker::Step SND_ACK[]    = { {1319,45} };
+// Four patterns, still meant to be told apart without looking - but they no longer
+// insist equally, which was the complaint. A message is a thing you will deal with
+// when you look; a device arriving is the one thing here you might want to act on
+// now, and it is the only alert that fires when you are not already reading.
+//
+// So the rising three-note went to proximity, and the messages dropped an octave
+// and most of their volume. Frequency alone did not get there: a low note at full
+// scale is still an interruption, which is why play() takes a gain.
+//
+// A channel message is one note and a DM is two, and the DM is the higher pair -
+// enough shape to tell them apart, little enough to ignore.
+static const TDeckSpeaker::Step SND_DM[]   = { {523,45}, {659,55} };
+static const TDeckSpeaker::Step SND_CHAN[] = { {440,50} };
+static const TDeckSpeaker::Step SND_PROX[] = { {880,70}, {1175,70}, {1568,110} };
+static const TDeckSpeaker::Step SND_ACK[]  = { {659,40} };
 
-static void riftPlay(const TDeckSpeaker::Step* seq, int n) {
-  if (rift_sound_on) rift_speaker.play(seq, n);
+#define SND_GAIN_MSG   45     // messages: present, not insistent
+#define SND_GAIN_PROX 100     // the one alert worth interrupting for
+#define SND_GAIN_ACK   35     // a confirmation of something you just did
+
+static void riftPlay(const TDeckSpeaker::Step* seq, int n, uint8_t gain) {
+  if (rift_sound_on) rift_speaker.play(seq, n, gain);
 }
 #endif
 
@@ -1365,10 +1377,10 @@ private:
 #ifdef RIFT_SPEAKER
         rift_sound_on = !rift_sound_on;
         riftSaveSettings();
-        // Play the message tone when switching on, so the setting proves itself
-        // rather than being taken on trust - and so a silent speaker is discovered
-        // here rather than the next time a message actually arrives.
-        if (rift_sound_on) riftPlay(SND_DM, (int) (sizeof(SND_DM) / sizeof(SND_DM[0])));
+        // The proximity tone, not the message one: this exists to prove the speaker
+        // works, so it should be the most audible pattern rather than the most
+        // discreet. A quiet beep failing to be heard proves nothing.
+        if (rift_sound_on) riftPlay(SND_PROX, (int) (sizeof(SND_PROX) / sizeof(SND_PROX[0])), SND_GAIN_PROX);
         _task->showAlert(rift_sound_on ? "Sound on" : "Sound off", 1200);
         riftLogf("sound %s", rift_sound_on ? "on" : "off");
 #else
@@ -5328,13 +5340,13 @@ void UITask::notify(UIEventType t) {
   switch (t) {
     case UIEventType::contactMessage:
     case UIEventType::newContactMessage:
-      riftPlay(SND_DM, (int) (sizeof(SND_DM) / sizeof(SND_DM[0])));
+      riftPlay(SND_DM, (int) (sizeof(SND_DM) / sizeof(SND_DM[0])), SND_GAIN_MSG);
       break;
     case UIEventType::channelMessage:
-      riftPlay(SND_CHAN, (int) (sizeof(SND_CHAN) / sizeof(SND_CHAN[0])));
+      riftPlay(SND_CHAN, (int) (sizeof(SND_CHAN) / sizeof(SND_CHAN[0])), SND_GAIN_MSG);
       break;
     case UIEventType::ack:
-      riftPlay(SND_ACK, (int) (sizeof(SND_ACK) / sizeof(SND_ACK[0])));
+      riftPlay(SND_ACK, (int) (sizeof(SND_ACK) / sizeof(SND_ACK[0])), SND_GAIN_ACK);
       break;
     default:
       break;
@@ -5459,7 +5471,7 @@ void UITask::proximityAlert(const char* name, bool is_wifi) {
 #ifdef RIFT_SPEAKER
   // A different pattern from a message: this is about the world rather than
   // something addressed to you, and telling them apart without looking is the point.
-  riftPlay(SND_PROX, (int) (sizeof(SND_PROX) / sizeof(SND_PROX[0])));
+  riftPlay(SND_PROX, (int) (sizeof(SND_PROX) / sizeof(SND_PROX[0])), SND_GAIN_PROX);
 #endif
   riftLogf("watch NEAR %s %s", is_wifi ? "wifi" : "ble", name);
   if (_display != NULL) {

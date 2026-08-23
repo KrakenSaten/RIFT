@@ -60,9 +60,10 @@ bool TDeckSpeaker::begin(int bclk, int lrclk, int dout, int sample_rate) {
   return true;
 }
 
-void TDeckSpeaker::play(const Step* steps, int count) {
+void TDeckSpeaker::play(const Step* steps, int count, uint8_t gain) {
   if (!_ok || steps == NULL || count <= 0) return;
   if (count > MAX_STEPS) count = MAX_STEPS;
+  _gain = gain > 100 ? 100 : gain;
   for (int i = 0; i < count; i++) _seq[i] = steps[i];
   _count = count;
   _step = 0;
@@ -103,7 +104,8 @@ void TDeckSpeaker::loop() {
     // 16.16 fixed point: phase step per sample, wrapped into the 16-entry table
     const uint32_t inc = (uint32_t) ((((uint64_t) hz) << 16) * 16 / (uint32_t) _rate);
     for (int i = 0; i < SPK_DMA_LEN; i++) {
-      buf[i] = (int16_t) ((int32_t) SINE16[(_phase >> 16) & 15] * SPK_AMPLITUDE / 32767);
+      buf[i] = (int16_t) ((int32_t) SINE16[(_phase >> 16) & 15]
+                          * (SPK_AMPLITUDE * _gain / 100) / 32767);
       _phase += inc;
     }
   }
@@ -120,7 +122,7 @@ void TDeckSpeaker::loop() {
 #else   // not ESP32
 
 bool TDeckSpeaker::begin(int, int, int, int) { return false; }
-void TDeckSpeaker::play(const Step*, int) { }
+void TDeckSpeaker::play(const Step*, int, uint8_t) { }
 void TDeckSpeaker::stop() { }
 void TDeckSpeaker::loop() { }
 
