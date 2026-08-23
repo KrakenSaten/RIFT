@@ -148,8 +148,8 @@ than any amount of code reading.
 
 All five screens work and are verified on hardware: MESH headlines mesh receive
 activity, NODES draws hop columns with real routes, RADAR does passive Wi-Fi/BLE
-with a waterfall and a proximity watch, COMMS has channel tabs with colours and
-delivery status, SYSTEM has actions, diagnostics and a 128-line event log. Boot is
+with a waterfall and a proximity watch, COMMS shows one
+conversation at a time with a list to move between them, SYSTEM has actions, diagnostics and a 128-line event log. Boot is
 5.1 s. Screens have a lifecycle, so an arriving message no longer disturbs a scan
 or wipes a key being read.
 
@@ -168,29 +168,34 @@ the commit messages. Neither is repeated here.
 
 ### Open items
 
-0. **COMMS redesign — agreed, not built.** `design/comms-redesign.md` has the
-   direction and the constraints. One history holding every conversation is
-   unreadable on a mesh with traffic; the fix is per-conversation views, a list with
-   unread dots, and direct messages as their own section.
+0. **Room servers in COMMS — the only part of the redesign not built.** The rest
+   shipped in two commits, and `design/comms-redesign.md` records the direction. What
+   remains is the third conversation kind, and it is blocked on something real rather
+   than on effort.
 
-   It has a prerequisite: **the log entry must carry its conversation identity**.
-   Today the only way to ask is `riftOriginName()`, string-matching a display string
-   against channels and contacts - the mechanism whose own comment records that it
-   shipped wrong and that three readings did not find it. Filtering a screen on that
-   is building on the part that already failed.
+   A room has to be **logged in** to over the radio before you can post, so a
+   connect/connected status is exactly the right thing to want. But
+   `checkConnections()`, which sends the keep-alives, is commented out in
+   `MyMesh.cpp` with `TODO - deprecate the 'Connections' stuff`. So
+   `startConnection()` would fill the table and `hasConnectionTo()` would answer yes
+   while the server at the other end timed the session out — a status reading
+   "connected" when it is not, which is worse than none. And upstream means to remove
+   the mechanism it would rest on.
 
-   And one decision: 48 entries are shared across all conversations, so a busy
-   channel evicts a quiet DM and the filtered view is then empty rather than short.
-   Recommendation is to evict from the largest conversation rather than the oldest
-   overall.
+   `RIFT_CONV_ROOM` is reserved and unimplemented, so the structure takes it without
+   rework. Before building it, one of these has to be true: upstream says what
+   replaces Connections, or RIFT owns the keep-alive deliberately and accepts the
+   divergence, or rooms work with a login per action and no persistent status —
+   honest, but probably not what a room is for.
 
-   **Room servers are deliberately out of scope**, and the reason is worth keeping:
-   a room needs a login and therefore a connection status, and `checkConnections()`
-   - which sends the keep-alives - is commented out in `MyMesh.cpp` with
-   `TODO - deprecate the 'Connections' stuff`. So `hasConnectionTo()` would answer
-   yes while the server timed the session out. A status that says connected when it
-   is not is worse than none, and upstream intends to remove the mechanism. The
-   conversation kind reserves `room` and does not implement it.
+   A second thing to settle first: a room password is a secret on screen, the same
+   class as the one-time channel key, which had to be wiped on leaving SYSTEM because
+   coming back redisplayed it. Any password field inherits that requirement.
+
+   Two smaller things the redesign left standing, both deliberate. Unread is
+   session-only, so a dot does not survive a reboot. And a channel scrolled out of
+   the four-tab strip shows no dot of its own — the nav bar still says something is
+   unread somewhere, and the conversation list shows which.
 
 1. **The NODES redesign, now measured.** `design/DESIGN-HANDOFF.md` §6 has the
    direction — summary buckets, a scrollable list, one selected route — with four

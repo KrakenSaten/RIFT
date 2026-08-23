@@ -1,8 +1,27 @@
 # COMMS redesign — conversations, not one stream
 
-Agreed direction, not yet built. Written before the code for the same reason the
+**Built, except for room servers.** Written before the code, for the same reason the
 NODES rebuild was: it is large, it has one decision that shapes everything else, and
-the constraints are easier to argue about in prose than in a diff.
+the constraints are easier to argue about in prose than in a diff. Kept as written
+rather than rewritten in the past tense — the argument is the useful part, and the
+commit messages record what shipped.
+
+Three things the code decided that this document did not:
+
+- **Where "largest conversation" stops applying.** Eviction falls back to plain age
+  in two cases: a log restored from a version 1 file, where every entry is unknown,
+  and a log where no conversation holds more than one entry. In the second, "largest"
+  would only mean "whichever the scan reached first" — arbitrary rather than merely
+  blunt.
+- **Two unknown conversations are not the same conversation.** Treating them as one
+  would collect a whole migrated history into a single bucket, which the rule would
+  then judge the largest and empty ahead of live traffic. That is a test, not a
+  comment.
+- **The popup gate had to move with the filter.** `isModal()` returned true
+  unconditionally because the unfiltered history was always already showing whatever
+  arrived. Filtered, an idle COMMS on Public can miss a DM — so `RiftScreen` gained
+  `showsConversation()`, and the question moved from the screen to the message. The
+  old comment had named this exact change as the thing that would invalidate it.
 
 ## The problem
 
