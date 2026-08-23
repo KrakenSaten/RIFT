@@ -64,10 +64,73 @@ jobs:
             exit 1
           fi
 
+      # build.sh stamps -DFIRMWARE_VERSION from the environment, and that string is
+      # MeshCore's, not RIFT's. It is what the boot screen prints after "MeshCore" and
+      # what MyMesh reports to a companion app next to FIRMWARE_VER_CODE.
+      #
+      # Passing the RIFT tag here made every release so far claim to be built on a
+      # MeshCore version that does not exist. Measured on the published v0.8.0 binary:
+      # it contains "v0.8.0-9213dd5" and no "v1.17.0" at all, so the boot screen read
+      # "MeshCore v0.8.0" and the wire reported the same. README states this string is
+      # left as upstream's; the pipeline was the thing not honouring it.
+      #
+      # Read from MyMesh.h rather than hardcoded, so a merge from upstream moves it.
+      - name: Resolve MeshCore version
+        id: meshcore
+        run: |
+          MC=$(grep -oP '#define FIRMWARE_VERSION\s+"\K[^"]+' examples/companion_radio/MyMesh.h)
+          if [ -z "$MC" ]; then
+            echo "::error::could not read FIRMWARE_VERSION from MyMesh.h"
+            exit 1
+          fi
+          echo "version=$MC" >> $GITHUB_OUTPUT
+          echo "MeshCore: $MC"
+
       - name: Build firmware
         env:
-          FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
+          FIRMWARE_VERSION: ${{ steps.meshcore.outputs.version }}
         run: /usr/bin/env bash build.sh build-firmware LilyGo_TDeck_rift
+
+      # Checked in the artifact rather than trusted, for the same reason the tag/
+      # RIFT_VERSION check above exists: a version that ships wrong is discovered from
+      # a screenshot, or not at all. And this one goes on the wire, where a diagnostic
+      # that misreports protocol metadata is worse than none.
+      - name: Binary must report MeshCore's version, not RIFT's
+        run: |
+          BIN=.pio/build/LilyGo_TDeck_rift/firmware.bin
+          MC="${{ steps.meshcore.outputs.version }}"
+          if ! grep -qa "$MC" "$BIN"; then
+            echo "::error::firmware does not contain MeshCore version $MC"
+            exit 1
+          fi
+          echo "ok: firmware carries $MC"
+
+      - name: RIFT tag must not be the reported firmware version
+        if: github.ref_type == 'tag'
+        run: |
+          BIN=.pio/build/LilyGo_TDeck_rift/firmware.bin
+          # the tag plus a dash is build.sh's FIRMWARE_VERSION_STRING shape; RIFT_VERSION
+          # itself is stored without the leading v and without a suffix, so it cannot match
+          if grep -qa "${GITHUB_REF_NAME}-" "$BIN"; then
+            echo "::error::firmware reports ${GITHUB_REF_NAME} as its FIRMWARE_VERSION"
+            exit 1
+          fi
+          echo "ok: ${GITHUB_REF_NAME} is not being reported as the firmware version"
+
+      # build.sh derives the asset filename and the reported version from one variable,
+      # which is what conflated them in the first place. The reported version has to be
+      # MeshCore's; the filename people download should say which RIFT this is. So the
+      # build gets the former and the assets are renamed to carry the latter.
+      - name: Name release assets by the RIFT version
+        run: |
+          MC="${{ steps.meshcore.outputs.version }}"
+          V="${{ steps.version.outputs.version }}"
+          cd out
+          for f in *"-${MC}-"*; do
+            [ -e "$f" ] || continue
+            mv -- "$f" "${f/-${MC}-/-${V}-}"
+          done
+          ls -l
 
       - name: Stage flasher site
         run: |
