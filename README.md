@@ -336,7 +336,7 @@ Boot is now 5.1 seconds. Why the probe does that is still not established — se
 
 ## Status
 
-**Current release: 0.8.0** — set by the `RIFT_VERSION` build flag and shown on the
+**Current release: 0.8.1** — set by the `RIFT_VERSION` build flag and shown on the
 boot screen and SYSTEM, alongside the MeshCore version it is built on. Deliberately
 0.x: it works and is verified on hardware, but it has had no external users and the
 limitations above are real.
@@ -346,13 +346,17 @@ over the companion protocol next to `FIRMWARE_VER_CODE`.
 
 Every screen from the original design concept is implemented and verified on
 physical hardware. Resource use: ~57 % of internal static RAM, ~25 % of the 6.5 MB
-app partition. 144 native tests across eight suites.
+app partition. 174 native tests across eight suites.
 
 Worth knowing where that RAM goes: MeshCore's contact table is `MAX_CONTACTS` 350
 plus 8 anonymous slots at 184 bytes each — 65.7 KB, or a fifth of the chip's 320 KB,
 statically allocated whether it holds one contact or all of them. It is the single
 largest
 item in the firmware.
+
+**0.8.1** closes all ten findings from an external code review, adds transmit rows
+and a duty-cycle budget to the air log, and fixes a release pipeline that stamped the
+RIFT tag as the MeshCore version.
 
 **0.8.0** rebuilds COMMS around conversations rather than one mixed stream, adds
 alert tones for messages and proximity, puts the wordmark on the RIFT screen, and
