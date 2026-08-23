@@ -195,6 +195,8 @@ private:
   RiftScreen* nordic_picker;
   // zero-hop repeater discovery result, raised from the home screen
   RiftScreen* discover_overlay;
+  // renames a watched RF device, raised from RADAR's watch list
+  RiftScreen* rename_watch;
 
   void userLedHandler();
 
@@ -216,6 +218,7 @@ public:
     _overlay = NULL;
     nordic_picker = NULL;
     discover_overlay = NULL;
+    rename_watch = NULL;
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
@@ -234,6 +237,10 @@ public:
 
   // Ask which repeaters can hear us, right now. Zero-hop: direct neighbours only.
   void startRepeaterDiscovery();
+
+  // Give a watched RF device a name you will recognise, instead of what it
+  // broadcasts - which is often absent or duplicated.
+  void openRenameWatch(int watch_idx);
 
   // Real navigation to COMMS, dismissing any popup on the way. The message
   // preview needs it: Enter there means "show me the full history", and the

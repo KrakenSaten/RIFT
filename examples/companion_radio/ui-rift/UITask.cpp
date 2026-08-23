@@ -707,7 +707,12 @@ static inline bool riftScanBle()  { return rift_radar_src != RIFT_SRC_WIFI; }
 // antenna shared with LoRa and no watchdog on the main loop. So an alert fires only
 // while RADAR is open. Making it fire in the background is a separate decision with
 // a real cost to the mesh, and it has not been taken.
-#define RIFT_WATCH_MAX 4
+// Twelve rather than four. Four was enough when a watch was only an arrival alert,
+// but a watch now also carries the name you gave the device - and "remember which is
+// which" does not work with four slots. Each entry is about forty bytes, so this
+// costs a few hundred, and the settings loader already clamps a longer file to
+// whatever this is. An older build reading a newer file keeps the first four.
+#define RIFT_WATCH_MAX 12
 // How long without a sighting before a device counts as gone. A passive scan only
 // sees a device when it chooses to transmit, and a BLE beacon can be quiet for tens
 // of seconds, so this is generous - a shorter window would report it leaving and
@@ -3801,7 +3806,7 @@ public:
     display.setColor(rift_pal.rule);
     display.fillRect(0, 196, display.width(), 1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 206, "ENTER unwatch   up/down   W back");
+    display.drawTextLeftAlign(2, 206, "ENTER unwatch  N rename  up/down  W back");
     renderNavBar(display, RIFT_NAV_RADAR);
     return 1000;
   }
@@ -3815,6 +3820,7 @@ public:
       if (rf_watch_count == 0) return true;
       if (c == KEY_UP)   { if (_watch_sel > 0) _watch_sel--; return true; }
       if (c == KEY_DOWN) { if (_watch_sel + 1 < rf_watch_count) _watch_sel++; return true; }
+      if (c == 'n' || c == 'N') { _task->openRenameWatch(_watch_sel); return true; }
       if (c == KEY_ENTER) {
         char gone[24];
         StrHelper::strncpy(gone, rf_watch[_watch_sel].name, sizeof(gone));
@@ -4842,6 +4848,111 @@ public:
 private:
 };
 
+// Renames a watched RF device, so RADAR shows what you call it rather than what it
+// broadcasts - which is often absent, duplicated, or the address rendered as text.
+//
+// An overlay: the watch list stays visible underneath and is handed back untouched.
+// Fifth use of that mechanism.
+//
+// The name lives on the watch entry, which is why marking a device is the
+// prerequisite. It was already persisted to /rift.cfg and already read by the
+// arrival alert and the present indicator, so a user-set name flows through all of
+// them without a second field - there is one name per device and everything reads it.
+//
+// Worth knowing, and the same caveat the watch itself carries: the identity is a
+// hardware address. A BLE device that re-randomises its address will stop matching,
+// and the name goes with the entry it was attached to. Stable for Wi-Fi access
+// points and for beacons and tags with a static address.
+class RiftRenameWatchScreen : public RiftScreen {
+  UITask* _task;
+  RiftTextInput _edit;
+  int _idx = -1;
+
+public:
+  RiftRenameWatchScreen(UITask* task) : _task(task) { }
+
+  bool isOverlay() const override { return true; }
+  // half-typed text: a message arriving must not take the screen away
+  bool isModal() const override { return true; }
+
+  bool openFor(int watch_idx) {
+#ifdef RIFT_RADAR
+    if (watch_idx < 0 || watch_idx >= rf_watch_count) return false;
+    _idx = watch_idx;
+    _edit.begin(rf_watch[_idx].name, sizeof(rf_watch[_idx].name) - 1);
+    return true;
+#else
+    (void) watch_idx;
+    return false;
+#endif
+  }
+
+  int render(DisplayDriver& display) override {
+#ifdef RIFT_RADAR
+    const int x = 8, w = display.width() - 16;
+    const int y = 60, h = 96;
+
+    display.setColor(rift_pal.bg);
+    display.fillRect(x, y, w, h);
+    display.setColor(rift_pal.accent);
+    display.drawRect(x, y, w, h);
+
+    display.setTextSize(1);
+    display.setColor(rift_pal.accent);
+    display.drawTextLeftAlign(x + 6, y + 6, "NAME THIS DEVICE");
+
+    // the address, because that is the identity and the name is only a label on it
+    if (_idx >= 0 && _idx < rf_watch_count) {
+      const uint8_t* k = rf_watch[_idx].key;
+      char addr[32];
+      snprintf(addr, sizeof(addr), "%s %02X:%02X:%02X:%02X:%02X:%02X",
+               rf_watch[_idx].is_wifi ? "wifi" : "ble",
+               k[0], k[1], k[2], k[3], k[4], k[5]);
+      display.setColor(rift_pal.dim);
+      display.drawTextLeftAlign(x + 6, y + 20, addr);
+    }
+
+    _edit.render(display, x + 6, y + 42, w - 12);
+
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(x + 6, y + h - 14, "ENTER save   BACKSPACE delete / back");
+    return 1000;
+#else
+    (void) display;
+    return 1000;
+#endif
+  }
+
+  bool handleInput(char c) override {
+#ifdef RIFT_RADAR
+    if (c == KEY_ENTER) {
+      if (_idx >= 0 && _idx < rf_watch_count && _edit.len > 0) {
+        // under the lock: the BLE advertisement callback reads this table on core 0
+        portENTER_CRITICAL(&rf_mux);
+        StrHelper::strncpy(rf_watch[_idx].name, _edit.buf, sizeof(rf_watch[_idx].name));
+        portEXIT_CRITICAL(&rf_mux);
+        riftSaveSettings();
+        riftLogf("watch named %s", rf_watch[_idx].name);
+        _task->showAlert("Name saved", 1200);
+      } else if (_edit.len == 0) {
+        // an empty name would leave the row unreadable, so refuse rather than
+        // storing a blank and calling it saved
+        _task->showAlert("Name can't be empty", 1400);
+        return true;
+      }
+      _task->dismissOverlay();
+      return true;
+    }
+    if (_edit.handleKey(c)) return true;         // consumed as text editing
+    if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _task->dismissOverlay(); return true; }
+    return true;   // do not let stray keys navigate away mid-edit
+#else
+    (void) c;
+    return true;
+#endif
+  }
+};
+
 // Nordic character picker: a long press on a base vowel offers its forms.
 //
 // An overlay, not a screen - the third use of that mechanism and the reason it
@@ -5120,6 +5231,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   // the whole point of it
   nordic_picker = new RiftNordicPickerScreen(this, comms);
   discover_overlay = new RiftDiscoverScreen(this);
+  rename_watch = new RiftRenameWatchScreen(this);
   nav_idx = 0;
   setCurrScreen(splash);
 }
@@ -5346,6 +5458,14 @@ void UITask::startRepeaterDiscovery() {
   }
   notify(UIEventType::ack);
   if (discover_overlay != NULL) pushOverlay(discover_overlay);
+}
+
+// Rename a watched RF device. Refuses quietly when the index is not a live watch,
+// so the caller can offer the key without checking first.
+void UITask::openRenameWatch(int watch_idx) {
+  if (rename_watch == NULL || _overlay != NULL) return;
+  if (!((RiftRenameWatchScreen *) rename_watch)->openFor(watch_idx)) return;
+  pushOverlay(rename_watch);
 }
 
 void UITask::gotoCommsScreen() {
