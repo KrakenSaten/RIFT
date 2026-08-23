@@ -48,10 +48,11 @@ and put `C:\msys64\ucrt64\bin` on PATH. Verified with GCC 16.1.0 and 16.2.0.
 pio test -e native -e native_kiss_modem
 ```
 
-91 test cases at the time of writing. They cover the six places that have
-actually been wrong: base64 key validation, `path_len` decoding, hash collision
-resolution, the mesh-activity thresholds, screen-transition hooks, and the UTF-8
-to CP437 translation.
+133 test cases. They cover the places that have actually been wrong — base64 key
+validation, `path_len` decoding, hash collision resolution, the mesh-activity
+thresholds, screen-transition hooks, the UTF-8 to CP437 translation, the origin
+decoration, the channel colours — rather than aiming at coverage. A count here
+dates quickly; `pio test` is the answer.
 
 ```bash
 pio run -e LilyGo_TDeck_rift
@@ -77,68 +78,43 @@ pio run -e LilyGo_TDeck_rift -t upload --upload-port COM5
 listed?** Something is holding it. Usually a `pio device monitor`, or the browser
 tab with the web flasher — WebSerial keeps the port until the tab closes.
 
-**Upload dies partway through, with the USB device dropping off the bus?**
-`pio run -t upload` cannot always write the whole app partition in one operation.
-Seen failing reproducibly after roughly 1.2 MB, with `Cannot configure port` or
-`The chip stopped responding`. The failure point moves with the transfer rather
-than with the address, so it is the transport and not the image.
-
-What does not help: a different cable, and `upload_speed`. Baud is a no-op here —
-this is native USB CDC, so lowering it changes nothing and the run takes exactly
-as long. `--no-stub` only moved the failure earlier.
-
-`tools/rift-flash.py` does the split, so it does not have to be a local script
-that gets rebuilt by hand on the next machine:
+**Upload dies partway through, with the USB device dropping off the bus?** Use the
+tool, not `pio run -t upload`:
 
 ```bash
 python tools/rift-flash.py --port COM5
 ```
 
-**The split is automatic now, and you should not need `--parts` at all.** The tool
-aims for 192KB per write and computes the count from the image size, because the
-count that works is a function of how big the firmware has become. A long write
-fails part way through with a pySerial `PermissionError` on reopening the port, and
-the threshold is the **transfer length, not the flash address** - established by
-splitting at a different boundary and watching the same address go through.
+`pio run -t upload` cannot write the whole app partition in one operation on this
+device. It fails part way through with a pySerial `PermissionError` on reopening
+the port, or `The chip stopped responding`.
 
-At 1.54MB, four parts (405KB each) was fine. At 1.55MB, four parts is 400KB each
-and fails on the third; eight parts at 200KB each goes through. A fixed count is
-therefore a default that silently stops working as the image grows.
+**The threshold is the transfer length, not the flash address** — established by
+splitting at a different boundary and watching the same address go through. So it
+is the transport rather than the image.
 
-Override with `--chunk-kb` if 192 ever stops being enough, or `--parts N` to force a
-count. `--single` writes it in one go, which is how the failure was characterised.
+**The split is automatic; you should not need `--parts`.** The tool aims for 192KB
+per write and computes the count from the image size, because the count that works
+is a function of how big the firmware has become. At 1.54MB, four parts of 405KB
+was fine. At 1.55MB, four parts is 400KB each and fails on the third, while eight
+parts at 200KB goes through — so a fixed count is a default that silently stops
+working as the image grows.
 
 Ruled out, so nobody repeats them: a different cable, `upload_speed` (baud is a
-no-op on native USB CDC), and `--no-stub`. The first upload of a session has
-sometimes gone through whole, which argues for something state-dependent.
+no-op on native USB CDC), and `--no-stub`. The cause is still unknown; the first
+upload of a session has sometimes gone through whole, which argues for something
+state-dependent.
 
 A failed chunk is retried four times, three seconds apart, because the error is
 often transient. If it exhausts the retries the image is partly written and the
-device will not boot - **run the tool again before power-cycling.** It is not
-bricked: the ROM bootloader is untouched and the port will still enumerate.
+device will not boot — **run the tool again before power-cycling.** It is not
+bricked: the ROM bootloader is in ROM, untouched, and the port still enumerates.
 
-Four parts of ~405 KB each complete in under four seconds apiece with every hash
-verified. Expect to need more parts as the firmware grows.
-
-`--dry-run` writes the chunks out and checks they cover the image without
-touching the device; `--single` forces one write, which is how to retest the
-workaround cheaply. The day `--single` succeeds, the script has outlived its
-purpose.
-
-Splitting the write works. The app is one image at `0x10000`, so cut
-`firmware.bin` at a sector-aligned offset and write the halves separately.
-786432 (`0xC0000`) has been used, giving `0x10000` and `0xD0000`; each half
-completes in under five seconds with its hash verified, and esptool verifies per
-chunk, so the two together cover the whole image. Use `--before default_reset` on
-both — leaving the first in the bootloader and reconnecting with `--before
-no_reset` was tried, and the reconnect timed out.
-
-The chip is never at risk: the ROM bootloader is in ROM and still enumerates after
-a failed write, so a half-written app is always recoverable.
-
-Cause not established. The first upload of a session has gone through in 8.9 s,
-which argues for something state-dependent rather than a hard size limit. The
-firmware is 1.61 MB and growing, so expect to need this every time.
+`--chunk-kb` overrides the target size and `--parts N` forces a count. `--dry-run`
+writes the chunks out and checks they cover the image without touching the device.
+`--single` forces one write, which is how the failure was characterised and the
+cheap way to retest it — **the day `--single` succeeds, this tool has outlived its
+purpose.**
 
 **First boot after switching firmware may reformat SPIFFS**, which takes one to
 two minutes. The boot screen says `Formatting SPIFFS` when that is happening —
