@@ -2065,7 +2065,27 @@ private:
     display.setColor(rift_pal.rule);
     display.fillRect(0, 200, display.width(), 1);
     display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(2, 206, "up/down line  L/R page  ENTER back");
+    display.drawTextLeftAlign(2, 206, "up/down  L/R page  ENTER back");
+
+    // Remaining transmit budget, which this screen is now the right place for: the
+    // air time column above says what each packet cost, and this says what is left to
+    // spend. Measured on hardware, an advert is 777ms - so at the duty cycle this
+    // radio enforces, one flood advert is a large fraction of the whole allowance,
+    // and "why will it not send" has an answer here rather than nowhere.
+    //
+    // Dispatcher defers the next transmit once the budget falls under 100ms, so that
+    // is where the number turns accent: below it the radio is not refusing, it is
+    // waiting, and those look identical from outside.
+    unsigned long budget = the_mesh.getRemainingTxBudget();
+    char bb[20];
+    if (budget >= 1000) {
+      snprintf(bb, sizeof(bb), "TX %lu.%lus", budget / 1000, (budget % 1000) / 100);
+    } else {
+      snprintf(bb, sizeof(bb), "TX %lums", budget);
+    }
+    display.setColor(budget < 100 ? rift_pal.accent : rift_pal.mid);
+    display.drawTextRightAlign(290, 206, bb);
+
     display.setColor(rift_pal.mid);
     display.drawTextRightAlign(318, 206, _rx_scroll == 0 ? "live" : "held");
 
