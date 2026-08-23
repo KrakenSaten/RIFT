@@ -1,6 +1,6 @@
 {
   "name": "RIFT - Radio Intelligence & Field Terminal",
-  "version": "v0.8.0",
+  "version": "v0.8.1",
   "new_install_prompt_erase": true,
   "builds": [
     {
