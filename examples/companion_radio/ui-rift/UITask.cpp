@@ -248,6 +248,25 @@ struct RiftMsgLog {
     }
   }
 
+  // Everything belonging to one conversation, removed.
+  //
+  // The fingerprint already stops deleted-channel history being misattributed, so this
+  // is not what makes the fix correct - it is what stops dead history occupying slots
+  // in a 48-entry log that live conversations need. Called when a channel is deleted
+  // from this device; a companion app overwriting a slot behind our back is handled by
+  // the fingerprint instead, which is why that had to be the primary mechanism.
+  int purgeConversation(const RiftConvKey& k) {
+    int removed = 0;
+    for (int i = 0; i < count; ) {
+      if (!riftConvSame(entries[i].conv, k)) { i++; continue; }
+      memmove(&entries[i], &entries[i + 1], (size_t) (count - i - 1) * sizeof(Entry));
+      count--;
+      removed++;
+    }
+    if (removed > 0) markDirty();
+    return removed;
+  }
+
   // 0 = newest, 1 = next older, ...
   const Entry* peek(int back) const {
     if (back < 0 || back >= count) return NULL;
@@ -257,7 +276,7 @@ struct RiftMsgLog {
   // How many bytes follow the kind byte in a stored record. One place, because a
   // writer and reader disagreeing about it would shift every field after it.
   static uint8_t convPayloadLen(uint8_t kind) {
-    if (kind == RIFT_CONV_CHANNEL) return 1;
+    if (kind == RIFT_CONV_CHANNEL) return 5;   // slot + 4-byte fingerprint
     if (kind == RIFT_CONV_DM) return RIFT_CONV_PEER_LEN;
     return 0;
   }
@@ -309,7 +328,20 @@ struct RiftMsgLog {
   // with the conversation unknown, which places them by the existing name match and
   // is exactly as good as it was before. A history is not worth discarding to save
   // one branch in the reader.
-  static const uint8_t FILE_VERSION = 2;
+  // Version 3 adds the channel fingerprint. Versions 1 and 2 are still read.
+  //
+  // A version 2 channel entry carries a slot and no fingerprint, so it cannot prove
+  // which channel it belonged to - the whole point of the field. It loads with the
+  // fingerprint left at zero, which riftConvSame() treats as "matches on the slot
+  // alone": exactly as good as it was when it was written, and no better. For an
+  // unchanged channel the behaviour is identical; for a reused slot it is the old bug,
+  // confined to entries that predate the fix and age out of the log.
+  //
+  // Computing the fingerprint from the channel currently in the slot was the tempting
+  // alternative and is the one thing that must not be done: on a reused slot it would
+  // stamp old history with the new channel's identity and make the misattribution
+  // permanent.
+  static const uint8_t FILE_VERSION = 3;
   static const uint8_t FILE_V1_FIXED = 11;   // record header before the key existed
 
   // Retry accounting. save() leaves dirty set when it fails, and the flush
@@ -392,7 +424,10 @@ struct RiftMsgLog {
       r[9] = olen;
       r[10] = mlen;
       r[11] = p->conv.kind;
-      if (p->conv.kind == RIFT_CONV_CHANNEL) r[12] = p->conv.channel_idx;
+      if (p->conv.kind == RIFT_CONV_CHANNEL) {
+        r[12] = p->conv.channel_idx;
+        memcpy(&r[13], &p->conv.channel_fp, 4);
+      }
       else if (p->conv.kind == RIFT_CONV_DM) memcpy(&r[12], p->conv.peer, RIFT_CONV_PEER_LEN);
       memcpy(&r[12 + clen], p->origin, olen);
       memcpy(&r[12 + clen + olen], p->msg, mlen);
@@ -435,7 +470,7 @@ struct RiftMsgLog {
     uint8_t hdr[6];
     if (f.read(hdr, sizeof(hdr)) != sizeof(hdr)
         || hdr[0] != 'R' || hdr[1] != 'M' || hdr[2] != 'S' || hdr[3] != 'G'
-        || (hdr[4] != FILE_VERSION && hdr[4] != 1)) {
+        || (hdr[4] < 1 || hdr[4] > FILE_VERSION)) {
       f.close();
       return;   // absent, truncated or a format we do not know - start empty
     }
@@ -457,9 +492,19 @@ struct RiftMsgLog {
       RiftConvKey conv = riftConvUnknown();
       if (has_conv) {
         uint8_t payload[RIFT_CONV_PEER_LEN];
-        uint8_t clen = convPayloadLen(rec[11]);
+        // From the file's own version, not from this build's: a version 2 channel
+        // record is 1 byte where version 3 is 5, and reading 5 would swallow the
+        // start of the origin string and shift every field after it.
+        uint8_t clen = (rec[11] == RIFT_CONV_CHANNEL && hdr[4] < 3) ? 1
+                                                                    : convPayloadLen(rec[11]);
         if (clen > 0 && f.read(payload, clen) != clen) break;
-        if (rec[11] == RIFT_CONV_CHANNEL) conv = riftConvChannel(payload[0]);
+        if (rec[11] == RIFT_CONV_CHANNEL) {
+          // clen is 1 on a version 2 file and 5 from version 3, so the fingerprint is
+          // present exactly when it was written
+          uint32_t fp = 0;
+          if (clen >= 5) memcpy(&fp, &payload[1], 4);
+          conv = riftConvChannel(payload[0], fp);
+        }
         else if (rec[11] == RIFT_CONV_DM) conv = riftConvDM(payload);
         // an unrecognised kind - a file from a newer build - stays unknown rather
         // than being guessed at
@@ -502,6 +547,27 @@ static RiftMsgLog msg_log;
 // documented as least-recently-active and implemented as something else, which is
 // exactly the class of mistake a native test catches and a build does not.
 static RiftUnread msg_unread;
+
+// The conversation key for a channel slot, with the fingerprint taken from the
+// channel actually sitting in it.
+//
+// An empty slot returns unknown rather than a slot-only key. Unknown never equals
+// unknown, so nothing matches it - which is right: an empty slot has no conversation,
+// and returning a key with fingerprint 0 would have made it a wildcard matching every
+// entry ever stored against that slot.
+//
+// The key length mirrors setChannel(): 16 bytes unless the upper half is non-zero, in
+// which case 32. Same test upstream uses to decide 128 against 256 bit, so the
+// fingerprint is taken over the real key rather than over trailing padding that some
+// path might leave uninitialised.
+static RiftConvKey riftChannelConv(uint8_t idx) {
+  ChannelDetails ch;
+  if (!the_mesh.getChannel(idx, ch) || ch.name[0] == 0) return riftConvUnknown();
+
+  static const uint8_t zeroes[16] = { 0 };
+  size_t klen = (memcmp(&ch.channel.secret[16], zeroes, 16) == 0) ? 16 : 32;
+  return riftConvChannel(idx, riftChannelFingerprint(ch.channel.secret, klen));
+}
 
 
 // Break text into lines at a pixel width, calling emit() per line (NULL just
@@ -2641,7 +2707,22 @@ public:
 
     if (_mode == CH_DELETE_CONFIRM) {
       if (c == KEY_ENTER) {
+        // The conversation key is taken BEFORE the channel goes, because
+        // riftChannelConv() reads the channel table and a blanked slot answers
+        // unknown - which matches nothing, so the purge would silently remove
+        // nothing at all.
+        RiftConvKey gone = (_del_sel < _del_count) ? riftChannelConv(_del_idx[_del_sel])
+                                                   : riftConvUnknown();
         bool ok = (_del_sel < _del_count) && the_mesh.removeChannel(_del_idx[_del_sel]);
+        if (ok && gone.kind == RIFT_CONV_CHANNEL) {
+          // Also takes any fingerprint-less entries in that slot, restored from a log
+          // written before channel identity existed: they cannot prove they belong to
+          // anything, they are in the slot being emptied, and leaving them would let
+          // them attach to whatever is created there next.
+          int purged = msg_log.purgeConversation(gone);
+          msg_unread.clear(gone);
+          if (purged > 0) riftLogf("purged %d msg from deleted channel", purged);
+        }
         riftLogf("channel slot %d deleted: %s",
                  _del_sel < _del_count ? _del_idx[_del_sel] : -1, ok ? "ok" : "FAILED");
         _task->showAlert(ok ? "Channel deleted" : "Delete failed", 1400);
@@ -4546,7 +4627,7 @@ private:
       // because it is the conversation on screen, whose unread render() has just
       // cleared. A channel scrolled out of the strip has no dot here; the nav bar
       // still says something is unread somewhere.
-      if (!active && msg_unread.count(riftConvChannel(_tabs[i].idx)) > 0) {
+      if (!active && msg_unread.count(riftChannelConv(_tabs[i].idx)) > 0) {
         renderUnreadDot(display, x + tw - 8, _tabs_y - 1);
       }
     }
@@ -4579,7 +4660,7 @@ public:
   // The conversation on screen. Public because the popup gate asks the screen
   // whether an arriving message is already visible.
   RiftConvKey currentConv() const {
-    if (_target_is_channel) return riftConvChannel(_target_channel_idx);
+    if (_target_is_channel) return riftChannelConv(_target_channel_idx);
     return riftConvDM(_target_key);
   }
 private:
@@ -4720,7 +4801,7 @@ private:
     // shares the SPI bus with the radio, so it belongs on the open rather than in
     // every frame.
     for (int i = 0; i < _pick_count; i++) {
-      RiftConvKey k = _picks[i].is_channel ? riftConvChannel(_picks[i].channel_idx)
+      RiftConvKey k = _picks[i].is_channel ? riftChannelConv(_picks[i].channel_idx)
                                            : riftConvDM(_picks[i].key);
       _picks[i].last_ts = newestIn(k, _picks[i].name);
       _picks[i].unread = msg_unread.count(k);
@@ -4752,7 +4833,7 @@ private:
     // asks where you want to go.
     _pick_idx = 0;
     for (int i = 0; i < _pick_count; i++) {
-      RiftConvKey k = _picks[i].is_channel ? riftConvChannel(_picks[i].channel_idx)
+      RiftConvKey k = _picks[i].is_channel ? riftChannelConv(_picks[i].channel_idx)
                                            : riftConvDM(_picks[i].key);
       if (riftConvSame(k, currentConv())) { _pick_idx = i; break; }
     }
@@ -4813,7 +4894,7 @@ private:
       char origin[62];
       snprintf(origin, sizeof(origin), "to %s:", ch.name);
       msg_log.add(the_mesh.getRTCClock()->getCurrentTime(),
-                  riftConvChannel((uint8_t) _target_channel_idx), origin, sent, true);
+                  riftChannelConv((uint8_t) _target_channel_idx), origin, sent, true);
       riftLogf("tx s%d %s: %s", _target_channel_idx, ch.name, sent);
       clearInput();
     } else {
@@ -5909,7 +5990,10 @@ void UITask::newMsgConv(uint8_t path_len, const char* from_name, const char* tex
   _companion_backlog = msgcount;
 
   RiftConvKey conv = riftConvUnknown();
-  if (conv_kind == RIFT_CONV_CHANNEL) conv = riftConvChannel(channel_idx);
+  // The fingerprint is resolved here rather than passed across the boundary: MyMesh
+  // hands over primitives so AbstractUITask stays independent of any one UI, and the
+  // channel table is equally reachable from this side.
+  if (conv_kind == RIFT_CONV_CHANNEL) conv = riftChannelConv(channel_idx);
   else if (conv_kind == RIFT_CONV_DM) conv = riftConvDM(peer);
 
   char origin[62];

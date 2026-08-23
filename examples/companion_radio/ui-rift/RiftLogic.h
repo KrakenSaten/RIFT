@@ -811,6 +811,35 @@ static inline const char* riftHopBucketLabel(int bucket) {
 // a connection status, and the keep-alive that would maintain one is commented out
 // upstream as something they intend to deprecate - see design/comms-redesign.md.
 // Reserving the value means the third kind costs no rework when that is settled.
+// A channel's identity, as a number that survives the slot being reused.
+//
+// A slot index is a storage location, not an identity. Delete #private-a from slot 2,
+// create #private-b in slot 2, and every stored message keyed on "channel 2" appears
+// to belong to the new channel. Purging on delete was the obvious fix and it is not
+// sufficient: CMD_SET_CHANNEL lets a companion app overwrite any slot without RIFT's
+// UI being involved at all, so the delete handler would simply never run.
+//
+// FNV-1a over the channel key. Not the GroupChannel::hash that setChannel() already
+// derives - PATH_HASH_SIZE is 1, so that is a single byte and collides once in 256,
+// which is far too often for "does this history belong to this channel". Thirty-two
+// bits over a handful of configured channels is not a collision worth costing a
+// SHA-256 per key construction to avoid.
+//
+// A hash rather than a slice of the key, so a 32-bit value sitting in a log file on
+// flash is not four bytes of somebody's channel secret.
+static inline uint32_t riftChannelFingerprint(const uint8_t* key, size_t len) {
+  if (key == NULL || len == 0) return 0;
+  uint32_t h = 2166136261u;                 // FNV offset basis
+  for (size_t i = 0; i < len; i++) {
+    h ^= key[i];
+    h *= 16777619u;                         // FNV prime
+  }
+  // Zero is reserved for "no fingerprint recorded" - see riftConvSame(). A key that
+  // hashes to it takes 1 instead, which is one collision pair in 2^32 rather than an
+  // ambiguous sentinel.
+  return h == 0 ? 1u : h;
+}
+
 #define RIFT_CONV_UNKNOWN  0
 #define RIFT_CONV_CHANNEL  1
 #define RIFT_CONV_DM       2
@@ -819,9 +848,10 @@ static inline const char* riftHopBucketLabel(int bucket) {
 #define RIFT_CONV_PEER_LEN 6
 
 struct RiftConvKey {
-  uint8_t kind;
-  uint8_t channel_idx;                   // RIFT_CONV_CHANNEL only
-  uint8_t peer[RIFT_CONV_PEER_LEN];      // RIFT_CONV_DM only
+  uint8_t  kind;
+  uint8_t  channel_idx;                   // RIFT_CONV_CHANNEL only
+  uint32_t channel_fp;                    // RIFT_CONV_CHANNEL only; 0 = not recorded
+  uint8_t  peer[RIFT_CONV_PEER_LEN];      // RIFT_CONV_DM only
 };
 
 static inline RiftConvKey riftConvUnknown() {
@@ -831,11 +861,12 @@ static inline RiftConvKey riftConvUnknown() {
   return k;
 }
 
-static inline RiftConvKey riftConvChannel(uint8_t channel_idx) {
+static inline RiftConvKey riftConvChannel(uint8_t channel_idx, uint32_t fingerprint) {
   RiftConvKey k;
   memset(&k, 0, sizeof(k));
   k.kind = RIFT_CONV_CHANNEL;
   k.channel_idx = channel_idx;
+  k.channel_fp = fingerprint;
   return k;
 }
 
@@ -855,7 +886,15 @@ static inline RiftConvKey riftConvDM(const uint8_t* pubkey) {
 static inline bool riftConvSame(const RiftConvKey& a, const RiftConvKey& b) {
   if (a.kind != b.kind) return false;
   switch (a.kind) {
-    case RIFT_CONV_CHANNEL: return a.channel_idx == b.channel_idx;
+    case RIFT_CONV_CHANNEL:
+      if (a.channel_idx != b.channel_idx) return false;
+      // A fingerprint of zero means the entry predates the field - restored from a
+      // log file written before channel identity existed. It cannot prove which
+      // channel it belonged to, so it matches on the slot alone, which is exactly as
+      // good as it was when it was written and no better. Those entries age out of
+      // the log; nothing new is ever written without a fingerprint.
+      if (a.channel_fp == 0 || b.channel_fp == 0) return true;
+      return a.channel_fp == b.channel_fp;
     case RIFT_CONV_DM:      return memcmp(a.peer, b.peer, RIFT_CONV_PEER_LEN) == 0;
     default:                return false;
   }

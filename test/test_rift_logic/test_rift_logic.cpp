@@ -12,6 +12,10 @@ static const uint8_t ALPHA[] = { 0xA1, 0xB2, 0xC3, 0xD4 };
 static const uint8_t BRAVO[] = { 0xA1, 0xB2, 0x99, 0x00 };  // shares one byte with ALPHA
 static const uint8_t CHARLIE[] = { 0x5F, 0x00, 0x00, 0x00 };
 
+// Channels now carry a fingerprint of their key, so a test channel needs one. Distinct
+// per slot, and non-zero, because zero means "not recorded" and matches on slot alone.
+static RiftConvKey ch(uint8_t slot) { return riftConvChannel(slot, 0xC0DE0000u + slot); }
+
 TEST(ResolveHash, NoMatchIsNotAGuess) {
     const uint8_t* nodes[] = { ALPHA, BRAVO, CHARLIE };
     const uint8_t wanted[] = { 0xEE };
@@ -968,8 +972,8 @@ static const uint8_t PEER_A[6] = { 1,2,3,4,5,6 };
 static const uint8_t PEER_B[6] = { 1,2,3,4,5,7 };   // differs in the last byte only
 
 TEST(ConvKey, ChannelsMatchByIndex) {
-    EXPECT_TRUE(riftConvSame(riftConvChannel(0), riftConvChannel(0)));
-    EXPECT_FALSE(riftConvSame(riftConvChannel(0), riftConvChannel(1)));
+    EXPECT_TRUE(riftConvSame(ch(0), ch(0)));
+    EXPECT_FALSE(riftConvSame(ch(0), ch(1)));
 }
 
 TEST(ConvKey, DmsMatchOnTheWholePrefix) {
@@ -978,8 +982,8 @@ TEST(ConvKey, DmsMatchOnTheWholePrefix) {
 }
 
 TEST(ConvKey, KindsNeverMatchEachOther) {
-    EXPECT_FALSE(riftConvSame(riftConvChannel(0), riftConvDM(PEER_A)));
-    EXPECT_FALSE(riftConvSame(riftConvChannel(2), riftConvUnknown()));
+    EXPECT_FALSE(riftConvSame(ch(0), riftConvDM(PEER_A)));
+    EXPECT_FALSE(riftConvSame(ch(2), riftConvUnknown()));
 }
 
 // Entries restored from a pre-v2 log all carry unknown. Treating those as one
@@ -996,36 +1000,36 @@ TEST(ConvKey, NullPeerIsUnknownRatherThanAZeroDm) {
 
 TEST(LargestConv, PicksTheBusiestConversation) {
     RiftConvKey keys[6] = {
-        riftConvChannel(0), riftConvChannel(0), riftConvChannel(0),
-        riftConvDM(PEER_A), riftConvChannel(1), riftConvDM(PEER_A)
+        ch(0), ch(0), ch(0),
+        riftConvDM(PEER_A), ch(1), riftConvDM(PEER_A)
     };
     RiftConvKey out = riftConvUnknown();
     EXPECT_EQ(3, riftLargestConv(keys, 6, &out));
-    EXPECT_TRUE(riftConvSame(out, riftConvChannel(0)));
+    EXPECT_TRUE(riftConvSame(out, ch(0)));
 }
 
 // The case the whole change exists for: one loud channel and one quiet DM. The DM
 // must not be what gets dropped.
 TEST(LargestConv, ALoudChannelIsChosenOverAQuietDm) {
     RiftConvKey keys[8];
-    for (int i = 0; i < 7; i++) keys[i] = riftConvChannel(0);
+    for (int i = 0; i < 7; i++) keys[i] = ch(0);
     keys[7] = riftConvDM(PEER_A);
     RiftConvKey out = riftConvUnknown();
     EXPECT_EQ(7, riftLargestConv(keys, 8, &out));
-    EXPECT_TRUE(riftConvSame(out, riftConvChannel(0)));
+    EXPECT_TRUE(riftConvSame(out, ch(0)));
     EXPECT_FALSE(riftConvSame(out, riftConvDM(PEER_A)));
 }
 
 TEST(LargestConv, AllUnknownFallsBackRatherThanPickingOne) {
     RiftConvKey keys[3] = { riftConvUnknown(), riftConvUnknown(), riftConvUnknown() };
-    RiftConvKey out = riftConvChannel(9);
+    RiftConvKey out = ch(9);
     EXPECT_EQ(0, riftLargestConv(keys, 3, &out));
     EXPECT_EQ(RIFT_CONV_UNKNOWN, out.kind);
 }
 
 TEST(LargestConv, DegenerateInputs) {
     RiftConvKey out = riftConvUnknown();
-    RiftConvKey one = riftConvChannel(0);
+    RiftConvKey one = ch(0);
     EXPECT_EQ(0, riftLargestConv(NULL, 3, &out));
     EXPECT_EQ(0, riftLargestConv(&one, 0, &out));
     EXPECT_EQ(0, riftLargestConv(&one, 1, NULL));
@@ -1035,8 +1039,8 @@ TEST(EvictIndex, DropsTheOldestOfTheBusiestConversation) {
     // three of channel 0 at the front, then a DM, then more channel 0. The oldest
     // channel-0 entry is index 0 here, which happens to also be the oldest overall.
     RiftConvKey keys[6] = {
-        riftConvChannel(0), riftConvChannel(0), riftConvDM(PEER_A),
-        riftConvChannel(0), riftConvChannel(1), riftConvDM(PEER_A)
+        ch(0), ch(0), riftConvDM(PEER_A),
+        ch(0), ch(1), riftConvDM(PEER_A)
     };
     EXPECT_EQ(0, riftEvictIndex(keys, 6));
 }
@@ -1046,8 +1050,8 @@ TEST(EvictIndex, DropsTheOldestOfTheBusiestConversation) {
 // it lost to has five more of its own to spare.
 TEST(EvictIndex, AQuietDmSurvivesALoudChannel) {
     RiftConvKey keys[6] = {
-        riftConvDM(PEER_A),  riftConvChannel(0), riftConvChannel(0),
-        riftConvChannel(0),  riftConvChannel(0), riftConvChannel(0)
+        riftConvDM(PEER_A),  ch(0), ch(0),
+        ch(0),  ch(0), ch(0)
     };
     EXPECT_EQ(1, riftEvictIndex(keys, 6));   // oldest channel entry, not the DM
 }
@@ -1061,8 +1065,8 @@ TEST(EvictIndex, AllUnknownFallsBackToOldest) {
 // No conversation holds more than one, so there is nothing dominant to take from.
 // Age is blunt; picking whichever key the scan reached first would be arbitrary.
 TEST(EvictIndex, NoDominantConversationFallsBackToOldest) {
-    RiftConvKey keys[4] = { riftConvDM(PEER_A), riftConvChannel(1),
-                            riftConvChannel(2), riftConvDM(PEER_B) };
+    RiftConvKey keys[4] = { riftConvDM(PEER_A), ch(1),
+                            ch(2), riftConvDM(PEER_B) };
     EXPECT_EQ(0, riftEvictIndex(keys, 4));
 }
 
@@ -1071,7 +1075,7 @@ TEST(EvictIndex, NoDominantConversationFallsBackToOldest) {
 TEST(EvictIndex, MigratedEntriesAreNotOneBucket) {
     RiftConvKey keys[6] = {
         riftConvUnknown(), riftConvUnknown(), riftConvUnknown(),
-        riftConvUnknown(), riftConvChannel(0), riftConvChannel(0)
+        riftConvUnknown(), ch(0), ch(0)
     };
     // channel 0 holds two, the unknowns hold one each, so the channel is the
     // largest and its oldest goes - the migrated entries are left alone
@@ -1079,7 +1083,7 @@ TEST(EvictIndex, MigratedEntriesAreNotOneBucket) {
 }
 
 TEST(EvictIndex, DegenerateInputs) {
-    RiftConvKey one = riftConvChannel(0);
+    RiftConvKey one = ch(0);
     EXPECT_EQ(0, riftEvictIndex(NULL, 4));
     EXPECT_EQ(0, riftEvictIndex(&one, 0));
     EXPECT_EQ(0, riftEvictIndex(&one, 1));
@@ -1089,11 +1093,11 @@ TEST(EvictIndex, DegenerateInputs) {
 
 TEST(Unread, MarkAndCount) {
     RiftUnread u;
-    EXPECT_EQ(0, u.count(riftConvChannel(0)));
-    u.mark(riftConvChannel(0));
-    u.mark(riftConvChannel(0));
-    EXPECT_EQ(2, u.count(riftConvChannel(0)));
-    EXPECT_EQ(0, u.count(riftConvChannel(1)));
+    EXPECT_EQ(0, u.count(ch(0)));
+    u.mark(ch(0));
+    u.mark(ch(0));
+    EXPECT_EQ(2, u.count(ch(0)));
+    EXPECT_EQ(0, u.count(ch(1)));
 }
 
 TEST(Unread, UnknownIsNotAttributable) {
@@ -1104,20 +1108,20 @@ TEST(Unread, UnknownIsNotAttributable) {
 
 TEST(Unread, ClearRemovesOnlyThatConversation) {
     RiftUnread u;
-    u.mark(riftConvChannel(0));
-    u.mark(riftConvChannel(1));
-    u.clear(riftConvChannel(0));
-    EXPECT_EQ(0, u.count(riftConvChannel(0)));
-    EXPECT_EQ(1, u.count(riftConvChannel(1)));
+    u.mark(ch(0));
+    u.mark(ch(1));
+    u.clear(ch(0));
+    EXPECT_EQ(0, u.count(ch(0)));
+    EXPECT_EQ(1, u.count(ch(1)));
     EXPECT_EQ(1, u.n);
 }
 
 TEST(Unread, ClearingSomethingAbsentIsHarmless) {
     RiftUnread u;
-    u.mark(riftConvChannel(3));
-    u.clear(riftConvChannel(9));
+    u.mark(ch(3));
+    u.clear(ch(9));
     EXPECT_EQ(1, u.n);
-    EXPECT_EQ(1, u.count(riftConvChannel(3)));
+    EXPECT_EQ(1, u.count(ch(3)));
 }
 
 // The policy the comment describes, which the code did not implement: a further
@@ -1125,34 +1129,34 @@ TEST(Unread, ClearingSomethingAbsentIsHarmless) {
 // could take a hundred messages and still be the first one evicted.
 TEST(Unread, AFurtherMessageMakesAConversationTheNewest) {
     RiftUnread u;
-    u.mark(riftConvChannel(0));
-    u.mark(riftConvChannel(1));
-    u.mark(riftConvChannel(0));            // channel 0 is now the most recent
+    u.mark(ch(0));
+    u.mark(ch(1));
+    u.mark(ch(0));            // channel 0 is now the most recent
     ASSERT_EQ(2, u.n);
-    EXPECT_TRUE(riftConvSame(u.keys[u.n - 1], riftConvChannel(0)));
-    EXPECT_EQ(2, u.count(riftConvChannel(0)));
-    EXPECT_EQ(1, u.count(riftConvChannel(1)));
+    EXPECT_TRUE(riftConvSame(u.keys[u.n - 1], ch(0)));
+    EXPECT_EQ(2, u.count(ch(0)));
+    EXPECT_EQ(1, u.count(ch(1)));
 }
 
 TEST(Unread, AFullTableDropsTheLeastRecentlyActive) {
     RiftUnread u;
-    for (int i = 0; i < RIFT_UNREAD_MAX; i++) u.mark(riftConvChannel((uint8_t) i));
+    for (int i = 0; i < RIFT_UNREAD_MAX; i++) u.mark(ch((uint8_t) i));
 
     // channel 0 is the oldest by mark order; touching it again must save it
-    u.mark(riftConvChannel(0));
+    u.mark(ch(0));
     // channel 1 is now the oldest, so the overflow should take that one
     u.mark(riftConvDM((const uint8_t*) "ABCDEF"));
 
     EXPECT_EQ(RIFT_UNREAD_MAX, u.n);
-    EXPECT_EQ(0, u.count(riftConvChannel(1)));            // evicted
-    EXPECT_EQ(2, u.count(riftConvChannel(0)));            // saved by being touched
+    EXPECT_EQ(0, u.count(ch(1)));            // evicted
+    EXPECT_EQ(2, u.count(ch(0)));            // saved by being touched
     EXPECT_EQ(1, u.count(riftConvDM((const uint8_t*) "ABCDEF")));
 }
 
 TEST(Unread, CountSaturatesRatherThanWrapping) {
     RiftUnread u;
-    for (int i = 0; i < 300; i++) u.mark(riftConvChannel(0));
-    EXPECT_EQ(255, u.count(riftConvChannel(0)));
+    for (int i = 0; i < 300; i++) u.mark(ch(0));
+    EXPECT_EQ(255, u.count(ch(0)));
     EXPECT_EQ(1, u.n);
 }
 
@@ -1242,9 +1246,9 @@ TEST(Settings, EncodeAndDecodeRoundTrip) {
 // screen: it is marked, the frame showing it clears it, and nothing is left lit.
 TEST(UnreadModel, AMessageInTheOpenConversationLeavesNothingLit) {
     RiftUnread u;
-    u.mark(riftConvChannel(0));
+    u.mark(ch(0));
     EXPECT_TRUE(u.any());
-    u.clear(riftConvChannel(0));           // what COMMS does on the next render
+    u.clear(ch(0));           // what COMMS does on the next render
     EXPECT_FALSE(u.any());
     EXPECT_EQ(0, u.total());
 }
@@ -1254,7 +1258,7 @@ TEST(UnreadModel, AMessageInTheOpenConversationLeavesNothingLit) {
 // messages had scrolled past the six rows it shows.
 TEST(UnreadModel, DismissingThePreviewDoesNotMarkConversationsRead) {
     RiftUnread u;
-    u.mark(riftConvChannel(0));
+    u.mark(ch(0));
     u.mark(riftConvDM((const uint8_t*) "PEER01"));
     ASSERT_EQ(2, u.total());
 
@@ -1262,7 +1266,7 @@ TEST(UnreadModel, DismissingThePreviewDoesNotMarkConversationsRead) {
 
     EXPECT_TRUE(u.any());                  // the dot stays on
     EXPECT_EQ(2, u.total());
-    EXPECT_EQ(1, u.count(riftConvChannel(0)));
+    EXPECT_EQ(1, u.count(ch(0)));
     EXPECT_EQ(1, u.count(riftConvDM((const uint8_t*) "PEER01")));
 }
 
@@ -1270,10 +1274,10 @@ TEST(UnreadModel, DismissingThePreviewDoesNotMarkConversationsRead) {
 // replaced dismissal as the way the dot goes out.
 TEST(UnreadModel, OpeningEachConversationIsWhatClearsTheDot) {
     RiftUnread u;
-    u.mark(riftConvChannel(0));
+    u.mark(ch(0));
     u.mark(riftConvDM((const uint8_t*) "PEER01"));
 
-    u.clear(riftConvChannel(0));
+    u.clear(ch(0));
     EXPECT_TRUE(u.any());                  // the DM is still unread
     u.clear(riftConvDM((const uint8_t*) "PEER01"));
     EXPECT_FALSE(u.any());
@@ -1295,14 +1299,79 @@ TEST(UnreadModel, AnUnattributableMessageStillLightsTheDot) {
 
 TEST(UnreadModel, TotalCountsEveryConversationAndSaturates) {
     RiftUnread u;
-    u.mark(riftConvChannel(0));
-    u.mark(riftConvChannel(0));
-    u.mark(riftConvChannel(1));
+    u.mark(ch(0));
+    u.mark(ch(0));
+    u.mark(ch(1));
     u.mark(riftConvUnknown());
     EXPECT_EQ(4, u.total());
 
-    for (int i = 0; i < 300; i++) u.mark(riftConvChannel(2));
+    for (int i = 0; i < 300; i++) u.mark(ch(2));
     EXPECT_EQ(255 + 4, u.total());         // per-conversation saturates, total does not wrap
+}
+
+// -------------------------------------------------------------- channel identity
+
+// The reported case. Slot 2 holds #privateA, its history is stored, the channel is
+// deleted, and a different channel is created in the same slot. The old history must
+// not appear under the new one.
+TEST(ChannelIdentity, AReusedSlotIsNotTheSameConversation) {
+    RiftConvKey a = riftConvChannel(2, riftChannelFingerprint((const uint8_t*) "keyAAAAAAAAAAAAA", 16));
+    RiftConvKey b = riftConvChannel(2, riftChannelFingerprint((const uint8_t*) "keyBBBBBBBBBBBBB", 16));
+    EXPECT_EQ(2, a.channel_idx);
+    EXPECT_EQ(2, b.channel_idx);
+    EXPECT_FALSE(riftConvSame(a, b));
+}
+
+TEST(ChannelIdentity, TheSameChannelInTheSameSlotStillMatches) {
+    RiftConvKey a = riftConvChannel(2, riftChannelFingerprint((const uint8_t*) "keyAAAAAAAAAAAAA", 16));
+    RiftConvKey b = riftConvChannel(2, riftChannelFingerprint((const uint8_t*) "keyAAAAAAAAAAAAA", 16));
+    EXPECT_TRUE(riftConvSame(a, b));
+}
+
+// The same key moved to a different slot is a different conversation. Debatable, and
+// this is the deliberate choice: the strip, the colours and the unread dots are all
+// keyed on the slot, so treating a move as continuity would put history under a row
+// that no longer exists.
+TEST(ChannelIdentity, TheSameKeyInADifferentSlotDoesNotMatch) {
+    uint32_t fp = riftChannelFingerprint((const uint8_t*) "keyAAAAAAAAAAAAA", 16);
+    EXPECT_FALSE(riftConvSame(riftConvChannel(2, fp), riftConvChannel(3, fp)));
+}
+
+// An entry restored from a log written before the fingerprint existed cannot prove
+// which channel it belonged to, so it matches on the slot alone - as good as it was
+// when written, and no better.
+TEST(ChannelIdentity, AMissingFingerprintMatchesOnTheSlotAlone) {
+    RiftConvKey legacy  = riftConvChannel(2, 0);
+    RiftConvKey current = riftConvChannel(2, 0xABCDEF01u);
+    EXPECT_TRUE(riftConvSame(legacy, current));
+    EXPECT_TRUE(riftConvSame(current, legacy));          // and symmetrically
+    EXPECT_FALSE(riftConvSame(legacy, riftConvChannel(3, 0)));
+}
+
+TEST(ChannelFingerprint, DiffersOnASingleBitOfKey) {
+    uint8_t k1[16], k2[16];
+    memset(k1, 0, sizeof(k1));
+    memset(k2, 0, sizeof(k2));
+    k2[15] = 1;
+    EXPECT_NE(riftChannelFingerprint(k1, 16), riftChannelFingerprint(k2, 16));
+}
+
+TEST(ChannelFingerprint, IsStableAndNeverZero) {
+    const uint8_t k[16] = { 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6 };
+    uint32_t a = riftChannelFingerprint(k, 16);
+    EXPECT_EQ(a, riftChannelFingerprint(k, 16));
+    EXPECT_NE(0u, a);
+    EXPECT_EQ(0u, riftChannelFingerprint(NULL, 16));     // degenerate, and 0 says so
+    EXPECT_EQ(0u, riftChannelFingerprint(k, 0));
+}
+
+// 128-bit and 256-bit keys are hashed over their real length, so the same 16 bytes
+// followed by zeroes is not the same channel as those 16 bytes alone.
+TEST(ChannelFingerprint, LengthIsPartOfTheInput) {
+    uint8_t k[32];
+    memset(k, 0, sizeof(k));
+    for (int i = 0; i < 16; i++) k[i] = (uint8_t) (i + 1);
+    EXPECT_NE(riftChannelFingerprint(k, 16), riftChannelFingerprint(k, 32));
 }
 
 int main(int argc, char** argv) {
