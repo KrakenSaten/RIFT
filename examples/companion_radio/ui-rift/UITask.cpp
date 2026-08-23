@@ -845,29 +845,27 @@ uint32_t rift_last_wake_ms = 0;
 #define RIFT_SETTINGS_PATH "/rift.cfg"
 #define RIFT_SETTINGS_MAGIC0 'R'
 #define RIFT_SETTINGS_MAGIC1 'S'
-#define RIFT_SETTINGS_VERSION 1
+// RIFT_SETTINGS_VERSION and the flag layout live in RiftLogic.h, where the migration
+// has tests rather than an argument.
 
 void riftLoadSettings() {
 #if defined(ESP32)
+  bool migrated = false;
   File f = SPIFFS.open(RIFT_SETTINGS_PATH, "r");
   if (!f) return;
   uint8_t b[4];
+  RiftSettings st;
   if (f.read(b, sizeof(b)) == sizeof(b)
       && b[0] == RIFT_SETTINGS_MAGIC0 && b[1] == RIFT_SETTINGS_MAGIC1
-      && b[2] == RIFT_SETTINGS_VERSION) {
-    riftApplyPalette((b[3] & 1) != 0);
-    rift_screen_always_on = (b[3] & 2) != 0;
+      && riftDecodeSettings(b[2], b[3], &st)) {
+    riftApplyPalette(st.day_mode);
+    rift_screen_always_on = st.always_on;
+    migrated = st.migrated;
 #ifdef RIFT_SPEAKER
-    // bit 4; the low four were already spoken for by day mode, always-on and the
-    // radar source, so this needed no version bump
-    rift_sound_on = (b[3] & 16) != 0;
+    rift_sound_on = st.sound_on;
 #endif
 #ifdef RIFT_RADAR
-    {
-      uint8_t src = (b[3] >> 2) & 3;
-      // 3 is not a state this ever writes; treat it as both rather than trusting it
-      rift_radar_src = (src == RIFT_SRC_WIFI || src == RIFT_SRC_BLE) ? src : RIFT_SRC_BOTH;
-    }
+    rift_radar_src = st.radar_src;
     uint8_t nw = 0;
     // Reset, not append. Called once today, which is the only reason writing
     // rf_watch[4..7] past a four-element array has not already happened.
@@ -893,6 +891,16 @@ void riftLoadSettings() {
 #endif
   }
   f.close();
+
+  // Rewritten at the new version, once, and only when the file that was read was an
+  // older one. It costs a flash write during boot, which is why it is conditional:
+  // doing it unconditionally would put a write in every boot to save a branch here.
+  //
+  // After f.close(), because the save reopens the same path for writing.
+  if (migrated) {
+    riftSaveSettings();
+    riftLogf("settings migrated to v%d", (int) RIFT_SETTINGS_VERSION);
+  }
 #endif
 }
 
@@ -900,16 +908,25 @@ void riftSaveSettings() {
 #if defined(ESP32)
   File f = SPIFFS.open(RIFT_SETTINGS_PATH, "w");
   if (!f) return;
-  uint8_t b[4] = { RIFT_SETTINGS_MAGIC0, RIFT_SETTINGS_MAGIC1, RIFT_SETTINGS_VERSION,
-                   (uint8_t) ((rift_day_mode ? 1 : 0) | (rift_screen_always_on ? 2 : 0)
+  // Encoded by the same function the reader decodes with, so the two cannot disagree
+  // about a bit position - which is the failure that would silently move every
+  // setting at once.
+  RiftSettings st;
+  st.day_mode  = rift_day_mode;
+  st.always_on = rift_screen_always_on;
+  st.migrated  = false;
 #ifdef RIFT_RADAR
-                               // bits 2-3, which were spare
-                               | ((rift_radar_src & 3) << 2)
+  st.radar_src = rift_radar_src;
+#else
+  st.radar_src = RIFT_SETTINGS_SRC_BOTH;
 #endif
 #ifdef RIFT_SPEAKER
-                               | (rift_sound_on ? 16 : 0)   // bit 4
+  st.sound_on = rift_sound_on;
+#else
+  st.sound_on = false;
 #endif
-                             ) };
+  uint8_t b[4] = { RIFT_SETTINGS_MAGIC0, RIFT_SETTINGS_MAGIC1,
+                   RIFT_SETTINGS_VERSION, riftEncodeSettings(st) };
   f.write(b, sizeof(b));
 #ifdef RIFT_RADAR
   // Appended rather than versioned. The reader below stops when the file runs out,

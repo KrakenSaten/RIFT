@@ -1156,6 +1156,86 @@ TEST(Unread, CountSaturatesRatherThanWrapping) {
     EXPECT_EQ(1, u.n);
 }
 
+// --------------------------------------------------------------- settings migration
+
+// The reported bug, as a test. A real v0.7 flags byte: day mode on, always-on on,
+// radar set to BLE, and bit 4 clear because sound did not exist yet.
+TEST(Settings, V1UpgradeKeepsEverythingAndTurnsSoundOn) {
+    const uint8_t v07_flags = 1 | 2 | (RIFT_SETTINGS_SRC_BLE << 2);   // 0x0B
+    RiftSettings s;
+    ASSERT_TRUE(riftDecodeSettings(1, v07_flags, &s));
+
+    EXPECT_TRUE(s.day_mode);                                 // preserved
+    EXPECT_TRUE(s.always_on);                                // preserved
+    EXPECT_EQ(RIFT_SETTINGS_SRC_BLE, s.radar_src);           // preserved
+    EXPECT_TRUE(s.sound_on);                                 // the new default, not the old zero
+    EXPECT_TRUE(s.migrated);                                 // and rewritten as v2
+}
+
+// A version 1 file with bit 4 *set* still takes the default. It cannot be a user
+// choice: nothing that wrote version 1 before v0.8 knew about the bit.
+TEST(Settings, V1IgnoresItsOwnSoundBitEitherWay) {
+    RiftSettings a, b;
+    ASSERT_TRUE(riftDecodeSettings(1, 0, &a));
+    ASSERT_TRUE(riftDecodeSettings(1, 16, &b));
+    EXPECT_TRUE(a.sound_on);
+    EXPECT_TRUE(b.sound_on);
+}
+
+TEST(Settings, V2HonoursTheStoredSoundChoice) {
+    RiftSettings on, off;
+    ASSERT_TRUE(riftDecodeSettings(RIFT_SETTINGS_VERSION, 16, &on));
+    ASSERT_TRUE(riftDecodeSettings(RIFT_SETTINGS_VERSION, 0, &off));
+    EXPECT_TRUE(on.sound_on);
+    EXPECT_FALSE(off.sound_on);
+    EXPECT_FALSE(on.migrated);      // already current, so no rewrite
+    EXPECT_FALSE(off.migrated);
+}
+
+TEST(Settings, AnUnknownVersionIsNotGuessedAt) {
+    RiftSettings s;
+    s.sound_on = false;
+    s.day_mode = false;
+    EXPECT_FALSE(riftDecodeSettings(0, 0xFF, &s));
+    EXPECT_FALSE(riftDecodeSettings(3, 0xFF, &s));
+    EXPECT_FALSE(riftDecodeSettings(200, 0xFF, &s));
+    EXPECT_FALSE(s.sound_on);       // untouched, so the caller keeps its defaults
+    EXPECT_FALSE(s.day_mode);
+    EXPECT_FALSE(riftDecodeSettings(RIFT_SETTINGS_VERSION, 0, NULL));
+}
+
+// Radar source 3 is never written. Reading it back as BOTH rather than trusting it
+// is the same rule the old inline code had, kept because a corrupt byte should land
+// on a working state.
+TEST(Settings, RadarSourceThreeIsTreatedAsBoth) {
+    RiftSettings s;
+    ASSERT_TRUE(riftDecodeSettings(RIFT_SETTINGS_VERSION, (3 << 2), &s));
+    EXPECT_EQ(RIFT_SETTINGS_SRC_BOTH, s.radar_src);
+}
+
+// The reader and the writer must agree about every bit position. A disagreement here
+// would move all four settings at once, which is why they share one pair of functions.
+TEST(Settings, EncodeAndDecodeRoundTrip) {
+    for (int day = 0; day < 2; day++)
+    for (int on = 0; on < 2; on++)
+    for (int snd = 0; snd < 2; snd++)
+    for (uint8_t src = 0; src <= 2; src++) {
+        RiftSettings w;
+        w.day_mode = day != 0;
+        w.always_on = on != 0;
+        w.sound_on = snd != 0;
+        w.radar_src = src;
+        w.migrated = false;
+
+        RiftSettings r;
+        ASSERT_TRUE(riftDecodeSettings(RIFT_SETTINGS_VERSION, riftEncodeSettings(w), &r));
+        EXPECT_EQ(w.day_mode, r.day_mode);
+        EXPECT_EQ(w.always_on, r.always_on);
+        EXPECT_EQ(w.sound_on, r.sound_on);
+        EXPECT_EQ(w.radar_src, r.radar_src);
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

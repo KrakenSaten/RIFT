@@ -887,6 +887,78 @@ static inline int riftLargestConv(const RiftConvKey* keys, int n, RiftConvKey* o
   return best;
 }
 
+// ------------------------------------------------------------ settings migration
+//
+// The flags byte of /rift.cfg, decoded. Pure, so the migration has tests instead of
+// an argument - which is what this needed, because the bug it fixes was a comment
+// reasoning about the wrong thing.
+//
+// Bit layout: 0 day mode, 1 screen always on, 2-3 radar source, 4 sound.
+//
+// VERSION 1 vs 2, AND WHY THE BUMP WAS OWED. Sound arrived in v0.8 on bit 4 and the
+// file stayed at version 1, on the reasoning that the low four bits were already
+// spoken for so no bump was needed. That checked whether the *bit* was free. The
+// question was whether *zero* means the new default - and it does not: sound defaults
+// to on, so every settings file written before sound existed said "off". A fresh
+// install got sound; an upgrade went silent. The rule, stated so it is not rederived:
+//
+//   adding a setting where the old value 0 does not equal the new default
+//   requires a version bump.
+//
+// A version 1 file therefore takes the new default rather than its own bit 4.
+//
+// THE COST OF THAT, STATED PLAINLY. v0.8.0 shipped writing version 1, so a device
+// where the user deliberately turned sound off has a file indistinguishable from a
+// v0.7 one. Those users get sound back on once, and it sticks after that. The
+// alternative is leaving every v0.7 upgrade silently muted, and silence reads as
+// broken hardware where an unexpected beep reads as a setting to change. One-time
+// annoyance for a few beats a permanent wrong answer for everyone.
+#define RIFT_SETTINGS_VERSION 2
+
+// Mirrored from UITask.cpp, which defines these inside #ifdef RIFT_RADAR and so
+// cannot be the source for a file that compiles without a radio.
+#define RIFT_SETTINGS_SRC_BOTH 0
+#define RIFT_SETTINGS_SRC_WIFI 1
+#define RIFT_SETTINGS_SRC_BLE  2
+
+struct RiftSettings {
+  bool    day_mode;
+  bool    always_on;
+  uint8_t radar_src;
+  bool    sound_on;
+  bool    migrated;   // the file was an older version and should be rewritten
+};
+
+// Returns false for a version this build does not know, in which case *out is
+// untouched and the caller keeps its defaults - a format from the future is not
+// something to guess at.
+static inline bool riftDecodeSettings(uint8_t version, uint8_t flags, RiftSettings* out) {
+  if (out == NULL) return false;
+  if (version != 1 && version != RIFT_SETTINGS_VERSION) return false;
+
+  out->day_mode  = (flags & 1) != 0;
+  out->always_on = (flags & 2) != 0;
+
+  uint8_t src = (uint8_t) ((flags >> 2) & 3);
+  // 3 is not a state this ever writes; treat it as both rather than trusting it
+  out->radar_src = (src == RIFT_SETTINGS_SRC_WIFI || src == RIFT_SETTINGS_SRC_BLE)
+                     ? src : RIFT_SETTINGS_SRC_BOTH;
+
+  if (version == 1) {
+    out->sound_on = true;      // the new default, not the old zero
+    out->migrated = true;
+  } else {
+    out->sound_on = (flags & 16) != 0;
+    out->migrated = false;
+  }
+  return true;
+}
+
+static inline uint8_t riftEncodeSettings(const RiftSettings& s) {
+  return (uint8_t) ((s.day_mode ? 1 : 0) | (s.always_on ? 2 : 0)
+                    | ((s.radar_src & 3) << 2) | (s.sound_on ? 16 : 0));
+}
+
 // Which entry a full log should drop. keys are the conversations of the stored
 // entries, oldest first; the return is an index into them.
 //
