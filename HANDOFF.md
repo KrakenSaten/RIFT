@@ -188,6 +188,19 @@ the commit messages. Neither is repeated here.
    divergence, or rooms work with a login per action and no persistent status —
    honest, but probably not what a room is for.
 
+   **Queued, 2026-08-23: ask upstream rather than guess.** The blocker is not a
+   missing feature, it is not knowing what a `TODO - deprecate` means in practice —
+   whether Connections is being replaced, dropped, or simply left where it is. That is
+   a question, and an issue asking it costs nothing and unblocks everything after it.
+
+   A pull request is the weaker opening move here, and worth saying why before anyone
+   spends an evening on one: uncommenting `checkConnections()` would be a patch that
+   revives a mechanism its own maintainers marked for removal, which invites a no on
+   grounds that have nothing to do with whether the patch is correct. Ask first, then
+   offer the patch if the answer leaves room for it. If the answer is that rooms need
+   a keep-alive and nothing replaces it yet, that is also the strongest possible case
+   for the patch, and it will have been made by them rather than by us.
+
    A second thing to settle first: a room password is a secret on screen, the same
    class as the one-time channel key, which had to be wiped on leaving SYSTEM because
    coming back redisplayed it. Any password field inherits that requirement.
