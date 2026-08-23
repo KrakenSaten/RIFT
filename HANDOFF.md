@@ -96,7 +96,10 @@ than any amount of code reading.
   to an absent address took ~920 ms, and two callers walk all 112 addresses —
   that was 243 seconds of boot. `radio_init()` now does `Wire.end()` then
   `Wire.begin(18, 8, 100000)`. Why the probe leaves it that way is still not
-  established; this treats the symptom.
+  established; this treats the symptom. **Reporting it upstream was considered and
+  declined** — boot is seconds here and the item is closed for this project. Do not
+  re-open it as a task; the note stays because it explains why `radio_init()` does
+  something that otherwise looks arbitrary.
 - **External power** is `HWCDC::isPlugged()`. `(bool) Serial` resolves to
   `isCDC_Connected()`, which needs the host to *open* the port and returns false
   by design.
@@ -193,15 +196,11 @@ the commit messages. Neither is repeated here.
 4. **`QUIET` has never been seen on hardware.** Needs a quarter hour of silence;
    only the threshold is covered, by native test.
 
-5. **Report the I²C bug upstream.** Measurements in `3528d80a`. The fix took boot
-   from 243 s to 5.1 s and every other T-Deck user is still paying it. Outward
-   facing, so it needs a go-ahead — asked for and deferred, not declined.
-
-6. **Why a long flash write fails.** Known to be the transfer length, not the
+5. **Why a long flash write fails.** Known to be the transfer length, not the
    address, and the threshold moves with the image size. `tools/rift-flash.py`
    handles it; the cause is still unknown.
 
-7. **Emoji show as blocks past the mapped set.** CP437 has none, and what remains
+6. **Emoji show as blocks past the mapped set.** CP437 has none, and what remains
    has no honest ASCII equivalent. The route is hand-drawn glyphs in a 6×8 cell,
    which makes the discard list as much the deliverable as the glyphs: an
    unrecognisable glyph is worse than a block, because a block admits it cannot
