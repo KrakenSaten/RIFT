@@ -41,6 +41,30 @@ public:
   void disableBluetooth() { _interfaceManager->disableBluetooth(); }
   virtual void msgRead(int msgcount) = 0;
   virtual void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) = 0;
+
+  // As newMsg(), plus which conversation the message belongs to.
+  //
+  // newMsg() carries a display name and nothing else, so a UI that groups messages
+  // by conversation has to recover the identity by matching that name against its
+  // configured channels and contacts. RIFT did exactly that, and the function doing
+  // it shipped wrong - every row drew in the fallback colour and three readings of
+  // the code did not find it. The caller in MyMesh has the channel index or the
+  // sender's public key in hand at both sites and was throwing it away.
+  //
+  // Kinds are 0 unknown, 1 channel, 2 direct, 3 room, matching RIFT_CONV_* in
+  // ui-rift/RiftLogic.h. Passed as plain integers rather than a struct so this
+  // shared header stays independent of any one UI, and peer points at six bytes of
+  // public key prefix or is NULL.
+  //
+  // Default forwards, so ui-new, ui-orig and ui-tiny need no change and lose
+  // nothing: they were never told the conversation and never asked.
+  virtual void newMsgConv(uint8_t path_len, const char* from_name, const char* text,
+                          int msgcount, uint8_t conv_kind, uint8_t channel_idx,
+                          const uint8_t* peer) {
+    (void) conv_kind; (void) channel_idx; (void) peer;
+    newMsg(path_len, from_name, text, msgcount);
+  }
+
   // an outgoing direct message was acknowledged by its recipient. Intentionally
   // not pure - UIs that don't surface delivery state need no implementation.
   virtual void msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) { }

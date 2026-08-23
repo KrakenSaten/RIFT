@@ -285,6 +285,12 @@ public:
 
   void msgRead(int msgcount) override;
   void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override;
+  // RIFT groups the history by conversation, so this is the real entry point and
+  // newMsg() above forwards into it with the conversation unknown - which is what an
+  // unmodified caller can honestly say.
+  void newMsgConv(uint8_t path_len, const char* from_name, const char* text,
+                  int msgcount, uint8_t conv_kind, uint8_t channel_idx,
+                  const uint8_t* peer) override;
   void msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) override;
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;

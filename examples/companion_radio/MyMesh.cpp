@@ -720,7 +720,10 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   // we only want to show text messages on display, not cli data
   bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
   if (should_display && _ui) {
-    _ui->newMsg(path_len, from.name, text, offline_queue_len);
+    // 2 = direct. The sender's key prefix identifies the conversation; the name
+    // does not, because two contacts may share one and a rename changes it.
+    _ui->newMsgConv(path_len, from.name, text, offline_queue_len,
+                    2, 0, from.id.pub_key);
     if (!_serial->isConnected() || _ui->notifiesWhileConnected()) {
       _ui->notify(UIEventType::contactMessage);
     }
@@ -841,7 +844,10 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   if (getChannel(channel_idx, channel_details)) {
     channel_name = channel_details.name;
   }
-  if (_ui) _ui->newMsg(path_len, channel_name, text, offline_queue_len);
+  // 1 = channel. The index rather than the name for the same reason: the name is a
+  // label the user can edit, the index is what the message actually arrived on.
+  if (_ui) _ui->newMsgConv(path_len, channel_name, text, offline_queue_len,
+                           1, (uint8_t) channel_idx, NULL);
 #endif
 }
 

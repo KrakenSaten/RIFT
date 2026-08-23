@@ -156,18 +156,41 @@ struct RiftMsgLog {
     // there is no deadline left to have passed. This only records whether the line
     // has already been written, within one session.
     bool timeout_logged;
+    // Which conversation this belongs to, recorded where it is known rather than
+    // recovered from origin[] afterwards. Eight bytes an entry, 384 for the log.
+    RiftConvKey conv;
   };
 
+  // Oldest at 0, newest at count-1. This was a ring with a head index, which is the
+  // right shape when the only thing ever removed is the oldest. Per-conversation
+  // eviction removes an entry from the middle, and a ring cannot do that without
+  // moving head or leaving a hole that every reader then has to skip. A linear array
+  // makes eviction one memmove and peek() arithmetic rather than modular. The cost
+  // is moving up to 47 entries on a full log, once per message.
   Entry entries[RIFT_MSG_LOG_SIZE];
   int count = 0;
-  int head = RIFT_MSG_LOG_SIZE - 1;   // index of newest entry
 
-  Entry* add(uint32_t timestamp, const char* origin, const char* msg, bool outgoing) {
+  // Which entry to drop when the log is full. The rule itself is riftEvictIndex() in
+  // RiftLogic.h, so it is tested without a filesystem or a display; this only lifts
+  // the keys out of the entries for it.
+  int evictIndex() const {
+    RiftConvKey keys[RIFT_MSG_LOG_SIZE];
+    for (int i = 0; i < count; i++) keys[i] = entries[i].conv;
+    return riftEvictIndex(keys, count);
+  }
+
+  Entry* add(uint32_t timestamp, const RiftConvKey& conv, const char* origin,
+             const char* msg, bool outgoing) {
     markDirty();
-    head = (head + 1) % RIFT_MSG_LOG_SIZE;
-    if (count < RIFT_MSG_LOG_SIZE) count++;
+    if (count >= RIFT_MSG_LOG_SIZE) {
+      int drop = evictIndex();
+      memmove(&entries[drop], &entries[drop + 1],
+              (size_t) (RIFT_MSG_LOG_SIZE - drop - 1) * sizeof(Entry));
+      count = RIFT_MSG_LOG_SIZE - 1;
+    }
 
-    Entry* p = &entries[head];
+    Entry* p = &entries[count++];
+    p->conv = conv;
     p->timestamp = timestamp;
     StrHelper::strncpy(p->origin, origin, sizeof(p->origin));
     StrHelper::strncpy(p->msg, msg, sizeof(p->msg));
@@ -189,7 +212,7 @@ struct RiftMsgLog {
   // message and is estimated at send time.
   void logTimeouts() {
     for (int i = 0; i < count; i++) {
-      Entry* p = &entries[(head - i + RIFT_MSG_LOG_SIZE * 2) % RIFT_MSG_LOG_SIZE];
+      Entry* p = &entries[count - 1 - i];
       if (!p->outgoing || p->expected_ack == 0 || p->delivered) continue;
       if (p->timeout_logged || p->timeout_ms == 0) continue;
       // subtraction, matching deliveryLabel: sent_at + timeout would overflow at
@@ -209,7 +232,7 @@ struct RiftMsgLog {
   void markDelivered(uint32_t ack_hash, uint32_t trip_ms) {
     if (ack_hash == 0) return;
     for (int i = 0; i < count; i++) {
-      Entry* p = &entries[(head - i + RIFT_MSG_LOG_SIZE * 2) % RIFT_MSG_LOG_SIZE];
+      Entry* p = &entries[count - 1 - i];
       if (p->expected_ack == ack_hash && !p->delivered) {
         p->delivered = true;
         p->trip_ms = trip_ms;
@@ -228,7 +251,15 @@ struct RiftMsgLog {
   // 0 = newest, 1 = next older, ...
   const Entry* peek(int back) const {
     if (back < 0 || back >= count) return NULL;
-    return &entries[(head - back + RIFT_MSG_LOG_SIZE * 2) % RIFT_MSG_LOG_SIZE];
+    return &entries[count - 1 - back];
+  }
+
+  // How many bytes follow the kind byte in a stored record. One place, because a
+  // writer and reader disagreeing about it would shift every field after it.
+  static uint8_t convPayloadLen(uint8_t kind) {
+    if (kind == RIFT_CONV_CHANNEL) return 1;
+    if (kind == RIFT_CONV_DM) return RIFT_CONV_PEER_LEN;
+    return 0;
   }
 
   // ------------------------------------------------------------- persistence
@@ -274,8 +305,12 @@ struct RiftMsgLog {
   // length-prefixed rather than fixed - a typical message is a fraction of the
   // 160-byte maximum, and the file is ~3KB instead of ~12KB because of it.
   //
-  // Version is checked on load and a mismatch discards rather than guesses.
-  static const uint8_t FILE_VERSION = 1;
+  // Version 2 adds the conversation key. Version 1 is still read: its entries load
+  // with the conversation unknown, which places them by the existing name match and
+  // is exactly as good as it was before. A history is not worth discarding to save
+  // one branch in the reader.
+  static const uint8_t FILE_VERSION = 2;
+  static const uint8_t FILE_V1_FIXED = 11;   // record header before the key existed
 
   // Retry accounting. save() leaves dirty set when it fails, and the flush
   // condition is "dirty and the debounce has elapsed" - which stays true forever
@@ -324,8 +359,8 @@ struct RiftMsgLog {
     bool ok = true;
     // The flush below assumes a whole record always fits in an empty buffer, so
     // a record is never split across two writes.
-    static_assert(11 + sizeof(Entry::origin) + sizeof(Entry::msg) <= sizeof(buf),
-                  "staging buffer cannot hold one record");
+    static_assert(12 + RIFT_CONV_PEER_LEN + sizeof(Entry::origin) + sizeof(Entry::msg)
+                  <= sizeof(buf), "staging buffer cannot hold one record");
 
     const uint8_t hdr[6] = { 'R', 'M', 'S', 'G', FILE_VERSION, (uint8_t) count };
     memcpy(buf, hdr, sizeof(hdr));
@@ -339,8 +374,12 @@ struct RiftMsgLog {
       uint8_t olen = (uint8_t) strnlen(p->origin, sizeof(p->origin) - 1);
       uint8_t mlen = (uint8_t) strnlen(p->msg, sizeof(p->msg) - 1);
       uint8_t flags = (p->outgoing ? 1 : 0) | (p->delivered ? 2 : 0);
+      // The key is stored variable-length for the same reason the strings are: a
+      // channel needs one byte of it and an unknown none, so a fixed eight would add
+      // ~350 bytes to a ~3KB file, and the file size is what a save costs.
+      uint8_t clen = convPayloadLen(p->conv.kind);
 
-      size_t need = 11 + (size_t) olen + (size_t) mlen;
+      size_t need = 12 + (size_t) clen + (size_t) olen + (size_t) mlen;
       if (used + need > sizeof(buf)) {
         if (f.write(buf, used) != used) { ok = false; break; }
         used = 0;
@@ -352,8 +391,11 @@ struct RiftMsgLog {
       memcpy(&r[5], &p->trip_ms, 4);
       r[9] = olen;
       r[10] = mlen;
-      memcpy(&r[11], p->origin, olen);
-      memcpy(&r[11 + olen], p->msg, mlen);
+      r[11] = p->conv.kind;
+      if (p->conv.kind == RIFT_CONV_CHANNEL) r[12] = p->conv.channel_idx;
+      else if (p->conv.kind == RIFT_CONV_DM) memcpy(&r[12], p->conv.peer, RIFT_CONV_PEER_LEN);
+      memcpy(&r[12 + clen], p->origin, olen);
+      memcpy(&r[12 + clen + olen], p->msg, mlen);
       used += need;
     }
     if (ok && used > 0 && f.write(buf, used) != used) ok = false;
@@ -393,22 +435,35 @@ struct RiftMsgLog {
     uint8_t hdr[6];
     if (f.read(hdr, sizeof(hdr)) != sizeof(hdr)
         || hdr[0] != 'R' || hdr[1] != 'M' || hdr[2] != 'S' || hdr[3] != 'G'
-        || hdr[4] != FILE_VERSION) {
+        || (hdr[4] != FILE_VERSION && hdr[4] != 1)) {
       f.close();
       return;   // absent, truncated or a format we do not know - start empty
     }
+    bool has_conv = (hdr[4] >= 2);
 
     int n = hdr[5];
     if (n > RIFT_MSG_LOG_SIZE) n = RIFT_MSG_LOG_SIZE;
 
     for (int i = 0; i < n; i++) {
-      uint8_t rec[11];
-      if (f.read(rec, sizeof(rec)) != sizeof(rec)) break;   // truncated: keep what we have
+      uint8_t rec[12];
+      size_t fixed = has_conv ? sizeof(rec) : FILE_V1_FIXED;
+      if (f.read(rec, fixed) != fixed) break;   // truncated: keep what we have
 
       uint32_t ts, trip;
       memcpy(&ts, &rec[0], 4);
       memcpy(&trip, &rec[5], 4);
       uint8_t flags = rec[4], olen = rec[9], mlen = rec[10];
+
+      RiftConvKey conv = riftConvUnknown();
+      if (has_conv) {
+        uint8_t payload[RIFT_CONV_PEER_LEN];
+        uint8_t clen = convPayloadLen(rec[11]);
+        if (clen > 0 && f.read(payload, clen) != clen) break;
+        if (rec[11] == RIFT_CONV_CHANNEL) conv = riftConvChannel(payload[0]);
+        else if (rec[11] == RIFT_CONV_DM) conv = riftConvDM(payload);
+        // an unrecognised kind - a file from a newer build - stays unknown rather
+        // than being guessed at
+      }
 
       char origin[62], msg[MAX_TEXT_LEN + 1];
       if (olen >= sizeof(origin) || mlen >= sizeof(msg)) break;   // corrupt length
@@ -417,7 +472,7 @@ struct RiftMsgLog {
       origin[olen] = 0;
       msg[mlen] = 0;
 
-      Entry* p = add(ts, origin, msg, (flags & 1) != 0);   // clears dirty below
+      Entry* p = add(ts, conv, origin, msg, (flags & 1) != 0);   // clears dirty below
       // Delivery state that survives: whether it landed, and how long it took.
       // expected_ack, sent_at_ms and timeout_ms are millis-based and meaningless
       // now, so they stay zero - which reads as "no ack expected" rather than as
@@ -4408,7 +4463,8 @@ private:
       // message you received on it could.
       char origin[62];
       snprintf(origin, sizeof(origin), "to %s:", ch.name);
-      msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, sent, true);
+      msg_log.add(the_mesh.getRTCClock()->getCurrentTime(),
+                  riftConvChannel((uint8_t) _target_channel_idx), origin, sent, true);
       riftLogf("tx s%d %s: %s", _target_channel_idx, ch.name, sent);
       clearInput();
     } else {
@@ -4444,7 +4500,8 @@ private:
     // this log exists to put next to each other.
     riftLogf("tx %s %s: %s", result == MSG_SEND_SENT_FLOOD ? "flood" : "direct",
              _target_name, _input);
-    auto p = msg_log.add(the_mesh.getRTCClock()->getCurrentTime(), origin, _input, true);
+    auto p = msg_log.add(the_mesh.getRTCClock()->getCurrentTime(),
+                         riftConvDM(rcpt->id.pub_key), origin, _input, true);
     p->expected_ack = expected_ack;
     p->sent_at_ms = millis();
     p->timeout_ms = est_timeout;
@@ -5394,7 +5451,17 @@ void UITask::msgRead(int msgcount) {
 }
 
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
+  newMsgConv(path_len, from_name, text, msgcount, RIFT_CONV_UNKNOWN, 0, NULL);
+}
+
+void UITask::newMsgConv(uint8_t path_len, const char* from_name, const char* text,
+                        int msgcount, uint8_t conv_kind, uint8_t channel_idx,
+                        const uint8_t* peer) {
   _companion_backlog = msgcount;
+
+  RiftConvKey conv = riftConvUnknown();
+  if (conv_kind == RIFT_CONV_CHANNEL) conv = riftConvChannel(channel_idx);
+  else if (conv_kind == RIFT_CONV_DM) conv = riftConvDM(peer);
 
   char origin[62];
   if (path_len == 0xFF) {
@@ -5404,7 +5471,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
     // raw, a two-hop route at the 2-byte hash setting showed as "(66)".
     sprintf(origin, "(%d) %s:", (int) riftHopCount(path_len), from_name);
   }
-  msg_log.add(rtc_clock.getCurrentTime(), origin, text, false);
+  msg_log.add(rtc_clock.getCurrentTime(), conv, origin, text, false);
   // The text as well as the header. The message history already holds it, but the
   // log is where it sits next to the advert that preceded it and the ack that
   // followed, and that ordering is the thing the history cannot show.

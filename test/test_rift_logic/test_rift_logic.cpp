@@ -962,6 +962,129 @@ TEST(HopBucket, EveryBucketHasALabelAndNoneRepeat) {
     }
 }
 
+// ---------------------------------------------------------------- conversations
+
+static const uint8_t PEER_A[6] = { 1,2,3,4,5,6 };
+static const uint8_t PEER_B[6] = { 1,2,3,4,5,7 };   // differs in the last byte only
+
+TEST(ConvKey, ChannelsMatchByIndex) {
+    EXPECT_TRUE(riftConvSame(riftConvChannel(0), riftConvChannel(0)));
+    EXPECT_FALSE(riftConvSame(riftConvChannel(0), riftConvChannel(1)));
+}
+
+TEST(ConvKey, DmsMatchOnTheWholePrefix) {
+    EXPECT_TRUE(riftConvSame(riftConvDM(PEER_A), riftConvDM(PEER_A)));
+    EXPECT_FALSE(riftConvSame(riftConvDM(PEER_A), riftConvDM(PEER_B)));
+}
+
+TEST(ConvKey, KindsNeverMatchEachOther) {
+    EXPECT_FALSE(riftConvSame(riftConvChannel(0), riftConvDM(PEER_A)));
+    EXPECT_FALSE(riftConvSame(riftConvChannel(2), riftConvUnknown()));
+}
+
+// Entries restored from a pre-v2 log all carry unknown. Treating those as one
+// conversation would collect an entire history into a single fake bucket - and make
+// the eviction below judge it the largest and empty it first.
+TEST(ConvKey, TwoUnknownsAreNotTheSameConversation) {
+    EXPECT_FALSE(riftConvSame(riftConvUnknown(), riftConvUnknown()));
+}
+
+TEST(ConvKey, NullPeerIsUnknownRatherThanAZeroDm) {
+    RiftConvKey k = riftConvDM(NULL);
+    EXPECT_EQ(RIFT_CONV_UNKNOWN, k.kind);
+}
+
+TEST(LargestConv, PicksTheBusiestConversation) {
+    RiftConvKey keys[6] = {
+        riftConvChannel(0), riftConvChannel(0), riftConvChannel(0),
+        riftConvDM(PEER_A), riftConvChannel(1), riftConvDM(PEER_A)
+    };
+    RiftConvKey out = riftConvUnknown();
+    EXPECT_EQ(3, riftLargestConv(keys, 6, &out));
+    EXPECT_TRUE(riftConvSame(out, riftConvChannel(0)));
+}
+
+// The case the whole change exists for: one loud channel and one quiet DM. The DM
+// must not be what gets dropped.
+TEST(LargestConv, ALoudChannelIsChosenOverAQuietDm) {
+    RiftConvKey keys[8];
+    for (int i = 0; i < 7; i++) keys[i] = riftConvChannel(0);
+    keys[7] = riftConvDM(PEER_A);
+    RiftConvKey out = riftConvUnknown();
+    EXPECT_EQ(7, riftLargestConv(keys, 8, &out));
+    EXPECT_TRUE(riftConvSame(out, riftConvChannel(0)));
+    EXPECT_FALSE(riftConvSame(out, riftConvDM(PEER_A)));
+}
+
+TEST(LargestConv, AllUnknownFallsBackRatherThanPickingOne) {
+    RiftConvKey keys[3] = { riftConvUnknown(), riftConvUnknown(), riftConvUnknown() };
+    RiftConvKey out = riftConvChannel(9);
+    EXPECT_EQ(0, riftLargestConv(keys, 3, &out));
+    EXPECT_EQ(RIFT_CONV_UNKNOWN, out.kind);
+}
+
+TEST(LargestConv, DegenerateInputs) {
+    RiftConvKey out = riftConvUnknown();
+    RiftConvKey one = riftConvChannel(0);
+    EXPECT_EQ(0, riftLargestConv(NULL, 3, &out));
+    EXPECT_EQ(0, riftLargestConv(&one, 0, &out));
+    EXPECT_EQ(0, riftLargestConv(&one, 1, NULL));
+}
+
+TEST(EvictIndex, DropsTheOldestOfTheBusiestConversation) {
+    // three of channel 0 at the front, then a DM, then more channel 0. The oldest
+    // channel-0 entry is index 0 here, which happens to also be the oldest overall.
+    RiftConvKey keys[6] = {
+        riftConvChannel(0), riftConvChannel(0), riftConvDM(PEER_A),
+        riftConvChannel(0), riftConvChannel(1), riftConvDM(PEER_A)
+    };
+    EXPECT_EQ(0, riftEvictIndex(keys, 6));
+}
+
+// The case the whole change exists for. The DM is the oldest entry in the log, so
+// age alone would drop it and the conversation would open empty - while the channel
+// it lost to has five more of its own to spare.
+TEST(EvictIndex, AQuietDmSurvivesALoudChannel) {
+    RiftConvKey keys[6] = {
+        riftConvDM(PEER_A),  riftConvChannel(0), riftConvChannel(0),
+        riftConvChannel(0),  riftConvChannel(0), riftConvChannel(0)
+    };
+    EXPECT_EQ(1, riftEvictIndex(keys, 6));   // oldest channel entry, not the DM
+}
+
+TEST(EvictIndex, AllUnknownFallsBackToOldest) {
+    RiftConvKey keys[4] = { riftConvUnknown(), riftConvUnknown(),
+                            riftConvUnknown(), riftConvUnknown() };
+    EXPECT_EQ(0, riftEvictIndex(keys, 4));
+}
+
+// No conversation holds more than one, so there is nothing dominant to take from.
+// Age is blunt; picking whichever key the scan reached first would be arbitrary.
+TEST(EvictIndex, NoDominantConversationFallsBackToOldest) {
+    RiftConvKey keys[4] = { riftConvDM(PEER_A), riftConvChannel(1),
+                            riftConvChannel(2), riftConvDM(PEER_B) };
+    EXPECT_EQ(0, riftEvictIndex(keys, 4));
+}
+
+// A version 1 history still in the log must not become one giant bucket that the
+// rule then empties ahead of live traffic.
+TEST(EvictIndex, MigratedEntriesAreNotOneBucket) {
+    RiftConvKey keys[6] = {
+        riftConvUnknown(), riftConvUnknown(), riftConvUnknown(),
+        riftConvUnknown(), riftConvChannel(0), riftConvChannel(0)
+    };
+    // channel 0 holds two, the unknowns hold one each, so the channel is the
+    // largest and its oldest goes - the migrated entries are left alone
+    EXPECT_EQ(4, riftEvictIndex(keys, 6));
+}
+
+TEST(EvictIndex, DegenerateInputs) {
+    RiftConvKey one = riftConvChannel(0);
+    EXPECT_EQ(0, riftEvictIndex(NULL, 4));
+    EXPECT_EQ(0, riftEvictIndex(&one, 0));
+    EXPECT_EQ(0, riftEvictIndex(&one, 1));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

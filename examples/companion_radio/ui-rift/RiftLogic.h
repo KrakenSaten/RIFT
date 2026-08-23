@@ -794,3 +794,122 @@ static inline const char* riftHopBucketLabel(int bucket) {
     default:               return "?";
   }
 }
+
+// ------------------------------------------------------------- conversations
+//
+// Which conversation a message belongs to, carried on the log entry rather than
+// worked out from its display string.
+//
+// riftOriginName() exists because the channel colours needed to answer this from an
+// origin like "(2) Public:" or "to HYTTA:", and its own comment records that the
+// first version was wrong, that every row drew grey, and that three readings of the
+// code did not find it. Both call sites in MyMesh have the real identity in hand - a
+// channel index, or the sender's public key - so the answer is stored when it is
+// known instead of reconstructed later.
+//
+// `room` is reserved and not implemented. A room server needs a login and therefore
+// a connection status, and the keep-alive that would maintain one is commented out
+// upstream as something they intend to deprecate - see design/comms-redesign.md.
+// Reserving the value means the third kind costs no rework when that is settled.
+#define RIFT_CONV_UNKNOWN  0
+#define RIFT_CONV_CHANNEL  1
+#define RIFT_CONV_DM       2
+#define RIFT_CONV_ROOM     3
+
+#define RIFT_CONV_PEER_LEN 6
+
+struct RiftConvKey {
+  uint8_t kind;
+  uint8_t channel_idx;                   // RIFT_CONV_CHANNEL only
+  uint8_t peer[RIFT_CONV_PEER_LEN];      // RIFT_CONV_DM only
+};
+
+static inline RiftConvKey riftConvUnknown() {
+  RiftConvKey k;
+  memset(&k, 0, sizeof(k));
+  k.kind = RIFT_CONV_UNKNOWN;
+  return k;
+}
+
+static inline RiftConvKey riftConvChannel(uint8_t channel_idx) {
+  RiftConvKey k;
+  memset(&k, 0, sizeof(k));
+  k.kind = RIFT_CONV_CHANNEL;
+  k.channel_idx = channel_idx;
+  return k;
+}
+
+static inline RiftConvKey riftConvDM(const uint8_t* pubkey) {
+  RiftConvKey k;
+  memset(&k, 0, sizeof(k));
+  if (pubkey == NULL) return k;          // unknown rather than a DM with a zero peer
+  k.kind = RIFT_CONV_DM;
+  memcpy(k.peer, pubkey, RIFT_CONV_PEER_LEN);
+  return k;
+}
+
+// Two unknowns are NOT the same conversation. Entries loaded from a pre-v2 log all
+// carry unknown, and treating them as one bucket would collect a whole history into
+// a single fake conversation - and, worse, make the eviction below consider it the
+// largest and empty it first.
+static inline bool riftConvSame(const RiftConvKey& a, const RiftConvKey& b) {
+  if (a.kind != b.kind) return false;
+  switch (a.kind) {
+    case RIFT_CONV_CHANNEL: return a.channel_idx == b.channel_idx;
+    case RIFT_CONV_DM:      return memcmp(a.peer, b.peer, RIFT_CONV_PEER_LEN) == 0;
+    default:                return false;
+  }
+}
+
+// Which conversation is holding the most entries, for eviction.
+//
+// The log is one pool shared by every conversation. Dropping the globally oldest
+// entry is honest while the view is a single stream, and stops being honest once it
+// is filtered per conversation: a busy channel then evicts a quiet direct message,
+// and the conversation you had an hour ago opens empty rather than short. Dropping
+// from the largest instead means a quiet conversation survives any amount of traffic
+// in a loud one.
+//
+// Returns the number of entries the winner holds, and writes its key to *out. Zero
+// when there is nothing to evict.
+static inline int riftLargestConv(const RiftConvKey* keys, int n, RiftConvKey* out) {
+  if (keys == NULL || out == NULL || n <= 0) return 0;
+  int best = 0;
+  for (int i = 0; i < n; i++) {
+    if (keys[i].kind == RIFT_CONV_UNKNOWN) continue;   // never a bucket, see above
+    int c = 0;
+    for (int j = 0; j < n; j++) if (riftConvSame(keys[i], keys[j])) c++;
+    if (c > best) { best = c; *out = keys[i]; }
+  }
+  // All unknown - a log restored from a pre-v2 file and nothing new yet. Fall back to
+  // the oldest, which is what the ring did before any of this existed.
+  if (best == 0) { *out = riftConvUnknown(); return 0; }
+  return best;
+}
+
+// Which entry a full log should drop. keys are the conversations of the stored
+// entries, oldest first; the return is an index into them.
+//
+// Oldest-first is honest while a history is shown as one stream: you see the last N
+// and that is genuinely what you have. Once the view is per conversation it stops
+// being honest - a busy channel evicts the direct message you had an hour ago, and
+// that conversation opens empty. So drop the oldest entry of whichever conversation
+// holds the most: a loud channel loses a tail it has plenty of, and a quiet DM
+// survives any amount of channel traffic.
+//
+// Two cases fall back to plain oldest-first. A log restored from a pre-key file has
+// every entry unknown, so there are no buckets to compare. And a log where no
+// conversation holds more than one entry has nothing dominant to take from, where
+// "largest" would only mean "whichever came first" - which is a worse rule than age
+// because it is arbitrary rather than merely blunt.
+static inline int riftEvictIndex(const RiftConvKey* keys, int n) {
+  if (keys == NULL || n <= 0) return 0;
+
+  RiftConvKey biggest = riftConvUnknown();
+  if (riftLargestConv(keys, n, &biggest) <= 1) return 0;
+
+  for (int i = 0; i < n; i++) {
+    if (riftConvSame(keys[i], biggest)) return i;   // oldest of that conversation
+  }
+  return 0;   // unreachable: riftLargestConv only names a key it found
+}
