@@ -179,11 +179,12 @@ the commit messages. Neither is repeated here.
    "flood, route unknown", not 63 hops — and this screen sorts by hops. Ask
    `riftHopsUnknown()` before decoding; `riftHopBucket()` has a bucket for it.
 
-2. **Nordic input works; one thing unconfirmed.** Double-tap a vowel in COMMS for a
-   picker. Nothing local can check that a Nordic character survives the trip — the
-   panel looks identical either way. Send one to a phone and read it there.
-   `ø` on the air must be UTF-8 `0xC3 0xB8`; `0x01` is a display-side placeholder
-   and putting it in outgoing text sends a C0 control byte.
+2. **Nordic input works, confirmed end to end.** Double-tap a vowel in COMMS for a
+   picker. A Nordic character was sent to another client and arrived intact, which
+   is the only check that distinguishes UTF-8 from CP437 — the panel looks identical
+   either way. Kept here for the trap, not as an open task: `ø` on the air must be
+   UTF-8 `0xC3 0xB8`; `0x01` is a display-side placeholder and putting it in
+   outgoing text sends a C0 control byte.
 
 3. **Bundle ESP Web Tools** instead of loading it from unpkg. Pinning is partial —
    the `?module` form resolves dependencies from the CDN at load time. Needs an npm
@@ -205,10 +206,6 @@ the commit messages. Neither is repeated here.
    which makes the discard list as much the deliverable as the glyphs: an
    unrecognisable glyph is worse than a block, because a block admits it cannot
    draw the thing.
-
-8. **The NODES redesign.** `design/DESIGN-HANDOFF.md` §6 states the problem and the
-   direction — summary buckets, a scrollable list, one selected route — with the
-   four constraints that are not negotiable.
 
 ## 5. How this has worked
 
