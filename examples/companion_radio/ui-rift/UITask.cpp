@@ -4313,10 +4313,21 @@ private:
 // Sends either to the Public channel (flooded, no ACK possible) or direct to a
 // chosen contact (ACKed, so delivery state is shown). ESC on an empty line
 // opens the target picker.
-// Channels can occupy 40 slots and contacts up to MAX_CONTACTS, so this list
-// cannot hold everything. Channels are added first so they are never crowded
-// out, and the UI says when contacts were cut rather than silently hiding them.
-#define RIFT_PICKER_MAX 48
+// Channels can occupy MAX_GROUP_CHANNELS slots and contacts up to MAX_CONTACTS -
+// 358 on this board - so this list cannot hold everything, and the question is what
+// gets cut rather than whether anything does.
+//
+// Raised from 48, which was reported full on a device with about 64 contacts. 48 was
+// chosen when this was a send-target picker, where being cut off meant "scroll to
+// find someone else". It is now the conversation list, where being cut off means a
+// conversation is unreachable and its unread dot invisible - so the number needed
+// headroom and, more importantly, the order needed fixing. See openPicker().
+//
+// 48 bytes an entry, so 96 costs 4.6KB against 2.3KB - on the heap, not in the
+// build's static figure, because RiftCommsScreen is allocated with new. Which means
+// the reported RAM percentage does not move when this changes, and FREE HEAP on
+// SYSTEM is where the cost actually shows.
+#define RIFT_PICKER_MAX 96
 
 class RiftCommsScreen : public RiftScreen, ContactVisitor {
   UITask* _task;
@@ -4575,12 +4586,25 @@ private:
 
   // from ContactVisitor - called by scanRecentContacts(), already ordered by
   // last_advert_timestamp descending (most recently heard first)
+  // Is this key already in the list? The history pass in openPicker() adds
+  // conversations before the mesh sweep does, so the sweep has to skip what is
+  // already there or every conversation would appear twice.
+  bool alreadyPicked(const uint8_t* key6) const {
+    for (int i = 0; i < _pick_count; i++) {
+      if (_picks[i].is_channel) continue;
+      if (memcmp(_picks[i].key, key6, 6) == 0) return true;
+    }
+    return false;
+  }
+
   void onContactVisit(const ContactInfo& contact) override {
     if (contact.name[0] == 0) return;   // skip the reserved anon slots
 
     // only nodes that can actually receive a text message - repeaters and
     // sensors have no one reading them
     if (!riftCanDirectMessage(contact.type)) return;
+
+    if (alreadyPicked(contact.id.pub_key)) return;   // the history pass had it
 
     // the list is finite; say so instead of dropping contacts silently. Only
     // reachable contacts count, so the warning does not fire for repeaters.
@@ -4612,7 +4636,42 @@ private:
     }
     int first_dm = _pick_count;
 
-    // then contacts, most recently heard first (scanRecentContacts sorts them)
+    // Conversations you actually have, before candidates you merely could have.
+    //
+    // This is the fix for a real defect, not a refinement. The only source of DM rows
+    // used to be scanRecentContacts(), which orders by when the mesh last heard a
+    // node - and that is the wrong axis for a conversation list. Someone you messaged
+    // an hour ago whose node has since gone quiet sorts to the bottom, and on a device
+    // with more contacts than this list holds it was cut off entirely: the
+    // conversation unreachable, its unread dot invisible, and the only clue a line
+    // saying the list was full. Being heard recently is not the same as being someone
+    // you are talking to.
+    //
+    // Bounded by the log rather than by the contact table: at most RIFT_MSG_LOG_SIZE
+    // entries exist, so at most that many distinct conversations can have history, and
+    // in practice far fewer. Walked newest-first, so if it ever did have to stop, it
+    // would stop at the least recently active conversation.
+    for (int back = 0; back < msg_log.count && _pick_count < RIFT_PICKER_MAX; back++) {
+      const RiftMsgLog::Entry* p = msg_log.peek(back);
+      if (p == NULL) break;
+      if (p->conv.kind != RIFT_CONV_DM) continue;
+      if (alreadyPicked(p->conv.peer)) continue;
+
+      // The contact has to still exist: a send needs MeshCore's book, and history
+      // outlives the contact it belongs to. A conversation whose contact is gone is
+      // still readable in the log, it just cannot be a row you can send from.
+      ContactInfo* c = the_mesh.lookupContactByPubKey((uint8_t*) p->conv.peer,
+                                                      RIFT_CONV_PEER_LEN);
+      if (c == NULL || !riftCanDirectMessage(c->type)) continue;
+
+      PickEntry* e = &_picks[_pick_count++];
+      StrHelper::strncpy(e->name, c->name, sizeof(e->name));
+      e->is_channel = false;
+      e->channel_idx = 0;
+      memcpy(e->key, c->id.pub_key, 6);
+    }
+
+    // then the rest, most recently heard first (scanRecentContacts sorts them)
     the_mesh.scanRecentContacts(0, this);
 
     // Every row now carries what the list needs to say about it. Both are looked up
@@ -4874,7 +4933,12 @@ private:
       display.drawTextLeftAlign(4, y + RIFT_LINE_H, "(no channels or contacts)");
     } else if (_pick_truncated) {
       display.setColor(UIColor::warning_txt);
-      display.drawTextLeftAlign(4, INPUT_Y - RIFT_LINE_H, "list full - some contacts not shown");
+      // Named precisely, because the old wording - "some contacts not shown" - was
+      // read as the contact table being full, which is a different and much more
+      // serious thing. Every conversation with history is now listed before this line
+      // can appear, so what is missing is only people you have not written to.
+      display.drawTextLeftAlign(4, INPUT_Y - RIFT_LINE_H,
+                                "list full - contacts with no history not shown");
     }
 
     // scroll position indicator when the list doesn't fit
