@@ -746,3 +746,51 @@ static inline bool riftShouldFlush(bool dirty, uint32_t now, uint32_t dirty_at,
   if (failures > 0 && (int32_t) (now - retry_at) < 0) return false;   // backing off
   return true;
 }
+
+// ---------------------------------------------------------------- hop buckets
+//
+// NODES' summary row. The ranges are fixed on purpose: DIRECT | 1-2 | 3-5 | 6+.
+//
+// design/DESIGN-HANDOFF.md §6 is explicit that they must not adapt to the current
+// network, because a column whose meaning moves is a column you cannot read. The
+// four fixed columns it replaces failed the other way - measured on a live mesh,
+// 13 of 16 nodes landed in `3+` with a maximum of 7 hops, so three quarters of the
+// width described three nodes.
+//
+// Unknown is a bucket, not a number. A stored contact with no learned route
+// carries path_len 0xFF, meaning "flood, route unknown". riftHopCount() masks bits
+// 0-5, so decoding that yields 63 - and anything sorting or bucketing by hops then
+// files the node at the far edge of the mesh. That exact mistake was built and
+// reverted (2e0f0171 / bac7f804). Ask riftHopsUnknown() before decoding.
+#define RIFT_PATH_UNKNOWN   0xFF
+
+#define RIFT_HOPB_DIRECT    0
+#define RIFT_HOPB_1_2       1
+#define RIFT_HOPB_3_5       2
+#define RIFT_HOPB_6PLUS     3
+#define RIFT_HOPB_UNKNOWN   4
+#define RIFT_HOPB_COUNT     5
+
+static inline bool riftHopsUnknown(uint8_t path_len) {
+  return path_len == RIFT_PATH_UNKNOWN;
+}
+
+// Negative hops means unknown, so a caller that has already decided can say so
+// without a second argument.
+static inline int riftHopBucket(int hops) {
+  if (hops < 0)  return RIFT_HOPB_UNKNOWN;
+  if (hops == 0) return RIFT_HOPB_DIRECT;
+  if (hops <= 2) return RIFT_HOPB_1_2;
+  if (hops <= 5) return RIFT_HOPB_3_5;
+  return RIFT_HOPB_6PLUS;
+}
+
+static inline const char* riftHopBucketLabel(int bucket) {
+  switch (bucket) {
+    case RIFT_HOPB_DIRECT: return "DIRECT";
+    case RIFT_HOPB_1_2:    return "1-2";
+    case RIFT_HOPB_3_5:    return "3-5";
+    case RIFT_HOPB_6PLUS:  return "6+";
+    default:               return "?";
+  }
+}

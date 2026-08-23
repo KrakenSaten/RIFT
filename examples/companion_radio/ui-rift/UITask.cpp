@@ -104,7 +104,7 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 // How many heard nodes NODES can hold, and how many hop columns it draws. Up here
 // rather than beside that screen because SYSTEM's diagnostics read them too, and
 // SYSTEM is defined first.
-#define RIFT_CONST_MAX 16
+#define RIFT_CONST_MAX 96
 #define RIFT_HOP_COLS  4
 
 // AdvertPath::path_len is Packet's raw encoding, not a hop count: bits 6-7 carry
@@ -2060,40 +2060,6 @@ public:
       display.setColor(evicted > 0 ? rift_pal.accent : rift_pal.fg);
       if (evicted > 0) snprintf(tmp, sizeof(tmp), "%d/%d, %u lost", used, size, evicted);
       else             snprintf(tmp, sizeof(tmp), "%d/%d", used, size);
-      display.drawTextRightAlign(CR, y, tmp);
-      y += RIFT_LINE_H;
-    }
-
-    // Hop distribution of everything currently heard. Temporary: NODES buckets
-    // into DIRECT / 1 / 2 / 3+, and the report is that almost everything lands in
-    // the last column on a real mesh, which makes the layout spend three quarters
-    // of its width on the minority. Rebucketing needs the actual distribution
-    // rather than another guess - the buckets were guessed once already.
-    //
-    // n = nodes heard, max = furthest hop count seen, 3+ = how many are beyond the
-    // third column. Remove this row once the columns are redesigned.
-    {
-      AdvertPath paths[RIFT_CONST_MAX];
-      int n = the_mesh.getRecentlyHeard(paths, RIFT_CONST_MAX);
-      int live = 0, maxhop = 0, beyond = 0;
-      // The emptiness test is the name, and the loop scans rather than stopping.
-      // recv_timestamp comes from the RTC, and on a standalone node with no
-      // companion app and no GPS fix the RTC is never set - so every filled entry
-      // carries timestamp 0, which read as "empty slot", and the first one ended
-      // the scan. That is why this said n0 on a mesh that was demonstrably being
-      // heard. With every timestamp equal the sort cannot guarantee the live
-      // entries are a prefix either, so breaking is wrong regardless of the clock.
-      for (int i = 0; i < n; i++) {
-        if (!paths[i].valid) continue;      // explicit, not inferred from a value
-        live++;
-        int h = (int) riftHopCount(paths[i].path_len);
-        if (h > maxhop) maxhop = h;
-        if (h >= RIFT_HOP_COLS - 1) beyond++;
-      }
-      display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(CX, y, "HOPS");
-      display.setColor(rift_pal.fg);
-      sprintf(tmp, "n%d max%d 3+%d", live, maxhop, beyond);
       display.drawTextRightAlign(CR, y, tmp);
       y += RIFT_LINE_H;
     }

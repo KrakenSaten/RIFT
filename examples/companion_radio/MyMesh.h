@@ -323,7 +323,7 @@ private:
   AckTableEntry expected_ack_table[EXPECTED_ACK_TABLE_SIZE]; // circular table
   int next_ack_idx;
 
-  #define ADVERT_PATH_TABLE_SIZE   16
+  #define ADVERT_PATH_TABLE_SIZE   96
   AdvertPath advert_paths[ADVERT_PATH_TABLE_SIZE]; // circular table
   // How many times a live entry has been dropped to make room. Exposed because it
   // is the number that says whether 16 slots is enough for the mesh in front of you,

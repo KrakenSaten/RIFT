@@ -905,6 +905,63 @@ TEST(Utf8Decode, OverlongNullShowsAsABlockRatherThanVanishing) {
     EXPECT_EQ('B', out[2]);
 }
 
+// ---------------------------------------------------------------- hop buckets
+
+TEST(HopBucket, FixedRangesDirectOneTwoThreeFiveSixPlus) {
+    EXPECT_EQ(RIFT_HOPB_DIRECT, riftHopBucket(0));
+    EXPECT_EQ(RIFT_HOPB_1_2,    riftHopBucket(1));
+    EXPECT_EQ(RIFT_HOPB_1_2,    riftHopBucket(2));
+    EXPECT_EQ(RIFT_HOPB_3_5,    riftHopBucket(3));
+    EXPECT_EQ(RIFT_HOPB_3_5,    riftHopBucket(5));
+    EXPECT_EQ(RIFT_HOPB_6PLUS,  riftHopBucket(6));
+    EXPECT_EQ(RIFT_HOPB_6PLUS,  riftHopBucket(7));
+    EXPECT_EQ(RIFT_HOPB_6PLUS,  riftHopBucket(63));
+}
+
+// The four columns this replaces failed by putting almost everything in one. The
+// fix is not to move the boundaries to suit the current mesh - a column whose
+// meaning shifts is unreadable - so the mapping must not depend on the population.
+// Measured live: 13 of 16 nodes beyond 2 hops, max 7.
+TEST(HopBucket, DoesNotAdaptToTheNetwork) {
+    // the same input gives the same bucket regardless of anything else
+    for (int i = 0; i < 3; i++) {
+        EXPECT_EQ(RIFT_HOPB_3_5,   riftHopBucket(4));
+        EXPECT_EQ(RIFT_HOPB_6PLUS, riftHopBucket(9));
+    }
+    // and the boundaries are where the labels say they are
+    EXPECT_STREQ("1-2", riftHopBucketLabel(riftHopBucket(2)));
+    EXPECT_STREQ("3-5", riftHopBucketLabel(riftHopBucket(3)));
+    EXPECT_STREQ("3-5", riftHopBucketLabel(riftHopBucket(5)));
+    EXPECT_STREQ("6+",  riftHopBucketLabel(riftHopBucket(6)));
+}
+
+// A stored contact with no learned route carries path_len 0xFF - "flood, route
+// unknown". riftHopCount masks bits 0-5, so decoding it yields 63 and a node with
+// no route at all gets filed at the far edge of the mesh. That was built and
+// reverted once; ask riftHopsUnknown() before decoding.
+TEST(HopBucket, UnknownIsABucketAndNotSixtyThree) {
+    EXPECT_TRUE(riftHopsUnknown(RIFT_PATH_UNKNOWN));
+    EXPECT_FALSE(riftHopsUnknown(0));
+    EXPECT_FALSE(riftHopsUnknown(7));
+
+    EXPECT_EQ(RIFT_HOPB_UNKNOWN, riftHopBucket(-1));
+    EXPECT_STREQ("?", riftHopBucketLabel(RIFT_HOPB_UNKNOWN));
+
+    // and it must not be confused with the far end of the mesh
+    EXPECT_NE(riftHopBucket(-1), riftHopBucket(63));
+}
+
+TEST(HopBucket, EveryBucketHasALabelAndNoneRepeat) {
+    for (int b = 0; b < RIFT_HOPB_COUNT; b++) {
+        const char* l = riftHopBucketLabel(b);
+        ASSERT_NE(nullptr, l);
+        EXPECT_GT(strlen(l), 0u);
+        for (int o = 0; o < b; o++) {
+            EXPECT_STRNE(l, riftHopBucketLabel(o)) << "buckets " << b << " and " << o;
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

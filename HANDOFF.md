@@ -147,17 +147,28 @@ the commit messages. Neither is repeated here.
 
 ### Open items
 
-1. **`HOPS` has not been read with more than one node.** Two NODES changes wait on
-   it: moving `HEARD` out of the heading, and rebucketing the hop columns, since
-   almost everything lands in `3+`. Do both together — separately they shift the
-   same layout twice. The buckets were guessed once already.
+1. **The NODES redesign, now measured.** `design/DESIGN-HANDOFF.md` §6 has the
+   direction — summary buckets, a scrollable list, one selected route — with four
+   constraints that are not negotiable. The readings that were missing are in:
+
+   - **13 of 16 cached nodes sit beyond 2 hops, with a maximum of 7.** The four
+     fixed columns therefore spend three quarters of their width on three nodes.
+     The buckets are `riftHopBucket()` in `RiftLogic.h`, tested, with fixed ranges
+     `DIRECT | 1-2 | 3-5 | 6+` — fixed on purpose, per §6: a column whose meaning
+     moves with the network is one you cannot read.
+   - **The path cache read `16/16, 64 lost`, so it was thrashing.** Raised from 16
+     to 96 slots (+9.3 KB static; RIFT went 53.3% → 56.1% RAM, and NODES keeps its
+     own heap copy so the real cost is about double). Below that, the list had a
+     churning sample to scroll and the bucket counts described the sample rather
+     than the mesh. **Re-read `PATH CACHE` on SYSTEM after this** — if it still
+     evicts, 96 is not enough either.
 
    Its cache is RAM-only and cleared at boot, and channel messages create no
    contacts, so an empty list after a restart is normal and was twice mistaken for
    a bug. Seeding it from stored contacts was tried and reverted (`2e0f0171` /
    `bac7f804`): a contact with no learned route carries `out_path_len` `0xFF` —
-   "flood, route unknown", not 63 hops — and this screen sorts by hops. Do not
-   retry it as a standalone change; it belongs to the column redesign.
+   "flood, route unknown", not 63 hops — and this screen sorts by hops. Ask
+   `riftHopsUnknown()` before decoding; `riftHopBucket()` has a bucket for it.
 
 2. **Nordic input works; one thing unconfirmed.** Double-tap a vowel in COMMS for a
    picker. Nothing local can check that a Nordic character survives the trip — the
