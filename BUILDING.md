@@ -48,7 +48,7 @@ and put `C:\msys64\ucrt64\bin` on PATH. Verified with GCC 16.1.0 and 16.2.0.
 pio test -e native -e native_kiss_modem
 ```
 
-133 test cases. They cover the places that have actually been wrong — base64 key
+They cover the places that have actually been wrong — base64 key
 validation, `path_len` decoding, hash collision resolution, the mesh-activity
 thresholds, screen-transition hooks, the UTF-8 to CP437 translation, the origin
 decoration, the channel colours — rather than aiming at coverage. A count here
@@ -100,8 +100,10 @@ was fine. At 1.55MB, four parts is 400KB each and fails on the third, while eigh
 parts at 200KB goes through — so a fixed count is a default that silently stops
 working as the image grows.
 
-Ruled out, so nobody repeats them: a different cable, `upload_speed` (baud is a
-no-op on native USB CDC), and `--no-stub`. The cause is still unknown; the first
+Ruled out **for this failure**, so nobody repeats them: a different cable,
+`upload_speed` (baud is a no-op on native USB CDC), and `--no-stub` — which only
+moved the failure earlier. Note that `--no-stub` *is* the fix for the other upload
+failure below; it does nothing for this one. The cause is still unknown; the first
 upload of a session has sometimes gone through whole, which argues for something
 state-dependent.
 
