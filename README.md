@@ -350,7 +350,8 @@ app partition. 144 native tests across eight suites.
 
 Worth knowing where that RAM goes: MeshCore's contact table is `MAX_CONTACTS` 350
 plus 8 anonymous slots at 184 bytes each — 65.7 KB, or a fifth of the chip's 320 KB,
-statically allocated whether it holds one contact or 358. It is the single largest
+statically allocated whether it holds one contact or all of them. It is the single
+largest
 item in the firmware.
 
 **0.8.0** rebuilds COMMS around conversations rather than one mixed stream, adds

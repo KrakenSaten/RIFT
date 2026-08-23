@@ -1369,8 +1369,14 @@ public:
     // "NODES 256" answered neither question: 256 is how many contacts are stored,
     // which says nothing about whether any of them are around right now. Stored comes
     // from the persisted contact table, heard from the session path cache.
-    sprintf(tmp, "%d STORED %s %d HEARD", the_mesh.getNumContacts(),
-            RIFT_DOT, the_mesh.getPathCacheUsed());
+    // With the denominator, and in accent when the table is full. "256 STORED" gave
+    // nothing to measure against, so a device that had quietly stopped accepting nodes
+    // looked identical to one with room - and the symptom of the difference is a NODES
+    // screen that stops changing, which reads as a radio or antenna fault.
+    bool full = the_mesh.contactsWereFull();
+    sprintf(tmp, "%d/%d STORED %s %d HEARD", the_mesh.getNumContacts(),
+            the_mesh.getContactsCapacity(), RIFT_DOT, the_mesh.getPathCacheUsed());
+    if (full) display.setColor(rift_pal.accent);
     display.drawTextLeftAlign(2, 170, tmp);
 
     sprintf(tmp, "LINK %.0f / %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
@@ -2411,6 +2417,25 @@ public:
         snprintf(tmp, sizeof(tmp), "%02u:%02u", (unsigned) ((now / 3600u) % 24u),
                  (unsigned) ((now / 60u) % 60u));
       }
+      display.drawTextRightAlign(CR, y, tmp);
+      y += RIFT_LINE_H;
+    }
+
+    // Contacts, with the capacity and whether anything has been turned away.
+    //
+    // Being full is not a state the table reports - allocateContactSlot() returns NULL
+    // and MeshCore told a companion app, which a standalone device does not have. So
+    // this row and the accent on it are the only way the device can say it. FULL rather
+    // than a number, because the count already says the number and what matters is that
+    // adverts are being refused.
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(CX, y, "CONTACTS");
+    {
+      int used = the_mesh.getNumContacts(), cap = the_mesh.getContactsCapacity();
+      bool full = the_mesh.contactsWereFull();
+      display.setColor(full ? rift_pal.accent : rift_pal.fg);
+      if (full) snprintf(tmp, sizeof(tmp), "%d/%d FULL", used, cap);
+      else      snprintf(tmp, sizeof(tmp), "%d/%d", used, cap);
       display.drawTextRightAlign(CR, y, tmp);
       y += RIFT_LINE_H;
     }

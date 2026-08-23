@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/UTF8Helpers.h>   // mesh::validUtf8PrefixLength, for the frame cuts below
 
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
@@ -401,6 +402,28 @@ void MyMesh::onContactOverwrite(const uint8_t* pub_key) {
 }
 
 void MyMesh::onContactsFull() {
+  // Recorded first and unconditionally. This used to tell a companion app and nothing
+  // else, so a standalone device stopped accepting nodes in complete silence - and the
+  // symptom is an unchanging NODES screen, which reads as a radio, antenna or network
+  // fault rather than as a table with no room. Third time this pattern has been found
+  // here: notify() gated on isConnected, hasConnection() taken to mean "on the mesh",
+  // and now this.
+  _contacts_full_at = (uint32_t) millis();
+
+#ifdef RIFT_VERSION
+  // Rate limited to one line an hour. The caller is the advert path, so on a busy mesh
+  // with a full table this fires every few seconds, and a 128-line log would hold
+  // nothing else within a minute. One line is enough to be found; a thousand is fewer.
+  static uint32_t last_logged = 0;
+  static bool ever_logged = false;
+  uint32_t now = (uint32_t) millis();
+  if (!ever_logged || now - last_logged >= 3600000u) {
+    ever_logged = true;
+    last_logged = now;
+    riftLogf("CONTACTS FULL at %d - new nodes refused", getNumContacts());
+  }
+#endif
+
   if (_serial->isConnected()) {
     out_frame[0] = PUSH_CODE_CONTACTS_FULL;
     _serial->writeFrame(out_frame, 1);
@@ -771,9 +794,21 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
     memcpy(&out_frame[i], extra, extra_len);
     i += extra_len;
   }
-  int tlen = strlen(text); // TODO: UTF-8 ??
+  // Cut on a code point boundary, not a byte.
+  //
+  // Upstream left a "TODO: UTF-8 ??" here and the question is a fair one: with
+  // MAX_FRAME_SIZE at 176 and this frame's overhead, the cut only bites above 160
+  // bytes of text, and MAX_TEXT_LEN is 160 - so nothing a conforming MeshCore node
+  // sends can trigger it. But MAX_PACKET_PAYLOAD is 184, so a peer with a different
+  // implementation can hand us 179 bytes, and this is remote input. A byte-wise cut
+  // there splits a two-byte 'ae' or a four-byte emoji and puts a dangling lead byte
+  // into the companion's frame.
+  //
+  // Same helper the compose line already uses before putting text on the air, so the
+  // two ends of the device agree about where a character starts.
+  int tlen = strlen(text);
   if (i + tlen > MAX_FRAME_SIZE) {
-    tlen = MAX_FRAME_SIZE - i;
+    tlen = (int) mesh::validUtf8PrefixLength(text, (size_t) (MAX_FRAME_SIZE - i));
   }
   memcpy(&out_frame[i], text, tlen);
   i += tlen;
@@ -885,9 +920,21 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   out_frame[i++] = TXT_TYPE_PLAIN;
   memcpy(&out_frame[i], &timestamp, 4);
   i += 4;
-  int tlen = strlen(text); // TODO: UTF-8 ??
+  // Cut on a code point boundary, not a byte.
+  //
+  // Upstream left a "TODO: UTF-8 ??" here and the question is a fair one: with
+  // MAX_FRAME_SIZE at 176 and this frame's overhead, the cut only bites above 160
+  // bytes of text, and MAX_TEXT_LEN is 160 - so nothing a conforming MeshCore node
+  // sends can trigger it. But MAX_PACKET_PAYLOAD is 184, so a peer with a different
+  // implementation can hand us 179 bytes, and this is remote input. A byte-wise cut
+  // there splits a two-byte 'ae' or a four-byte emoji and puts a dangling lead byte
+  // into the companion's frame.
+  //
+  // Same helper the compose line already uses before putting text on the air, so the
+  // two ends of the device agree about where a character starts.
+  int tlen = strlen(text);
   if (i + tlen > MAX_FRAME_SIZE) {
-    tlen = MAX_FRAME_SIZE - i;
+    tlen = (int) mesh::validUtf8PrefixLength(text, (size_t) (MAX_FRAME_SIZE - i));
   }
   memcpy(&out_frame[i], text, tlen);
   i += tlen;

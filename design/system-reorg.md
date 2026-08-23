@@ -82,7 +82,9 @@ reorganisation.
 
 **Page 2 — READINGS.** Field rows only, plus two things it should have said all along:
 
-- `CONTACTS n/358` — the denominator. The table is 350 slots plus 8 anonymous, and the
+- `CONTACTS n/350` — the denominator. The anonymous slots are pre-allocated by
+  `resetContacts()` and are not available to ordinary contacts, so 350 is the real
+  capacity and `getNumContacts()` already excludes them. The
   home screen says `N STORED` with nothing to measure it against. `PATH CACHE` already
   reads `16/16`, so the precedent is here.
 - `RADIO` — the parameters in a readable row rather than a small centred line on the

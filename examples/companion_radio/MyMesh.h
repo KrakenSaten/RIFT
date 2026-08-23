@@ -121,6 +121,21 @@ public:
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
 
+  // How many ordinary contacts the table can hold. The anonymous slots are
+  // pre-allocated by resetContacts() and never handed to a normal contact, so they are
+  // not part of this - and getNumContacts() already excludes them, which is what makes
+  // the two comparable.
+  int getContactsCapacity() const { return MAX_CONTACTS; }
+
+  // Has an advert been refused for want of a slot, and when.
+  //
+  // Being full is not a state the table itself reports - allocateContactSlot() simply
+  // returns NULL - so it is recorded when it happens. Cleared by nothing: once a node
+  // has been turned away, that stays true until the table has room again, which
+  // nothing here can undo on its own.
+  bool     contactsWereFull() const { return _contacts_full_at != 0; }
+  uint32_t contactsFullSince() const { return _contacts_full_at; }
+
   // Resolve a path hash to a node, against every identity this node knows.
   //
   // Lives here rather than in the UI because this is the layer that has both sets.
@@ -254,6 +269,11 @@ protected:
   bool shouldOverwriteWhenFull() const override;
   uint8_t getAutoAddMaxHops() const override;
   void onContactsFull() override;
+
+  // millis() when a contact was last turned away, 0 if never. Monotonic on purpose:
+  // this has to work on a node whose clock was never set, which is the normal state
+  // of a standalone RIFT.
+  uint32_t _contacts_full_at = 0;
   void onContactOverwrite(const uint8_t* pub_key) override;
   bool onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_t in_path_len, uint8_t* out_path, uint8_t out_path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
