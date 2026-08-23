@@ -5,7 +5,7 @@ front page; this is the working notes. Everything here was learned by doing, and
 several items cost hours the first time.
 
 **Repo:** https://github.com/KrakenSaten/RIFT — default branch `rift-tdeck`
-**Current:** v0.7.0
+**Current:** v0.8.0
 **Hardware:** original LilyGO T-Deck (ESP32-S3, 320×240 ST7789, QWERTY, trackball,
 GT911 touch, SX1262 LoRa)
 
