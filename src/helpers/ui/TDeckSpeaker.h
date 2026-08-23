@@ -59,8 +59,16 @@ private:
   Step _seq[MAX_STEPS];
   int  _count = 0;
   int  _step = 0;
-  uint32_t _step_started = 0;
-  uint32_t _phase = 0;         // 16.16 fixed point, so no float in the inner loop
+  // Step position is counted in samples written, not in elapsed milliseconds. A
+  // wall clock says how long ago the note started; only the sample count says how
+  // much of it has actually been played. Timing it by the clock truncated every note
+  // to whatever the loop managed to queue in that many milliseconds.
+  uint32_t _step_samples = 0;   // length of the current step
+  uint32_t _step_done = 0;      // of it, written
+  uint32_t _phase = 0;          // 8.24 fixed point; the top byte indexes the table
+  uint32_t _inc = 0;            // phase step per sample for the current note
   uint32_t _frames = 0;
   uint8_t  _gain = 100;
+
+  void beginStep();
 };

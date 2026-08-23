@@ -2,6 +2,7 @@
 
 #if defined(ESP32)
 #include <driver/i2s.h>
+#include <math.h>
 
 // Port 0. Nothing else in this firmware uses I2S, and the mesh radio is on SPI, so
 // there is no contention to arbitrate.
@@ -17,13 +18,12 @@
 // amplitude in a room, and an alert has to be noticed rather than resented.
 #define SPK_AMPLITUDE  8000
 
-// Sixteen points is coarse, but the harmonics of a coarse sine are far kinder than
-// the square wave the alternative would be, and this is an alert tone rather than
-// music.
-static const int16_t SINE16[16] = {
-      0,  12539,  23170,  30273,  32767,  30273,  23170,  12539,
-      0, -12539, -23170, -30273, -32767, -30273, -23170, -12539
-};
+// A 256-point sine, built once at begin(). Sixteen points was audibly rough: at 523
+// Hz and 16 kHz each entry was held for two samples, so the output was a staircase
+// rather than a tone, and the harmonics of that staircase are what "scratchy" was.
+// 512 bytes of RAM for a clean tone is a good trade.
+static int16_t s_sine[256];
+static bool s_sine_ready = false;
 
 bool TDeckSpeaker::begin(int bclk, int lrclk, int dout, int sample_rate) {
   if (_ok) return true;
@@ -56,8 +56,28 @@ bool TDeckSpeaker::begin(int bclk, int lrclk, int dout, int sample_rate) {
   }
 
   i2s_zero_dma_buffer(SPK_PORT);
+
+  if (!s_sine_ready) {
+    for (int i = 0; i < 256; i++) {
+      s_sine[i] = (int16_t) lrintf(32767.0f * sinf(2.0f * (float) M_PI * (float) i / 256.0f));
+    }
+    s_sine_ready = true;
+  }
+
   _ok = true;
   return true;
+}
+
+// Sets up the current step: how many samples it lasts, and the phase increment for
+// its pitch. Called on play() and on every step boundary.
+void TDeckSpeaker::beginStep() {
+  _step_done = 0;
+  _phase = 0;
+  if (_step >= _count) { _step_samples = 0; _inc = 0; return; }
+  _step_samples = (uint32_t) _seq[_step].ms * (uint32_t) _rate / 1000u;
+  const uint16_t hz = _seq[_step].hz;
+  // 8.24: the top byte indexes 256 table entries, so inc is hz/rate of a full turn
+  _inc = hz == 0 ? 0 : (uint32_t) (((uint64_t) hz << 32) / (uint32_t) _rate);
 }
 
 void TDeckSpeaker::play(const Step* steps, int count, uint8_t gain) {
@@ -67,8 +87,7 @@ void TDeckSpeaker::play(const Step* steps, int count, uint8_t gain) {
   for (int i = 0; i < count; i++) _seq[i] = steps[i];
   _count = count;
   _step = 0;
-  _phase = 0;
-  _step_started = millis();
+  beginStep();
 }
 
 void TDeckSpeaker::stop() {
@@ -80,42 +99,53 @@ void TDeckSpeaker::stop() {
 void TDeckSpeaker::loop() {
   if (!_ok || _step >= _count) return;
 
-  // advance past any finished steps before generating anything
-  while (_step < _count && millis() - _step_started >= _seq[_step].ms) {
-    _step_started += _seq[_step].ms;
-    _step++;
-    _phase = 0;
-  }
-  if (_step >= _count) {
-    // Zero the buffers on the way out. Without this the tail of the last tone sits
-    // in DMA and repeats until something else writes.
-    i2s_zero_dma_buffer(SPK_PORT);
-    return;
-  }
-
-  const uint16_t hz = _seq[_step].hz;
-
-  // One DMA buffer's worth per pass. Writing more would only sit in a queue, and
-  // the point of the zero timeout is that this call is bounded.
   int16_t buf[SPK_DMA_LEN];
-  if (hz == 0) {
-    memset(buf, 0, sizeof(buf));      // a rest is silence, not a pause in writing
-  } else {
-    // 16.16 fixed point: phase step per sample, wrapped into the 16-entry table
-    const uint32_t inc = (uint32_t) ((((uint64_t) hz) << 16) * 16 / (uint32_t) _rate);
-    for (int i = 0; i < SPK_DMA_LEN; i++) {
-      buf[i] = (int16_t) ((int32_t) SINE16[(_phase >> 16) & 15]
-                          * (SPK_AMPLITUDE * _gain / 100) / 32767);
-      _phase += inc;
+
+  // Fill whatever room the queue has and then stop. Writing one buffer per pass was
+  // not enough: one buffer is 8 ms of audio, so the tone could only ever be fed as
+  // fast as the main loop happened to turn over, and any pause in the loop was an
+  // audible gap. Bounded by the queue depth, so this is still a short call - the
+  // zero timeout is what guarantees that, not the single write.
+  for (int fills = 0; fills <= SPK_DMA_COUNT; fills++) {
+    if (_step >= _count) break;
+
+    if (_step_done >= _step_samples) {   // this note is fully played
+      _step++;
+      beginStep();
+      continue;
     }
+
+    uint32_t left = _step_samples - _step_done;
+    int n = (left < (uint32_t) SPK_DMA_LEN) ? (int) left : SPK_DMA_LEN;
+
+    // Generated from a saved base so the phase can be set from what was actually
+    // accepted. Advancing it for samples the queue refused left a discontinuity in
+    // the waveform every time the queue was full, which is a click per buffer.
+    const uint32_t base = _phase;
+    if (_inc == 0) {
+      memset(buf, 0, (size_t) n * sizeof(int16_t));    // a rest still costs time
+    } else {
+      for (int i = 0; i < n; i++) {
+        uint32_t ph = base + (uint32_t) i * _inc;
+        buf[i] = (int16_t) ((int32_t) s_sine[ph >> 24] * (SPK_AMPLITUDE * _gain / 100) / 32767);
+      }
+    }
+
+    size_t written = 0;
+    if (i2s_write(SPK_PORT, buf, (size_t) n * sizeof(int16_t), &written, 0) != ESP_OK) break;
+
+    const uint32_t did = (uint32_t) (written / sizeof(int16_t));
+    _phase = base + did * _inc;
+    _step_done += did;
+    _frames += did;
+
+    if (did < (uint32_t) n) break;    // queue full; come back next pass
   }
 
-  size_t written = 0;
-  // Zero ticks: take what the queue has room for and return. A partial write is
-  // normal and correct - the phase has already advanced for the samples generated,
-  // so the discarded tail costs a fraction of a cycle rather than a click.
-  if (i2s_write(SPK_PORT, buf, sizeof(buf), &written, 0) == ESP_OK) {
-    _frames += (uint32_t) (written / sizeof(int16_t));
+  if (_step >= _count) {
+    // Zero the buffers on the way out, or the tail of the last note sits in DMA and
+    // repeats until something else writes.
+    i2s_zero_dma_buffer(SPK_PORT);
   }
 }
 
@@ -123,6 +153,7 @@ void TDeckSpeaker::loop() {
 
 bool TDeckSpeaker::begin(int, int, int, int) { return false; }
 void TDeckSpeaker::play(const Step*, int, uint8_t) { }
+void TDeckSpeaker::beginStep() { }
 void TDeckSpeaker::stop() { }
 void TDeckSpeaker::loop() { }
 
