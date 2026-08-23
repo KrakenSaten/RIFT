@@ -168,6 +168,30 @@ the commit messages. Neither is repeated here.
 
 ### Open items
 
+0. **COMMS redesign — agreed, not built.** `design/comms-redesign.md` has the
+   direction and the constraints. One history holding every conversation is
+   unreadable on a mesh with traffic; the fix is per-conversation views, a list with
+   unread dots, and direct messages as their own section.
+
+   It has a prerequisite: **the log entry must carry its conversation identity**.
+   Today the only way to ask is `riftOriginName()`, string-matching a display string
+   against channels and contacts - the mechanism whose own comment records that it
+   shipped wrong and that three readings did not find it. Filtering a screen on that
+   is building on the part that already failed.
+
+   And one decision: 48 entries are shared across all conversations, so a busy
+   channel evicts a quiet DM and the filtered view is then empty rather than short.
+   Recommendation is to evict from the largest conversation rather than the oldest
+   overall.
+
+   **Room servers are deliberately out of scope**, and the reason is worth keeping:
+   a room needs a login and therefore a connection status, and `checkConnections()`
+   - which sends the keep-alives - is commented out in `MyMesh.cpp` with
+   `TODO - deprecate the 'Connections' stuff`. So `hasConnectionTo()` would answer
+   yes while the server timed the session out. A status that says connected when it
+   is not is worse than none, and upstream intends to remove the mechanism. The
+   conversation kind reserves `room` and does not implement it.
+
 1. **The NODES redesign, now measured.** `design/DESIGN-HANDOFF.md` §6 has the
    direction — summary buckets, a scrollable list, one selected route — with four
    constraints that are not negotiable. The readings that were missing are in:
