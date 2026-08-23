@@ -739,6 +739,28 @@ static int rfWatchFind(const uint8_t* key, bool is_wifi) {
   return -1;
 }
 #endif
+#ifdef RIFT_SPEAKER
+#include <helpers/ui/TDeckSpeaker.h>
+static TDeckSpeaker rift_speaker;
+
+// Whether alerts make a sound. Off would be the wrong default for a feature whose
+// whole point is being noticed while the screen is dark, but a field device that
+// beeps is not always wanted, so it is a setting.
+bool rift_sound_on = true;
+
+// Three patterns, distinguishable without looking. A DM rises, because it is for
+// you; a channel message is two flat notes, because it is not; a proximity alert is
+// a double blip, because it is about the world rather than about a message.
+static const TDeckSpeaker::Step SND_DM[]     = { {880,70}, {1175,70}, {1568,110} };
+static const TDeckSpeaker::Step SND_CHAN[]   = { {660,60}, {0,40}, {660,60} };
+static const TDeckSpeaker::Step SND_PROX[]   = { {1568,50}, {0,60}, {1568,50} };
+static const TDeckSpeaker::Step SND_ACK[]    = { {1319,45} };
+
+static void riftPlay(const TDeckSpeaker::Step* seq, int n) {
+  if (rift_sound_on) rift_speaker.play(seq, n);
+}
+#endif
+
 uint16_t rift_msg_wakes = 0;
 uint32_t rift_last_wake_ms = 0;
 
@@ -760,6 +782,11 @@ void riftLoadSettings() {
       && b[2] == RIFT_SETTINGS_VERSION) {
     riftApplyPalette((b[3] & 1) != 0);
     rift_screen_always_on = (b[3] & 2) != 0;
+#ifdef RIFT_SPEAKER
+    // bit 4; the low four were already spoken for by day mode, always-on and the
+    // radar source, so this needed no version bump
+    rift_sound_on = (b[3] & 16) != 0;
+#endif
 #ifdef RIFT_RADAR
     {
       uint8_t src = (b[3] >> 2) & 3;
@@ -803,6 +830,9 @@ void riftSaveSettings() {
 #ifdef RIFT_RADAR
                                // bits 2-3, which were spare
                                | ((rift_radar_src & 3) << 2)
+#endif
+#ifdef RIFT_SPEAKER
+                               | (rift_sound_on ? 16 : 0)   // bit 4
 #endif
                              ) };
   f.write(b, sizeof(b));
@@ -1176,7 +1206,7 @@ class RiftSystemScreen : public RiftScreen {
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
               CH_DELETE, CH_DELETE_CONFIRM, LOG, SET_TIME, RXLOG };
   enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_DELCHANNEL,
-              IT_PATHMODE, IT_SCREEN, IT_DAYMODE, IT_SETTIME, IT_LOG, IT_RXLOG,
+              IT_PATHMODE, IT_SCREEN, IT_SOUND, IT_DAYMODE, IT_SETTIME, IT_LOG, IT_RXLOG,
               IT_COUNT };
 
   int _log_scroll = 0;   // 0 = pinned to the newest line
@@ -1221,6 +1251,15 @@ class RiftSystemScreen : public RiftScreen {
       // display cannot tell it is powered. This is the switch that does not
       // depend on detecting anything.
       snprintf(buf, len, "Screen: %s", rift_screen_always_on ? "always on" : "auto");
+    } else if (i == IT_SOUND) {
+#ifdef RIFT_SPEAKER
+      // Named for what it does rather than for the hardware: there is no buzzer on
+      // this board, the tones come out of the I2S amplifier, and the user does not
+      // need to know that to decide.
+      snprintf(buf, len, "Alert sound: %s", rift_sound_on ? "on" : "off");
+#else
+      snprintf(buf, len, "Alert sound: unavailable");
+#endif
     } else if (i == IT_DAYMODE) {
       // the design binds this to backlight level; this panel's backlight is on or
       // off with no level to read, so it is an explicit choice instead
@@ -1320,6 +1359,21 @@ private:
         rift_screen_always_on = !rift_screen_always_on;
         riftSaveSettings();
         _task->showAlert(rift_screen_always_on ? "Screen stays on" : "Screen sleeps", 1400);
+        break;
+
+      case IT_SOUND:
+#ifdef RIFT_SPEAKER
+        rift_sound_on = !rift_sound_on;
+        riftSaveSettings();
+        // Play the message tone when switching on, so the setting proves itself
+        // rather than being taken on trust - and so a silent speaker is discovered
+        // here rather than the next time a message actually arrives.
+        if (rift_sound_on) riftPlay(SND_DM, (int) (sizeof(SND_DM) / sizeof(SND_DM[0])));
+        _task->showAlert(rift_sound_on ? "Sound on" : "Sound off", 1200);
+        riftLogf("sound %s", rift_sound_on ? "on" : "off");
+#else
+        _task->showAlert("No speaker in this build", 1400);
+#endif
         break;
 
       case IT_DELCHANNEL:
@@ -5184,6 +5238,13 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   RIFT_MARK("kbd");
   rift_touch.begin();
 #endif
+#ifdef RIFT_SPEAKER
+  // Unverified pins - see platformio.ini. begin() returning false is reported on
+  // SYSTEM rather than being silently ignored, because "no sound" has two very
+  // different causes and only one of them is worth debugging in the driver.
+  rift_speaker.begin(PIN_SPK_BCLK, PIN_SPK_LRCLK, PIN_SPK_DOUT);
+  RIFT_MARK("spk");
+#endif
 
   _node_prefs = node_prefs;
 
@@ -5259,6 +5320,27 @@ void UITask::showAlert(const char* text, int duration_millis) {
 }
 
 void UITask::notify(UIEventType t) {
+#ifdef RIFT_SPEAKER
+  // This board has no buzzer, so the block below compiled to nothing and every one
+  // of these events was silent. MyMesh does raise them - contactMessage from a
+  // direct message, channelMessage from a channel, newContactMessage from a sender
+  // not yet in the book - they simply had nowhere to go.
+  switch (t) {
+    case UIEventType::contactMessage:
+    case UIEventType::newContactMessage:
+      riftPlay(SND_DM, (int) (sizeof(SND_DM) / sizeof(SND_DM[0])));
+      break;
+    case UIEventType::channelMessage:
+      riftPlay(SND_CHAN, (int) (sizeof(SND_CHAN) / sizeof(SND_CHAN[0])));
+      break;
+    case UIEventType::ack:
+      riftPlay(SND_ACK, (int) (sizeof(SND_ACK) / sizeof(SND_ACK[0])));
+      break;
+    default:
+      break;
+  }
+#endif
+
 #if defined(PIN_BUZZER)
 switch(t){
   case UIEventType::contactMessage:
@@ -5374,6 +5456,11 @@ void UITask::proximityAlert(const char* name, bool is_wifi) {
   // Longer than an ordinary alert: this one is the point of the feature, and the
   // user may not have been looking at the screen when it appeared.
   showAlert(msg, 5000);
+#ifdef RIFT_SPEAKER
+  // A different pattern from a message: this is about the world rather than
+  // something addressed to you, and telling them apart without looking is the point.
+  riftPlay(SND_PROX, (int) (sizeof(SND_PROX) / sizeof(SND_PROX[0])));
+#endif
   riftLogf("watch NEAR %s %s", is_wifi ? "wifi" : "ble", name);
   if (_display != NULL) {
     // The screen coming on is the whole notification, as it is for a message.
@@ -5676,6 +5763,13 @@ void UITask::loop() {
   // serviced unconditionally, not via curr->poll(), so RF teardown still runs
   // after navigating away from RADAR
   if (nav_screens[RIFT_NAV_RADAR] != NULL) ((RiftRadarScreen *) nav_screens[RIFT_NAV_RADAR])->service();
+#endif
+
+#ifdef RIFT_SPEAKER
+  // Before the screen work: it writes at most one DMA buffer with a zero timeout, so
+  // it is bounded, and a tone that stutters because a redraw ran first is worse than
+  // a redraw that waits a few hundred microseconds.
+  rift_speaker.loop();
 #endif
 
   if (curr) curr->poll();
