@@ -3,15 +3,28 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Flash RIFT to a LilyGO T-Deck</title>
+<title>RIFT — flash a LilyGO T-Deck</title>
+<meta name="description" content="RIFT turns the original LilyGO T-Deck into a standalone MeshCore terminal: read and write mesh messages on the keyboard, with no phone or app. Free, MIT licensed.">
 <style>
+  /*
+    RIFT's own palette, not a generic terminal green. These are the night-mode
+    values from design/handoff.md verbatim, so the page and the device agree.
+
+    The page commits to the dark field rather than following prefers-color-scheme.
+    That is deliberate: the accent is 6.0:1 on black and only 3.5:1 on white, which
+    the design rules allow as a fill but not as text - so a light variant would
+    need a different accent role throughout for one page nobody reads in daylight.
+  */
   :root {
-    --bg: #0b0f0c;
-    --fg: #b8ffc8;
-    --dim: #6f9d7c;
-    --accent: #8fff6a;
-    --warn: #ffd166;
-    --rule: #1e2c22;
+    --bg:     #000000;
+    --panel:  #0d0d0d;
+    --fg:     #ffffff;
+    --mid:    #9a9a9a;
+    --dim:    #8a8a8a;
+    --rule:   #383838;
+    --accent: #ff4100;
+    --warn:   #ffd166;
+    --ok:     #4ade80;
   }
   * { box-sizing: border-box; }
   body {
@@ -22,31 +35,42 @@
     font: 15px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   main { max-width: 46rem; margin: 0 auto; }
-  h1 { font-size: 1.5rem; margin: 0 0 .25rem; color: var(--accent); letter-spacing: .04em; }
-  h2 { font-size: 1rem; margin: 2.25rem 0 .6rem; color: var(--accent); }
-  .sub { color: var(--dim); margin: 0 0 2rem; }
+  h2 { font-size: 1rem; margin: 2.5rem 0 .6rem; color: var(--accent); letter-spacing: .04em; }
+  h3 { font-size: .95rem; margin: 1.5rem 0 .4rem; color: var(--fg); }
   a { color: var(--accent); }
+  a:hover { text-decoration-thickness: 2px; }
   code {
-    background: #121a15;
+    background: var(--panel);
     border: 1px solid var(--rule);
     padding: .1rem .35rem;
     border-radius: 3px;
   }
   pre {
-    background: #121a15;
+    background: var(--panel);
     border: 1px solid var(--rule);
     padding: .8rem 1rem;
     border-radius: 4px;
     overflow-x: auto;
   }
   pre code { background: none; border: 0; padding: 0; }
+
+  /* the wordmark: letters split along a shallow seam, the accent line through it */
+  .mark { margin: 0 0 .35rem; }
+  .mark svg { display: block; width: 190px; height: auto; }
+  .tagline {
+    color: var(--mid); margin: 0 0 .2rem;
+    letter-spacing: .22em; font-size: 12px; text-transform: uppercase;
+  }
+  .sub { color: var(--mid); margin: 1.1rem 0 2rem; }
+  .sub strong { color: var(--fg); }
+
   .flash {
     border: 1px solid var(--rule);
     border-radius: 4px;
     padding: 1.5rem;
     margin: 0 0 1.25rem;
     text-align: center;
-    background: #101710;
+    background: var(--panel);
   }
   .note {
     border-left: 3px solid var(--warn);
@@ -54,6 +78,27 @@
     margin: 1.25rem 0;
     color: #e8dfc0;
   }
+  .free {
+    border-left: 3px solid var(--ok);
+    padding: .1rem 0 .1rem 1rem;
+    margin: 1.5rem 0;
+  }
+  .credit {
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    background: var(--panel);
+    padding: .9rem 1rem;
+    margin: 1.5rem 0;
+  }
+  .feat { list-style: none; padding: 0; margin: 0; }
+  .feat > li {
+    border-top: 1px solid var(--rule);
+    padding: .75rem 0;
+    margin: 0;
+  }
+  .feat > li:last-child { border-bottom: 1px solid var(--rule); }
+  .feat b { color: var(--accent); font-weight: 600; }
+  .feat span { color: var(--mid); display: block; }
   ul { padding-left: 1.2rem; }
   li { margin: .4rem 0; }
   hr { border: 0; border-top: 1px solid var(--rule); margin: 2.5rem 0; }
@@ -63,8 +108,42 @@
 <body>
 <main>
 
-<h1>RIFT</h1>
-<p class="sub">Radio Intelligence &amp; Field Terminal — firmware for the original LilyGO T-Deck.
+<!--
+  The wordmark. design/handoff.md section 2a: the letters split along a horizontal
+  offset with a 2-3px accent line through the seam, so the name is the form. It is
+  explicitly a web/print mark and not a device asset - the splash still draws plain
+  setTextSize(3) text, because using this on hardware needs it hand-pixelled as a
+  1-bit bitmap first.
+
+  Inline rather than a file so the page stays self-contained: no second request,
+  and nothing to go missing from gh-pages.
+-->
+<div class="mark" role="img" aria-label="RIFT">
+  <svg viewBox="0 0 320 96" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <!-- the seam runs at about -9 degrees, per the device spec -->
+      <clipPath id="above"><polygon points="0,0 320,0 320,34 0,58"/></clipPath>
+      <clipPath id="below"><polygon points="0,58 320,34 320,96 0,96"/></clipPath>
+    </defs>
+    <!-- Upper half sits slightly right of the lower half; the offset is the mark.
+         Presentation attributes rather than a <style> block: CSS inside an inline
+         SVG is not scoped to it, so a class here would leak into the document. -->
+    <g clip-path="url(#above)">
+      <text x="16" y="74" fill="#fff" font-family="Helvetica, Arial, sans-serif"
+            font-size="82" font-weight="700" letter-spacing="-2">RIFT</text>
+    </g>
+    <g clip-path="url(#below)">
+      <text x="4" y="74" fill="#fff" font-family="Helvetica, Arial, sans-serif"
+            font-size="82" font-weight="700" letter-spacing="-2">RIFT</text>
+    </g>
+    <line x1="0" y1="58" x2="320" y2="34" stroke="#ff4100" stroke-width="4"/>
+  </svg>
+</div>
+<p class="tagline">Radio Intelligence &middot; Field Terminal</p>
+
+<p class="sub">Firmware for the <strong>original LilyGO T-Deck</strong> that turns it
+into a standalone <strong>MeshCore</strong> terminal — read and write mesh messages on
+the keyboard it already has, with no phone and no companion app.
 Version <strong id="ver">(loading)</strong>.</p>
 
 <div class="flash">
@@ -85,7 +164,7 @@ Version <strong id="ver">(loading)</strong>.</p>
       open in another program - close any serial monitor and reload.
     </span>
   </esp-web-install-button>
-  <p style="color:var(--dim);margin:.9rem 0 0;font-size:13px">
+  <p style="color:var(--mid);margin:.9rem 0 0;font-size:13px">
     Requires Chrome or Edge on desktop. Firefox and Safari have no WebSerial —
     use the command-line route below.
   </p>
@@ -97,6 +176,96 @@ Version <strong id="ver">(loading)</strong>.</p>
   device is working — it just cannot show progress, because the format blocks
   everything else while it runs. Leave it alone and wait it out. We assumed the
   device was dead the first time we saw it.
+</div>
+
+<h2>What you get</h2>
+
+<ul class="feat">
+  <li><b>A terminal, not a notifier.</b>
+    <span>Upstream's on-device UI shows an unread count and previews messages but
+    cannot compose. RIFT types, sends, and shows delivery state — <code>ACK 1.2s</code>
+    when it landed, <code>no ack</code> when it did not, and nothing at all on
+    channel messages, where no acknowledgement exists to report.</span></li>
+
+  <li><b>æ ø å — typed, not just read.</b>
+    <span>The T-Deck keyboard is a US QWERTY with no Nordic keys. Double-tap a
+    vowel and pick the form: <code>a</code> offers æ å ä, <code>o</code> offers ø ö,
+    uppercase too. Norwegian, Swedish and Danish. Reading works as well — incoming
+    UTF-8 is mapped to the panel's font, and ø, which the font does not contain at
+    all, is drawn stroke by stroke.</span></li>
+
+  <li><b>Passive Wi-Fi and BLE radar, with a proximity watch.</b>
+    <span>Device counts, signal bands and a waterfall of observed 802.11 activity.
+    Mark a device and the screen tells you when it turns up again. Strictly
+    passive — nothing is transmitted, nothing is probed. It is not a spectrum
+    analyser either: the ESP32 gives no access to raw RF, so what you see is
+    observed traffic.</span></li>
+
+  <li><b>Find out who can hear <em>you</em>.</b>
+    <span>One button asks every repeater in direct range to answer, and each reply
+    carries two signal readings: how well you heard them, and how well they heard
+    you. Nothing else in the firmware can tell you the second one, and asymmetric
+    links are common. Direct neighbours only — it does not search the wider
+    mesh.</span></li>
+
+  <li><b>Is the mesh alive around me.</b>
+    <span>The home screen answers that and nothing else, from actual radio
+    receptions rather than from whether a phone is plugged in: how long since
+    anything was heard, and how much. A node sitting in a busy mesh with no
+    companion app is not "standby".</span></li>
+
+  <li><b>Message history survives a reboot.</b>
+    <span>MeshCore keeps no messages of its own. RIFT writes its log to flash, and
+    deliberately does not claim to know the fate of a message that was still
+    awaiting acknowledgement when the power went.</span></li>
+
+  <li><b>Readable outdoors, in daylight or dark.</b>
+    <span>Night and day palettes with the same geometry. Nothing encodes data in
+    brightness where a shape can carry it, because reflected sunlight collapses a
+    grey ramp — so freshness is a filled marker versus a hollow one. Channels get
+    colours picked by sweeping every value the panel can produce for the ones that
+    stay legible on both black and white.</span></li>
+
+  <li><b>A console, not a black box.</b>
+    <span>SYSTEM carries an event log and live diagnostics: which keys the hardware
+    reports, the I²C bus, boot timings phase by phase, free heap, the reason for the
+    last reset. Most of it exists because a bug was easier to see than to reason
+    about.</span></li>
+</ul>
+
+<div class="free">
+  <strong>Free, and it will never cost anything.</strong> No licence fee, no paid
+  tier, no unlocked features, now or later. That is not only an intention: RIFT is
+  MIT licensed, and an MIT grant cannot be withdrawn from anything already
+  published — so every version you can download stays free to use, modify and
+  redistribute even if this repository disappears tomorrow. The same licence lets
+  anyone else sell or rebrand it, which is the price of being genuinely open, and is
+  fine.
+  <br><br>
+  If you want to send money somewhere, send it
+  <a href="https://buymeacoffee.com/ripplebiz">upstream</a> — MeshCore is the hard
+  part.
+</div>
+
+<div class="credit">
+  <strong>Built on MeshCore, which is the hard part.</strong>
+  Multi-hop routing, the packet protocol, encryption, acknowledgements, path
+  discovery, the SX1262 driver and support for dozens of boards are all
+  <a href="https://github.com/meshcore-dev/MeshCore">MeshCore</a>, by
+  <strong>Scott Powell</strong> and well over a hundred contributors. RIFT changes
+  none of it and uses it unmodified. What this fork adds is a T-Deck user interface
+  and its input drivers.
+  <br><br>
+  <strong>The RIFT code was written by an AI assistant</strong> (Claude), directed
+  and supervised by <a href="https://github.com/KrakenSaten">mstr</a>, who specified
+  the work, tested every change on hardware and is accountable for what ships here.
+  That supervision is not a formality — the AI cannot flash a board or watch a
+  radio, so nothing was accepted because it compiled. Several things it got wrong
+  were caught exactly there: a USB API that only reports true once a host opens the
+  port, a touch controller parsed by the datasheet's byte order instead of the one
+  the hardware returns, and a whole feature built on a code comment claiming the
+  keyboard repeats a held key, which it does not.
+  <strong>MeshCore itself is not AI-written.</strong>
 </div>
 
 <h2>Erase, or keep your identity?</h2>
@@ -121,11 +290,9 @@ channels are not in the way of the write.</p>
 <p>Erase deliberately when you are setting up a device for the first time, moving
 it to a new identity, or recovering from a filesystem you believe is corrupt.</p>
 
-<p>Two things happen either way: <strong>NVS is erased</strong>
+<p>One thing happens either way: <strong>NVS is erased</strong>
 (<code>0x9000</code> falls inside the image and is filled with <code>0xFF</code>),
-which holds Arduino-side preferences rather than MeshCore state; and
-<strong>message history is lost</strong>, which happens on every reboot regardless
-because RIFT's log is RAM-only by design.</p>
+which holds Arduino-side preferences rather than MeshCore state.</p>
 
 <h2>If the browser cannot see the device</h2>
 <p>The T-Deck's ESP32-S3 uses native USB, which re-enumerates as the firmware
@@ -152,15 +319,16 @@ holds the port until the tab is closed, so flashing here and then reaching for
 esptool fails until you close the tab. A serial monitor does the same.</p>
 
 <h2>Building it yourself</h2>
-<p>Everything here is produced from source by CI; the
-<a href="https://github.com/KrakenSaten/RIFT">repository README</a> has the two
-environment gotchas that cost real time, and the full build instructions.</p>
+<p>Everything here is produced from source by CI. The
+<a href="https://github.com/KrakenSaten/RIFT">repository</a> has the build
+instructions, the environment traps that cost real time, and the working notes —
+including the hardware facts that were only settled by putting a value on the
+screen.</p>
 
 <hr>
 <footer>
-RIFT is an independent fork of <a href="https://github.com/meshcore-dev/MeshCore">MeshCore</a>
-by Scott Powell and contributors, MIT licensed. The mesh stack, LoRa drivers and
-protocol are theirs; RIFT adds a keyboard-driven terminal UI on top.
+RIFT is an independent fork of <a href="https://github.com/meshcore-dev/MeshCore">MeshCore</a>,
+MIT licensed. Original LilyGO T-Deck only &mdash; not the T-Deck Pro.
 The install button is <a href="https://esphome.github.io/esp-web-tools/">ESP Web Tools</a>
 10.4.0, loaded from unpkg.
 </footer>
