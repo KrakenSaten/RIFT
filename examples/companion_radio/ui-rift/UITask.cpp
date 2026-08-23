@@ -1025,49 +1025,88 @@ static void riftShortMeshCoreVersion(char* out, size_t out_sz) {
   out[len] = 0;
 }
 
+// The wordmark: RIFT with the accent lying in a shallow diagonal cut through the
+// letters. Drawn in two places now - the boot screen and the RIFT tab - so the
+// geometry lives here instead of being written twice and drifting.
+//
+// The slope is the design's: y 96 at x=0 falling to y 48 at x=319, about -8.8
+// degrees. Kept as an integer rise over run so both callers round the staircase
+// identically; a float would put the two marks a pixel apart at some x and nowhere
+// would say why.
+#define RIFT_SEAM_RISE  12
+#define RIFT_SEAM_RUN   78
+
+// The seam's y at px, given that it passes through (ax, ay).
+static inline int riftSeamY(int px, int ax, int ay) {
+  return ay - (px - ax) * RIFT_SEAM_RISE / RIFT_SEAM_RUN;
+}
+
+// The seam from x0 to x1 inclusive, h pixels tall, in whatever colour is set.
+//
+// Drawn as horizontal runs rather than one rect per column. At this slope the seam
+// only steps down once every six or seven pixels, so a per-column loop issued six
+// times as many SPI window setups as the pixels needed - which cost nothing on a
+// boot screen drawn once, and would cost it on a tab that redraws on a timer over
+// the same bus as the radio. The runs are the same staircase the per-column loop
+// produced, because the integer division that makes the staircase is unchanged.
+static void riftDrawSeam(DisplayDriver& display, int x0, int x1, int ax, int ay, int h) {
+  if (x1 < x0) return;
+  int run_start = x0;
+  int run_y = riftSeamY(x0, ax, ay);
+  for (int px = x0 + 1; px <= x1; px++) {
+    int y = riftSeamY(px, ax, ay);
+    if (y == run_y) continue;
+    display.fillRect(run_start, run_y, px - run_start, h);
+    run_start = px;
+    run_y = y;
+  }
+  display.fillRect(run_start, run_y, x1 - run_start + 1, h);
+}
+
+// The wordmark at (x, y), setTextSize(3), with the seam laid through it from seam_x0
+// to seam_x1. The cut's position is derived from the wordmark rather than passed in,
+// so it sits in the same place relative to the letters wherever the mark is drawn.
+//
+// DEVIATION FROM THE SPEC, deliberately, and it applies to both callers. The recipe
+// asks for two text draws offset 3px so the halves shear along the seam. That cannot
+// be composed with this driver: it has fillRect and drawRect and no clipping, so
+// whichever text is drawn second spills across the seam, and the blank that removes
+// the spill also removes the half it was meant to keep - in either order. The
+// rendering was produced in a browser, where clipping exists. What is here is the
+// same cut with the same accent in the same gap, crossing no letter stem, without
+// the lateral shear. Adding it needs a hand-pixelled bitmap or a clip the driver
+// lacks.
+static void riftDrawWordmark(DisplayDriver& display, int x, int y, ColorVal txt,
+                             int seam_x0, int seam_x1) {
+  const int ax = x - 2, ay = y + 14;   // the cut, relative to the glyphs
+
+  display.setColor(txt);
+  display.setTextSize(3);
+  display.drawTextLeftAlign(x, y, "RIFT");
+
+  // The gap. 4px, so the 2px accent has a pixel of air either side - which is what
+  // keeps it reading as a seam rather than as a line struck through the glyphs.
+  // Bounded to the glyphs plus a margin rather than the whole seam: past them it
+  // would be blanking background with background.
+  display.setColor(rift_pal.bg);
+  riftDrawSeam(display, ax, x + 74, ax, ay - 1, 4);
+
+  display.setColor(rift_pal.accent);
+  riftDrawSeam(display, seam_x0, seam_x1, ax, ay, 2);
+}
+
 void riftDrawBootScreen(DisplayDriver& display, const char* status) {
   const int x = 32;                  // left margin, matching the design
   const ColorVal white = 0xFFFF;     // RGB565; the shared palette has no white
 
-  display.setColor(white);
-  display.setTextSize(3);
-  display.drawTextLeftAlign(x, 78, "RIFT");
-
-  // Wordmark 2c: the letters cut along a shallow diagonal with the accent lying in
-  // the cut, edge to edge. The horizontal blue rule that used to be here was the
-  // stand-in for a slope the driver could not draw; a slope per column can be, and
-  // the design now asks for one.
+  // Wordmark 2c. The seam runs from the left edge to the middle and stops: edge to
+  // edge read as a rule with the wordmark sitting on it, where stopping halfway makes
+  // the wordmark the thing the line is part of - and it leaves the right half of the
+  // screen for the strapline underneath rather than putting a diagonal above it.
   //
-  // seamY is the design's: y 96 at x=0 falling to y 48 at x=319, about -8.8 degrees.
-  //
-  // DEVIATION FROM THE SPEC, deliberately. The recipe asks for two text draws offset
-  // 3px so the two halves shear along the seam. That cannot be composed with this
-  // driver: it has fillRect and drawRect and no clipping, so whichever text is drawn
-  // second spills across the seam, and the blank that removes the spill also removes
-  // the half it was meant to keep - in either order. The rendering was produced in a
-  // browser, where clipping exists. What is here is the same cut, the same accent in
-  // the same gap, edge to edge, crossing no letter stem - without the lateral shear.
-  // Adding the shear needs a hand-pixelled bitmap or a clip the driver lacks.
-  #define RIFT_SEAM_Y(px) (92 - ((px) - 30) * 12 / 78)
-
-  // the gap. 4px, so the 2px accent has a pixel of air either side - which is what
-  // keeps it reading as a seam rather than as a line struck through the glyphs.
-  // Bounded to the glyphs themselves (x 32..104 at setTextSize(3)) plus a margin,
-  // rather than the whole width: past them it would be blanking background with
-  // background, which is 50 wasted rects on a screen drawn during boot.
-  display.setColor(rift_pal.bg);
-  for (int px = x - 2; px < x + 80; px++) {
-    display.fillRect(px, RIFT_SEAM_Y(px) - 1, 1, 4);
-  }
-
-  // The seam runs from the left edge to the middle and stops. Edge to edge read as
-  // a rule with the wordmark sitting on it; stopping halfway makes the wordmark the
-  // thing the line is part of, and leaves the right half of the screen for the
-  // strapline underneath rather than putting a diagonal above it.
-  display.setColor(rift_pal.accent);
-  for (int px = 0; px < display.width() / 2; px++) {
-    display.fillRect(px, RIFT_SEAM_Y(px), 1, 2);
-  }
+  // The RIFT tab makes the opposite choice, and for the same reason: there is nothing
+  // to its right, so its seam leaves the screen instead of stopping in mid-air.
+  riftDrawWordmark(display, x, 78, white, 0, display.width() / 2 - 1);
 
   // wide tracking, as drawn - Adafruit GFX has no letter-spacing control
   display.setColor(UIColor::secondary_txt);
@@ -1215,6 +1254,28 @@ public:
     display.setTextSize(3);
     display.setColor(state_col);
     display.drawTextLeftAlign(2, 16, state);
+
+    // The wordmark, top right, on the same baseline as the state headline.
+    //
+    // This corner was empty: the headline is 162px at its longest, the three rows
+    // under it are shorter still, and the radar box does not start until y=80 - so
+    // roughly 150x76 of the first screen anyone sees carried nothing. The mark is the
+    // one on the boot screen at the same size, not a second logo, which is the whole
+    // point of a wordmark.
+    //
+    // Size 3 rather than larger, and in fg rather than the accent, because the
+    // headline is the information on this screen and the mark is identity. The accent
+    // is already spoken for here - it carries the seam, the radar blip and the
+    // NO SIGNAL state - and a mark competing with a state that means "your radio is
+    // not hearing anything" would be the wrong thing to win.
+    //
+    // The seam leaves the right edge instead of stopping short, which is the opposite
+    // of the boot screen and for the same reason: there it stops halfway to keep the
+    // right half for the strapline, and here there is nothing to its right, so an end
+    // in mid-air would be the arbitrary choice. It begins in mid-air on the left at
+    // x=196 rather than crossing the screen, because continuing would put a diagonal
+    // through the headline and then the LAST RX row.
+    riftDrawWordmark(display, 240, 16, rift_pal.fg, 196, display.width() - 1);
 
     // Show the age and the count, not just the verdict. Every hardware problem
     // on this project was settled by putting the real value on screen, and a
