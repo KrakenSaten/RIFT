@@ -721,7 +721,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
   if (should_display && _ui) {
     _ui->newMsg(path_len, from.name, text, offline_queue_len);
-    if (!_serial->isConnected()) {
+    if (!_serial->isConnected() || _ui->notifiesWhileConnected()) {
       _ui->notify(UIEventType::contactMessage);
     }
   }
@@ -825,11 +825,15 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     uint8_t frame[1];
     frame[0] = PUSH_CODE_MSG_WAITING; // send push 'tickle'
     _serial->writeFrame(frame, 1);
-  } else {
-#ifdef DISPLAY_CLASS
-    if (_ui) _ui->notify(UIEventType::channelMessage);
-#endif
   }
+#ifdef DISPLAY_CLASS
+  // Not an else: a UI that is the client itself still wants to be told, and the
+  // tickle above is for an app that may or may not exist. See
+  // AbstractUITask::notifiesWhileConnected().
+  if (_ui && (!_serial->isConnected() || _ui->notifiesWhileConnected())) {
+    _ui->notify(UIEventType::channelMessage);
+  }
+#endif
 #ifdef DISPLAY_CLASS
   // Get the channel name from the channel index
   const char *channel_name = "Unknown";

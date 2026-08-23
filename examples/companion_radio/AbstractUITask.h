@@ -45,5 +45,18 @@ public:
   // not pure - UIs that don't surface delivery state need no implementation.
   virtual void msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) { }
   virtual void notify(UIEventType t = UIEventType::none) = 0;
+
+  // Whether this UI wants message notifications while a companion app is connected.
+  //
+  // The message paths in MyMesh suppress notify() when the serial link is up, on the
+  // reasonable assumption that an attached app is doing the notifying. That holds for
+  // upstream's UIs, which are companions to a phone. It does not hold for a UI that
+  // is the client itself: isConnected() becomes true as soon as any host opens the
+  // port, so a device sitting on USB power went silent - which is exactly when it was
+  // being tested.
+  //
+  // Defaults to upstream's behaviour, so nothing changes for ui-new, ui-orig or
+  // ui-tiny.
+  virtual bool notifiesWhileConnected() const { return false; }
   virtual void loop() = 0;
 };

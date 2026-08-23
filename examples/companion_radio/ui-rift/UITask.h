@@ -278,6 +278,11 @@ public:
 
 
   // from AbstractUITask
+  // RIFT is the client, not a companion to one, and isConnected() is true whenever
+  // any host has opened the USB port - including a bench cable. Staying quiet then
+  // meant silent on the desk.
+  bool notifiesWhileConnected() const override { return true; }
+
   void msgRead(int msgcount) override;
   void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override;
   void msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) override;

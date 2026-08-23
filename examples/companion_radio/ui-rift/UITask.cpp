@@ -759,14 +759,16 @@ bool rift_sound_on = true;
 //
 // A channel message is one note and a DM is two, and the DM is the higher pair -
 // enough shape to tell them apart, little enough to ignore.
+//
+// No sound for an acknowledgement. You are looking at the screen when you send, and
+// the delivery state is already there - a tone would be telling you something you
+// are already reading.
 static const TDeckSpeaker::Step SND_DM[]   = { {523,45}, {659,55} };
 static const TDeckSpeaker::Step SND_CHAN[] = { {440,50} };
 static const TDeckSpeaker::Step SND_PROX[] = { {880,70}, {1175,70}, {1568,110} };
-static const TDeckSpeaker::Step SND_ACK[]  = { {659,40} };
 
 #define SND_GAIN_MSG   45     // messages: present, not insistent
 #define SND_GAIN_PROX 100     // the one alert worth interrupting for
-#define SND_GAIN_ACK   35     // a confirmation of something you just did
 
 static void riftPlay(const TDeckSpeaker::Step* seq, int n, uint8_t gain) {
   if (rift_sound_on) rift_speaker.play(seq, n, gain);
@@ -5344,9 +5346,6 @@ void UITask::notify(UIEventType t) {
       break;
     case UIEventType::channelMessage:
       riftPlay(SND_CHAN, (int) (sizeof(SND_CHAN) / sizeof(SND_CHAN[0])), SND_GAIN_MSG);
-      break;
-    case UIEventType::ack:
-      riftPlay(SND_ACK, (int) (sizeof(SND_ACK) / sizeof(SND_ACK[0])), SND_GAIN_ACK);
       break;
     default:
       break;
