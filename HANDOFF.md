@@ -5,7 +5,7 @@ front page; this is the working notes. Everything here was learned by doing, and
 several items cost hours the first time.
 
 **Repo:** https://github.com/KrakenSaten/RIFT — default branch `rift-tdeck`
-**Current:** v0.5.0
+**Current:** v0.7.0
 **Hardware:** original LilyGO T-Deck (ESP32-S3, 320×240 ST7789, QWERTY, trackball,
 GT911 touch, SX1262 LoRa)
 
@@ -40,9 +40,18 @@ the regression check:
 .venv/Scripts/pio.exe run -e LilyGo_TDeck_rift -e LilyGo_TDeck_companion_radio_usb -e LilyGo_TDeck_companion_radio_ble -e LilyGo_TDeck_repeater -e LilyGo_TDeck_kiss_modem
 ```
 
-There is no host g++ on this box, so `pio test` cannot run here. The suite is built
-with the zig compiler from the venv instead, which is how it gets verified before a
-push rather than by CI discovering it:
+**Whether `pio test` runs depends on the machine**, so check rather than believing
+either recipe. The suite needs a host compiler that PlatformIO does not ship.
+
+With MSYS2 on PATH (`C:\msys64\ucrt64\bin`, GCC 16.2.0 on the machine this was last
+verified from) the normal command works, and is the one to prefer:
+
+```bash
+.venv/Scripts/pio.exe test -e native -e native_kiss_modem
+```
+
+On a box without one, the zig compiler in the venv builds the suite directly, which
+beats letting CI discover the failure:
 
 ```bash
 GT=.pio/libdeps/native/googletest/googletest
@@ -51,7 +60,7 @@ GT=.pio/libdeps/native/googletest/googletest
 
 ---
 
-## 3. Hardware facts that cost time
+## 2. Hardware facts that cost time
 
 Every one of these was wrong on the first assumption and only settled by putting
 the actual value on screen. **When something does not behave, display the value —
@@ -111,7 +120,7 @@ than any amount of code reading.
 
 ---
 
-## 4. Protocol details worth knowing
+## 3. Protocol details worth knowing
 
 - **`path_len` is not a hop count.** Bits 6–7 hold the hash size minus one, bits
   0–5 the hop count. `Packet::pathHashSize()` / `pathHashCount()` decode it —
@@ -132,7 +141,7 @@ than any amount of code reading.
 
 ---
 
-## 6. State of play
+## 4. State of play
 
 All five screens work and are verified on hardware: MESH headlines mesh receive
 activity, NODES draws hop columns with real routes, RADAR does passive Wi-Fi/BLE
@@ -201,7 +210,7 @@ the commit messages. Neither is repeated here.
    direction — summary buckets, a scrollable list, one selected route — with the
    four constraints that are not negotiable.
 
-## 7. How this has worked
+## 5. How this has worked
 
 - **Measure, do not reason.** Every hardware problem here was resolved by putting
   the real value on screen after reasoning had failed - several of them twice. The
