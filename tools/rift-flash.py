@@ -79,6 +79,9 @@ def main():
     ap.add_argument("--chunk-kb", type=int, default=192,
                     help="target size of each write in KB (default 192)")
     ap.add_argument("--dry-run", action="store_true", help="build the chunks, write nothing")
+    ap.add_argument("--no-stub", action="store_true",
+                    help="skip esptool's stub loader; slower, but the only thing that "
+                         "works when the stub starts and then goes quiet")
     args = ap.parse_args()
 
     if not os.path.exists(args.firmware):
@@ -148,6 +151,18 @@ def main():
     # and reconnecting with --before no_reset was tried, and the reconnect timed
     # out. See BUILDING.md.
     base = esptool_cmd() + ["--chip", CHIP, "--port", args.port, "--before", "default_reset"]
+
+    # A second, different failure than the long-write one above, and it needs a
+    # different flag. Symptom: esptool connects, identifies the chip, reads the MAC,
+    # uploads and runs the stub - and then "Unable to verify flash chip connection
+    # (No serial data received)" on the very first chunk, every retry. So the reset
+    # handshake is fine and the stub is what goes quiet.
+    #
+    # --no-stub drives the ROM bootloader directly and works. It is slower, which is
+    # why it is not the default. Reach for it when the failure is at the stub rather
+    # than part way through a write - the two look nothing alike in the output.
+    if args.no_stub:
+        base += ["--no-stub"]
     for addr, path, _ in paths:
         print("writing 0x%X" % addr)
         run(base + ["write_flash", hex(addr), path])

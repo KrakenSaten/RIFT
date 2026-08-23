@@ -116,6 +116,38 @@ writes the chunks out and checks they cover the image without touching the devic
 cheap way to retest it — **the day `--single` succeeds, this tool has outlived its
 purpose.**
 
+**Two different upload failures, and they need different flags.** Read the output
+before reaching for either - they look nothing alike.
+
+*Part way through a write*, after several chunks have gone through: that is the
+transfer-length problem above. The retry usually clears it; a smaller `--chunk-kb`
+if it does not.
+
+*At the stub, on the very first chunk, every retry*: esptool connects, prints the
+chip revision and MAC, uploads and runs the stub, and then says
+`Unable to verify flash chip connection (No serial data received)`. The reset
+handshake is fine and the stub is what goes quiet. Pass `--no-stub`:
+
+```bash
+python tools/rift-flash.py --port COM5 --no-stub
+```
+
+That drives the ROM bootloader directly. Slower, which is why it is not the default.
+
+Isolate it with one command rather than guessing, since it says whether the device
+can be talked to at all:
+
+```bash
+python $PLATFORMIO_CORE_DIR/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port COM5 chip_id
+```
+
+If that reports the MAC and then fails, it is the stub. If it never connects,
+something else has the port.
+
+Note that a failure at the connection stage has written **nothing**, whatever the
+tool's exit message says - it warns about a partly written image because that is the
+common case, not because it checked.
+
 **First boot after switching firmware may reformat SPIFFS**, which takes one to
 two minutes. The boot screen says `Formatting SPIFFS` when that is happening —
 wait it out rather than resetting. An ordinary boot takes about five seconds; if it
