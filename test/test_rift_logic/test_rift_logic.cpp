@@ -1085,6 +1085,77 @@ TEST(EvictIndex, DegenerateInputs) {
     EXPECT_EQ(0, riftEvictIndex(&one, 1));
 }
 
+// ------------------------------------------------------------------- unread table
+
+TEST(Unread, MarkAndCount) {
+    RiftUnread u;
+    EXPECT_EQ(0, u.count(riftConvChannel(0)));
+    u.mark(riftConvChannel(0));
+    u.mark(riftConvChannel(0));
+    EXPECT_EQ(2, u.count(riftConvChannel(0)));
+    EXPECT_EQ(0, u.count(riftConvChannel(1)));
+}
+
+TEST(Unread, UnknownIsNotAttributable) {
+    RiftUnread u;
+    u.mark(riftConvUnknown());
+    EXPECT_EQ(0, u.n);
+}
+
+TEST(Unread, ClearRemovesOnlyThatConversation) {
+    RiftUnread u;
+    u.mark(riftConvChannel(0));
+    u.mark(riftConvChannel(1));
+    u.clear(riftConvChannel(0));
+    EXPECT_EQ(0, u.count(riftConvChannel(0)));
+    EXPECT_EQ(1, u.count(riftConvChannel(1)));
+    EXPECT_EQ(1, u.n);
+}
+
+TEST(Unread, ClearingSomethingAbsentIsHarmless) {
+    RiftUnread u;
+    u.mark(riftConvChannel(3));
+    u.clear(riftConvChannel(9));
+    EXPECT_EQ(1, u.n);
+    EXPECT_EQ(1, u.count(riftConvChannel(3)));
+}
+
+// The policy the comment describes, which the code did not implement: a further
+// message moves a conversation to the newest position. Without it a conversation
+// could take a hundred messages and still be the first one evicted.
+TEST(Unread, AFurtherMessageMakesAConversationTheNewest) {
+    RiftUnread u;
+    u.mark(riftConvChannel(0));
+    u.mark(riftConvChannel(1));
+    u.mark(riftConvChannel(0));            // channel 0 is now the most recent
+    ASSERT_EQ(2, u.n);
+    EXPECT_TRUE(riftConvSame(u.keys[u.n - 1], riftConvChannel(0)));
+    EXPECT_EQ(2, u.count(riftConvChannel(0)));
+    EXPECT_EQ(1, u.count(riftConvChannel(1)));
+}
+
+TEST(Unread, AFullTableDropsTheLeastRecentlyActive) {
+    RiftUnread u;
+    for (int i = 0; i < RIFT_UNREAD_MAX; i++) u.mark(riftConvChannel((uint8_t) i));
+
+    // channel 0 is the oldest by mark order; touching it again must save it
+    u.mark(riftConvChannel(0));
+    // channel 1 is now the oldest, so the overflow should take that one
+    u.mark(riftConvDM((const uint8_t*) "ABCDEF"));
+
+    EXPECT_EQ(RIFT_UNREAD_MAX, u.n);
+    EXPECT_EQ(0, u.count(riftConvChannel(1)));            // evicted
+    EXPECT_EQ(2, u.count(riftConvChannel(0)));            // saved by being touched
+    EXPECT_EQ(1, u.count(riftConvDM((const uint8_t*) "ABCDEF")));
+}
+
+TEST(Unread, CountSaturatesRatherThanWrapping) {
+    RiftUnread u;
+    for (int i = 0; i < 300; i++) u.mark(riftConvChannel(0));
+    EXPECT_EQ(255, u.count(riftConvChannel(0)));
+    EXPECT_EQ(1, u.n);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

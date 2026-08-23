@@ -497,59 +497,10 @@ struct RiftMsgLog {
 
 static RiftMsgLog msg_log;
 
-// Unread, per conversation.
-//
-// Session-only by design: persisting it would mean another field in the settings
-// file, and a dot that survives a reboot matters less than one that is correct while
-// the device is on. The nav-bar dot keeps its own meaning - something unread
-// somewhere - and is not driven from here.
-//
-// Rows are ordered by when they were last marked, oldest first, so a full table
-// drops the conversation that has gone longest without a new message. Overflowing
-// needs 32 conversations unread at once, and at that point every policy is arbitrary;
-// keeping the most recent 32 correct is the useful end to be right about.
-#define RIFT_UNREAD_MAX 32
-
-struct RiftUnread {
-  RiftConvKey keys[RIFT_UNREAD_MAX];
-  uint8_t counts[RIFT_UNREAD_MAX];   // capped at 255; the dot only needs "any"
-  int n = 0;
-
-  void mark(const RiftConvKey& k) {
-    if (k.kind == RIFT_CONV_UNKNOWN) return;   // nothing to attribute it to
-    for (int i = 0; i < n; i++) {
-      if (riftConvSame(keys[i], k)) { if (counts[i] < 255) counts[i]++; return; }
-    }
-    if (n >= RIFT_UNREAD_MAX) {
-      memmove(&keys[0], &keys[1], (size_t) (RIFT_UNREAD_MAX - 1) * sizeof(keys[0]));
-      memmove(&counts[0], &counts[1], (size_t) (RIFT_UNREAD_MAX - 1) * sizeof(counts[0]));
-      n = RIFT_UNREAD_MAX - 1;
-    }
-    keys[n] = k;
-    counts[n] = 1;
-    n++;
-  }
-
-  uint8_t count(const RiftConvKey& k) const {
-    for (int i = 0; i < n; i++) if (riftConvSame(keys[i], k)) return counts[i];
-    return 0;
-  }
-
-  // Called from render() rather than from a navigation event: a conversation is read
-  // when it is on screen, which is a thing the frame knows and the navigation does
-  // not - opening COMMS on Public and switching to a channel in the strip never
-  // enters or leaves a screen.
-  void clear(const RiftConvKey& k) {
-    for (int i = 0; i < n; i++) {
-      if (!riftConvSame(keys[i], k)) continue;
-      memmove(&keys[i], &keys[i + 1], (size_t) (n - i - 1) * sizeof(keys[0]));
-      memmove(&counts[i], &counts[i + 1], (size_t) (n - i - 1) * sizeof(counts[0]));
-      n--;
-      return;
-    }
-  }
-};
-
+// RiftUnread lives in RiftLogic.h: it is array bookkeeping with no display and no
+// filesystem in it, so it belongs where it can be tested. Its eviction policy was
+// documented as least-recently-active and implemented as something else, which is
+// exactly the class of mistake a native test catches and a build does not.
 static RiftUnread msg_unread;
 
 
@@ -2389,7 +2340,11 @@ public:
       int used = the_mesh.getPathCacheUsed(), size = the_mesh.getPathCacheSize();
       unsigned evicted = the_mesh.getPathEvictions();
       display.setColor(evicted > 0 ? rift_pal.accent : rift_pal.fg);
-      if (evicted > 0) snprintf(tmp, sizeof(tmp), "%d/%d, %u lost", used, size, evicted);
+      // "evict", not "lost". An eviction is an event, not a node: the same node can
+      // be evicted, heard again, and evicted again, so the count exceeds the number
+      // of nodes no longer held. Saying "lost" claimed the second thing while
+      // measuring the first, and only separate identity tracking could say it.
+      if (evicted > 0) snprintf(tmp, sizeof(tmp), "%d/%d, %u evict", used, size, evicted);
       else             snprintf(tmp, sizeof(tmp), "%d/%d", used, size);
       display.drawTextRightAlign(CR, y, tmp);
       y += RIFT_LINE_H;
@@ -2920,7 +2875,9 @@ class RiftConstellationScreen : public RiftScreen {
     // that is the number which decides whether the cache is too small.
     int cache_used = the_mesh.getPathCacheUsed(), cache_size = the_mesh.getPathCacheSize();
     if (cache_used >= cache_size && the_mesh.getPathEvictions() > 0) {
-      snprintf(tmp, sizeof(tmp), "%d RECENT, %u LOST", _count,
+      // See the PATH CACHE row on SYSTEM: this counts eviction events, and a node
+      // evicted twice counts twice, so it is not a tally of nodes no longer held.
+      snprintf(tmp, sizeof(tmp), "%d RECENT, %u EVICT", _count,
                (unsigned) the_mesh.getPathEvictions());
     } else {
       snprintf(tmp, sizeof(tmp), "%d RECENT", _count);

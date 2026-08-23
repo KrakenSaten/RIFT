@@ -517,10 +517,16 @@ int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
   // The rest is cleared rather than left as whatever the caller's array held. Callers
   // are written to stop at the first invalid entry, and a stale one here would read as
   // a node that is still around.
+  // Zeroed so a caller that trusts max_num does not read a stale entry, which is
+  // what made returning the wrong count survivable rather than correct.
   for (int i = n; i < max_num; i++) {
     memset(&dest[i], 0, sizeof(dest[i]));
   }
-  return max_num;
+  // How many were actually found, not how many were asked for. Returning max_num
+  // meant an empty cache reported the full request; every caller happened to survive
+  // it - RIFT filters on .valid afterwards and the other two UIs ignore the return
+  // entirely - so the contract was wrong without anything being visibly broken.
+  return n;
 }
 
 void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
@@ -1086,16 +1092,24 @@ bool MyMesh::startRepeaterDiscovery() {
   uint8_t data[10];
   data[0] = CTL_TYPE_NODE_DISCOVER_REQ;      // prefix_only = 0, so we get full keys
   data[1] = (1 << ADV_TYPE_REPEATER);        // type filter: repeaters only
-  getRNG()->random(&data[2], 4);             // tag, reflected in every response
+  // Generated, normalised, then serialised - in that order, and the order is the
+  // whole point. This used to write the RNG straight into the packet and normalise
+  // the local copy afterwards, so a tag of zero went out on the air while this node
+  // waited for one. Responses echo the tag, so the round would have been ignored
+  // entirely. One in 2^32, which is exactly the kind of odds that gets seen once by
+  // somebody and is never reproduced.
+  uint32_t tag;
+  getRNG()->random((uint8_t*) &tag, 4);
+  if (tag == 0) tag = 1;                     // zero reads as "no round open"
+  memcpy(&data[2], &tag, 4);                 // reflected in every response
+
   uint32_t since = 0;                        // no "changed since" filter
   memcpy(&data[6], &since, 4);
 
   auto pkt = createControlData(data, sizeof(data));
   if (!pkt) return false;                    // packet pool exhausted - say so
 
-  memcpy(&discover_tag, &data[2], 4);
-  // a tag of zero would read as "no round open", and the RNG can produce it
-  if (discover_tag == 0) discover_tag = 1;
+  discover_tag = tag;
   discover_until = futureMillis(RIFT_DISCOVER_WINDOW_MS);
   discovered_count = 0;
 

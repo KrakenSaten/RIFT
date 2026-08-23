@@ -902,6 +902,71 @@ static inline int riftLargestConv(const RiftConvKey* keys, int n, RiftConvKey* o
 // conversation holds more than one entry has nothing dominant to take from, where
 // "largest" would only mean "whichever came first" - which is a worse rule than age
 // because it is arbitrary rather than merely blunt.
+// Unread, per conversation.
+//
+// Session-only by design: persisting it would mean another field in the settings
+// file, and a dot that survives a reboot matters less than one that is correct while
+// the device is on. The nav-bar dot keeps its own meaning - something unread
+// somewhere - and is not driven from here.
+//
+// Rows are ordered by when they were last marked, oldest first, so a full table
+// drops the conversation that has gone longest without a new message. Overflowing
+// needs 32 conversations unread at once, and at that point every policy is arbitrary;
+// keeping the most recent 32 correct is the useful end to be right about.
+#define RIFT_UNREAD_MAX 32
+
+struct RiftUnread {
+  RiftConvKey keys[RIFT_UNREAD_MAX];
+  uint8_t counts[RIFT_UNREAD_MAX];   // capped at 255; the dot only needs "any"
+  int n = 0;
+
+  void mark(const RiftConvKey& k) {
+    if (k.kind == RIFT_CONV_UNKNOWN) return;   // nothing to attribute it to
+    for (int i = 0; i < n; i++) {
+      if (!riftConvSame(keys[i], k)) continue;
+      uint8_t c = counts[i] < 255 ? counts[i] + 1 : 255;
+      // Moved to the newest position, not just incremented in place. The comment
+      // above describes eviction by least-recent activity, and incrementing without
+      // moving meant a conversation could receive a hundred messages and still be
+      // the first one dropped - the documented policy and the implemented one
+      // disagreed, and the documentation was the one that was right about what is
+      // wanted here.
+      memmove(&keys[i], &keys[i + 1], (size_t) (n - i - 1) * sizeof(keys[0]));
+      memmove(&counts[i], &counts[i + 1], (size_t) (n - i - 1) * sizeof(counts[0]));
+      keys[n - 1] = k;
+      counts[n - 1] = c;
+      return;
+    }
+    if (n >= RIFT_UNREAD_MAX) {
+      memmove(&keys[0], &keys[1], (size_t) (RIFT_UNREAD_MAX - 1) * sizeof(keys[0]));
+      memmove(&counts[0], &counts[1], (size_t) (RIFT_UNREAD_MAX - 1) * sizeof(counts[0]));
+      n = RIFT_UNREAD_MAX - 1;
+    }
+    keys[n] = k;
+    counts[n] = 1;
+    n++;
+  }
+
+  uint8_t count(const RiftConvKey& k) const {
+    for (int i = 0; i < n; i++) if (riftConvSame(keys[i], k)) return counts[i];
+    return 0;
+  }
+
+  // Called from render() rather than from a navigation event: a conversation is read
+  // when it is on screen, which is a thing the frame knows and the navigation does
+  // not - opening COMMS on Public and switching to a channel in the strip never
+  // enters or leaves a screen.
+  void clear(const RiftConvKey& k) {
+    for (int i = 0; i < n; i++) {
+      if (!riftConvSame(keys[i], k)) continue;
+      memmove(&keys[i], &keys[i + 1], (size_t) (n - i - 1) * sizeof(keys[0]));
+      memmove(&counts[i], &counts[i + 1], (size_t) (n - i - 1) * sizeof(counts[0]));
+      n--;
+      return;
+    }
+  }
+};
+
 static inline int riftEvictIndex(const RiftConvKey* keys, int n) {
   if (keys == NULL || n <= 0) return 0;
 
