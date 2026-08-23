@@ -2844,12 +2844,15 @@ class RiftConstellationScreen : public RiftScreen {
     else                 StrHelper::strncpy(out, "9d+", out_size);
   }
 
-  int resolveHash(const uint8_t* hash, uint8_t len) {
+  // Now a thin call into the mesh layer, which is the only place with both the recent
+  // advert cache and the stored contact table. This used to build its candidate list
+  // from _paths alone - the nodes this screen happens to be showing - so a hash that
+  // collided with a stored contact that had not been heard recently resolved as unique
+  // and named the wrong node with full confidence. The three-state result was already
+  // careful; the candidate set was not.
+  int resolveHash(const uint8_t* hash, uint8_t len, char* name, size_t name_len) {
     if (len > sizeof(AdvertPath::pubkey_prefix)) len = sizeof(AdvertPath::pubkey_prefix);
-    const uint8_t* candidates[RIFT_CONST_MAX];
-    int n = (_count < RIFT_CONST_MAX) ? _count : RIFT_CONST_MAX;
-    for (int i = 0; i < n; i++) candidates[i] = _paths[i].pubkey_prefix;
-    return riftResolveHash(hash, len, candidates, n);
+    return the_mesh.resolvePathHash(hash, len, name, name_len);
   }
 
   void refresh() {
@@ -2901,9 +2904,10 @@ class RiftConstellationScreen : public RiftScreen {
     size_t used = 0;
     for (int k = 0; k < hops; k++) {
       const char* label = "?";
-      int via = resolveHash(&p->path[k * hsz], hsz);
-      if (via == RIFT_HASH_AMBIGUOUS) (*ambiguous)++;
-      else if (via >= 0 && via < _count) label = _paths[via].name;
+      char resolved[32];
+      int via = resolveHash(&p->path[k * hsz], hsz, resolved, sizeof(resolved));
+      if (via == RIFT_RESOLVE_AMBIGUOUS) (*ambiguous)++;
+      else if (via == RIFT_RESOLVE_UNIQUE) label = resolved;
 
       size_t need = strlen(label) + (used ? 3 : 0);
       if (used + need >= out_size - 4) {              // room for " ..."

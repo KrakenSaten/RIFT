@@ -8,28 +8,68 @@
 // them. Every one of these has been wrong in shipped firmware; all are pure
 // functions of their arguments, so all can be tested without a T-Deck.
 
-// A path hash is only the first byte or three of a public key, so more than one
-// node we know can legitimately match it - a 1-byte hash collides once in 256.
-// Returning the first match named a repeater with a confidence the data does not
-// support.
-#define RIFT_HASH_NONE       (-1)
-#define RIFT_HASH_AMBIGUOUS  (-2)
+// Outcome of resolving a path hash. A hash is only the first byte or three of a
+// public key, so more than one node we know can legitimately match - 1 in 256 at the
+// one-byte setting. Returning the first match named a node with a confidence the data
+// does not support, which is why this is three states rather than a pointer or null.
+#define RIFT_RESOLVE_UNIQUE      0
+#define RIFT_RESOLVE_NONE      (-1)
+#define RIFT_RESOLVE_AMBIGUOUS (-2)
 
-// candidates[i] is that node's key prefix, or NULL for a slot to ignore.
-// Returns the index of the single match, RIFT_HASH_NONE if there is none, or
-// RIFT_HASH_AMBIGUOUS as soon as a second one is found.
-static inline int riftResolveHash(const uint8_t* hash, uint8_t len,
-                                  const uint8_t* const* candidates, int count) {
-  if (hash == NULL || len == 0 || candidates == NULL) return RIFT_HASH_NONE;
+// Deduplicated on a 7-byte prefix, the width the advert cache stores - so it is the
+// longest the two identity sets can be compared on. Two different nodes agreeing over
+// seven bytes is 1 in 2^56, a smaller risk than the one this reports.
+#define RIFT_RESOLVE_DEDUP_LEN 7
 
-  int found = RIFT_HASH_NONE;
-  for (int i = 0; i < count; i++) {
-    if (candidates[i] == NULL) continue;
-    if (memcmp(hash, candidates[i], len) != 0) continue;
-    if (found != RIFT_HASH_NONE) return RIFT_HASH_AMBIGUOUS;
-    found = i;
+// An accumulator rather than a function over an array, and the shape is the fix.
+//
+// The array form invited its caller to decide the candidate set, and the caller chose
+// the nodes the screen happened to be showing - the recent advert cache, up to 96
+// entries, against 358 stored contacts. So a hash unique among recently heard nodes
+// resolved as UNIQUE while a stored contact it collided with was never looked at, and
+// the screen named the wrong node with full confidence. The three states were careful;
+// the candidate set was not.
+//
+// Folded one identity at a time so the walk stays with whoever owns the tables, and so
+// nothing builds a 454-pointer array per hop per frame to answer a question that only
+// ever needs the first match remembered.
+struct RiftHashResolve {
+  uint8_t first[RIFT_RESOLVE_DEDUP_LEN];
+  bool have;
+  bool ambiguous;
+};
+
+static inline void riftResolveBegin(RiftHashResolve* r) {
+  if (r != NULL) memset(r, 0, sizeof(*r));
+}
+
+// Offers one identity. Returns true only when this became the first match, so the
+// caller knows when to copy a name for it. Once ambiguous nothing changes it: a third
+// match cannot make an answer less uncertain.
+//
+// key must be at least RIFT_RESOLVE_DEDUP_LEN long. Both callers pass a public key or
+// a 7-byte prefix, and hash_len is bounded to that by the caller.
+static inline bool riftResolveStep(RiftHashResolve* r, const uint8_t* hash,
+                                   uint8_t hash_len, const uint8_t* key) {
+  if (r == NULL || r->ambiguous) return false;
+  if (hash == NULL || key == NULL || hash_len == 0) return false;
+  if (memcmp(hash, key, hash_len) != 0) return false;
+
+  if (!r->have) {
+    memcpy(r->first, key, RIFT_RESOLVE_DEDUP_LEN);
+    r->have = true;
+    return true;
   }
-  return found;
+  // The same node is normally in both sets, so this comparison is what stops almost
+  // every known node being reported as ambiguous with itself.
+  if (memcmp(r->first, key, RIFT_RESOLVE_DEDUP_LEN) != 0) r->ambiguous = true;
+  return false;
+}
+
+static inline int riftResolveResult(const RiftHashResolve* r) {
+  if (r == NULL) return RIFT_RESOLVE_NONE;
+  if (r->ambiguous) return RIFT_RESOLVE_AMBIGUOUS;
+  return r->have ? RIFT_RESOLVE_UNIQUE : RIFT_RESOLVE_NONE;
 }
 
 // How much message text actually fits in a channel send. MeshCore prepends

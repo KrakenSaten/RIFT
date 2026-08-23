@@ -120,6 +120,28 @@ public:
   bool advertFlood();
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
+
+  // Resolve a path hash to a node, against every identity this node knows.
+  //
+  // Lives here rather than in the UI because this is the layer that has both sets.
+  // The screen used to resolve against the recent advert cache alone, which is the
+  // smaller of the two by an order of magnitude - up to 96 entries against 358 stored
+  // contacts - so a hash that was unique among recently heard nodes reported UNIQUE
+  // while a stored contact it collided with went unseen. Saying "via ALPHA" when the
+  // honest answer is "ALPHA or BRAVO" is the failure this whole three-state result
+  // exists to prevent, and the candidate set was quietly undermining it.
+  //
+  // Deduplicated, and that is load-bearing rather than tidy: a node is normally in
+  // both sets, so counting matches without it would report almost every known node as
+  // ambiguous with itself.
+  //
+  // Returns RIFT_RESOLVE_UNIQUE with out_name filled, or NONE / AMBIGUOUS - all
+  // defined in ui-rift/RiftLogic.h, along with the accumulator that holds the rule.
+  // RIFT-only, like logTx below: nothing else asks, and the constants live in a header
+  // the other builds do not include.
+#ifdef RIFT_VERSION
+  int resolvePathHash(const uint8_t* hash, uint8_t hash_len, char* out_name, size_t name_len);
+#endif
   // occupancy and pressure on the path cache, for the SYSTEM diagnostics
   int  getPathCacheUsed() const;
   int  getPathCacheSize() const;   // defined out of line: the table size is #defined below

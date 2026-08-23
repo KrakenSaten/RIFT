@@ -16,56 +16,114 @@ static const uint8_t CHARLIE[] = { 0x5F, 0x00, 0x00, 0x00 };
 // per slot, and non-zero, because zero means "not recorded" and matches on slot alone.
 static RiftConvKey ch(uint8_t slot) { return riftConvChannel(slot, 0xC0DE0000u + slot); }
 
-TEST(ResolveHash, NoMatchIsNotAGuess) {
-    const uint8_t* nodes[] = { ALPHA, BRAVO, CHARLIE };
-    const uint8_t wanted[] = { 0xEE };
-    EXPECT_EQ(RIFT_HASH_NONE, riftResolveHash(wanted, 1, nodes, 3));
+// A 7-byte key, so the dedup prefix has something to compare. Distinct nodes differ
+// in the last byte, which is past every hash length used here.
+static void key7(uint8_t* out, uint8_t lead, uint8_t tail) {
+    for (int i = 0; i < 7; i++) out[i] = lead;
+    out[6] = tail;
 }
 
-TEST(ResolveHash, SingleMatchResolves) {
-    const uint8_t* nodes[] = { ALPHA, BRAVO, CHARLIE };
-    const uint8_t wanted[] = { 0x5F };
-    EXPECT_EQ(2, riftResolveHash(wanted, 1, nodes, 3));
+TEST(ResolveHash, NoMatchIsUnknownRatherThanAGuess) {
+    uint8_t a[7], b[7], want = 0x99;
+    key7(a, 0x11, 1); key7(b, 0x22, 2);
+    RiftHashResolve r;
+    riftResolveBegin(&r);
+    riftResolveStep(&r, &want, 1, a);
+    riftResolveStep(&r, &want, 1, b);
+    EXPECT_EQ(RIFT_RESOLVE_NONE, riftResolveResult(&r));
 }
 
-// The case that shipped naming the wrong repeater: at one byte, ALPHA and BRAVO
-// are indistinguishable, and taking the first match asserted it was ALPHA.
-TEST(ResolveHash, OneByteCollisionIsAmbiguousNotTheFirstMatch) {
-    const uint8_t* nodes[] = { ALPHA, BRAVO, CHARLIE };
-    const uint8_t wanted[] = { 0xA1 };
-    EXPECT_EQ(RIFT_HASH_AMBIGUOUS, riftResolveHash(wanted, 1, nodes, 3));
+TEST(ResolveHash, OneMatchIsUnique) {
+    uint8_t a[7], b[7], want = 0x22;
+    key7(a, 0x11, 1); key7(b, 0x22, 2);
+    RiftHashResolve r;
+    riftResolveBegin(&r);
+    EXPECT_FALSE(riftResolveStep(&r, &want, 1, a));
+    EXPECT_TRUE(riftResolveStep(&r, &want, 1, b));   // true: copy this one's name
+    EXPECT_EQ(RIFT_RESOLVE_UNIQUE, riftResolveResult(&r));
 }
 
-TEST(ResolveHash, LongerHashSeparatesWhatOneByteCouldNot) {
-    const uint8_t* nodes[] = { ALPHA, BRAVO, CHARLIE };
-    const uint8_t wanted[] = { 0xA1, 0xB2, 0xC3 };
-    EXPECT_EQ(0, riftResolveHash(wanted, 3, nodes, 3));
+TEST(ResolveHash, TwoDistinctNodesAreAmbiguous) {
+    uint8_t a[7], b[7], want = 0x22;
+    key7(a, 0x22, 1); key7(b, 0x22, 2);             // same lead byte, different node
+    RiftHashResolve r;
+    riftResolveBegin(&r);
+    riftResolveStep(&r, &want, 1, a);
+    riftResolveStep(&r, &want, 1, b);
+    EXPECT_EQ(RIFT_RESOLVE_AMBIGUOUS, riftResolveResult(&r));
 }
 
-TEST(ResolveHash, TwoBytesStillCollideHere) {
-    // ALPHA and BRAVO agree on the first two bytes, so two is not enough either
-    const uint8_t* nodes[] = { ALPHA, BRAVO, CHARLIE };
-    const uint8_t wanted[] = { 0xA1, 0xB2 };
-    EXPECT_EQ(RIFT_HASH_AMBIGUOUS, riftResolveHash(wanted, 2, nodes, 3));
+// The reviewer's scenario, and the reason the whole function moved. ALPHA is in the
+// recent advert cache, BRAVO only in the contact table, and they share a short hash.
+// Resolving against one set said UNIQUE; the honest answer is AMBIGUOUS.
+TEST(ResolveHash, ACollisionAcrossTheTwoIdentitySetsIsAmbiguous) {
+    uint8_t alpha[7], bravo[7], want = 0x5A;
+    key7(alpha, 0x5A, 0xA1);
+    key7(bravo, 0x5A, 0xB2);
+
+    RiftHashResolve r;
+    riftResolveBegin(&r);
+    riftResolveStep(&r, &want, 1, bravo);            // walked from the contact table
+    EXPECT_EQ(RIFT_RESOLVE_UNIQUE, riftResolveResult(&r));   // as far as it knows so far
+    riftResolveStep(&r, &want, 1, alpha);            // then the advert cache
+    EXPECT_EQ(RIFT_RESOLVE_AMBIGUOUS, riftResolveResult(&r));
 }
 
-TEST(ResolveHash, SkipsEmptySlots) {
-    // nodes not drawn this frame are passed as NULL and must not match
-    const uint8_t* nodes[] = { NULL, BRAVO, NULL };
-    const uint8_t wanted[] = { 0xA1 };
-    EXPECT_EQ(1, riftResolveHash(wanted, 1, nodes, 3));
+// The dedup, which is load-bearing rather than tidy: a node is normally in both sets,
+// so without this every known node would resolve as ambiguous with itself.
+TEST(ResolveHash, TheSameNodeInBothSetsIsStillOneNode) {
+    uint8_t k[7], want = 0x33;
+    key7(k, 0x33, 7);
+    RiftHashResolve r;
+    riftResolveBegin(&r);
+    EXPECT_TRUE(riftResolveStep(&r, &want, 1, k));    // contact table
+    EXPECT_FALSE(riftResolveStep(&r, &want, 1, k));   // advert cache, same node
+    EXPECT_EQ(RIFT_RESOLVE_UNIQUE, riftResolveResult(&r));
 }
 
-TEST(ResolveHash, DegenerateInputsDoNotMatchAnything) {
-    const uint8_t* nodes[] = { ALPHA };
-    const uint8_t wanted[] = { 0xA1 };
-    EXPECT_EQ(RIFT_HASH_NONE, riftResolveHash(NULL, 1, nodes, 1));
-    EXPECT_EQ(RIFT_HASH_NONE, riftResolveHash(wanted, 0, nodes, 1));
-    EXPECT_EQ(RIFT_HASH_NONE, riftResolveHash(wanted, 1, NULL, 1));
-    EXPECT_EQ(RIFT_HASH_NONE, riftResolveHash(wanted, 1, nodes, 0));
+TEST(ResolveHash, ALongerHashSeparatesWhatAShortOneCannot) {
+    uint8_t a[7], b[7];
+    key7(a, 0x44, 1); key7(b, 0x44, 2);
+    a[1] = 0x01; b[1] = 0x02;                         // differ at byte 1
+    uint8_t want[2] = { 0x44, 0x01 };
+
+    RiftHashResolve one, two;
+    riftResolveBegin(&one);
+    riftResolveStep(&one, want, 1, a);
+    riftResolveStep(&one, want, 1, b);
+    EXPECT_EQ(RIFT_RESOLVE_AMBIGUOUS, riftResolveResult(&one));
+
+    riftResolveBegin(&two);
+    riftResolveStep(&two, want, 2, a);
+    riftResolveStep(&two, want, 2, b);
+    EXPECT_EQ(RIFT_RESOLVE_UNIQUE, riftResolveResult(&two));
 }
 
-// ---------------------------------------------------------------- channel capacity
+// Once ambiguous, a further match cannot make the answer less uncertain.
+TEST(ResolveHash, AmbiguousIsSticky) {
+    uint8_t a[7], b[7], want = 0x55;
+    key7(a, 0x55, 1); key7(b, 0x55, 2);
+    RiftHashResolve r;
+    riftResolveBegin(&r);
+    riftResolveStep(&r, &want, 1, a);
+    riftResolveStep(&r, &want, 1, b);
+    ASSERT_EQ(RIFT_RESOLVE_AMBIGUOUS, riftResolveResult(&r));
+    EXPECT_FALSE(riftResolveStep(&r, &want, 1, a));
+    EXPECT_EQ(RIFT_RESOLVE_AMBIGUOUS, riftResolveResult(&r));
+}
+
+TEST(ResolveHash, DegenerateInputs) {
+    uint8_t k[7], want = 0x11;
+    key7(k, 0x11, 1);
+    RiftHashResolve r;
+    riftResolveBegin(&r);
+    EXPECT_FALSE(riftResolveStep(&r, NULL, 1, k));
+    EXPECT_FALSE(riftResolveStep(&r, &want, 0, k));
+    EXPECT_FALSE(riftResolveStep(&r, &want, 1, NULL));
+    EXPECT_FALSE(riftResolveStep(NULL, &want, 1, k));
+    EXPECT_EQ(RIFT_RESOLVE_NONE, riftResolveResult(&r));
+    EXPECT_EQ(RIFT_RESOLVE_NONE, riftResolveResult(NULL));
+}
 
 TEST(ChannelCapacity, LongerNameLeavesLessRoom) {
     // MAX_TEXT_LEN is 160 on this firmware

@@ -493,6 +493,48 @@ int MyMesh::getPathCacheUsed() const {
 // because a screen wanted sorted output; the copy the caller asked for is the thing
 // that gets sorted. An insertion sort over sixteen entries is a few hundred
 // comparisons at worst and is easier to be sure of than a comparator contract.
+#ifdef RIFT_VERSION
+// Both identity sets, deduplicated. The rule is riftResolveStep() in RiftLogic.h, so
+// it has tests without a mesh; this is only the traversal.
+int MyMesh::resolvePathHash(const uint8_t* hash, uint8_t hash_len,
+                            char* out_name, size_t name_len) {
+  if (hash == NULL || hash_len == 0) return RIFT_RESOLVE_NONE;
+  if (hash_len > RIFT_RESOLVE_DEDUP_LEN) hash_len = RIFT_RESOLVE_DEDUP_LEN;
+
+  RiftHashResolve r;
+  riftResolveBegin(&r);
+  char found[32];
+  found[0] = 0;
+
+  // Stored contacts first: the larger set by an order of magnitude, and the one the
+  // screen could not see.
+  ContactsIterator it = startContactsIterator();
+  ContactInfo c;
+  while (it.hasNext(this, c)) {
+    if (c.name[0] == 0) continue;                        // reserved anon slot
+    if (riftResolveStep(&r, hash, hash_len, c.id.pub_key)) {
+      StrHelper::strncpy(found, c.name, sizeof(found));
+    }
+  }
+
+  // Then the recent advert cache, which holds nodes heard but never added as contacts
+  // - with auto-add on that is unusual, but a hop limit or a full table leaves entries
+  // here and nowhere else.
+  for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
+    if (!advert_paths[i].valid) continue;
+    if (riftResolveStep(&r, hash, hash_len, advert_paths[i].pubkey_prefix)) {
+      StrHelper::strncpy(found, advert_paths[i].name, sizeof(found));
+    }
+  }
+
+  int result = riftResolveResult(&r);
+  if (result == RIFT_RESOLVE_UNIQUE && out_name != NULL && name_len > 0) {
+    StrHelper::strncpy(out_name, found, name_len);
+  }
+  return result;
+}
+#endif
+
 int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
   if (dest == NULL || max_num <= 0) return 0;
   if (max_num > ADVERT_PATH_TABLE_SIZE) max_num = ADVERT_PATH_TABLE_SIZE;
