@@ -19,6 +19,7 @@
   #include <helpers/ui/GenericVibration.h>
 #endif
 
+#include "RiftLogic.h"
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 
@@ -83,6 +84,19 @@ public:
   // True while this screen holds something a popup would destroy: half-typed
   // text, or a secret being read. Checked before raising the message preview.
   virtual bool isModal() const { return false; }
+
+  // True when a message arriving in this conversation is already visible here, so a
+  // popup would cover the view that is showing it.
+  //
+  // This exists because COMMS used to answer isModal() unconditionally true, on the
+  // grounds that its history was unfiltered and therefore always already showing
+  // whatever arrived. That comment ended by naming the change that would invalidate
+  // it - filtering the history per conversation - which is exactly what happened. So
+  // the question is now about the message rather than only about the screen.
+  //
+  // Default false: a screen that is not COMMS shows no messages at all, and an
+  // unknown conversation cannot be claimed as visible.
+  virtual bool showsConversation(const RiftConvKey& k) const { (void) k; return false; }
 
   // True for a transient popup drawn over the screen the user is actually on,
   // rather than a destination they navigated to.

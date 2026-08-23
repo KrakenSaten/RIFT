@@ -497,6 +497,61 @@ struct RiftMsgLog {
 
 static RiftMsgLog msg_log;
 
+// Unread, per conversation.
+//
+// Session-only by design: persisting it would mean another field in the settings
+// file, and a dot that survives a reboot matters less than one that is correct while
+// the device is on. The nav-bar dot keeps its own meaning - something unread
+// somewhere - and is not driven from here.
+//
+// Rows are ordered by when they were last marked, oldest first, so a full table
+// drops the conversation that has gone longest without a new message. Overflowing
+// needs 32 conversations unread at once, and at that point every policy is arbitrary;
+// keeping the most recent 32 correct is the useful end to be right about.
+#define RIFT_UNREAD_MAX 32
+
+struct RiftUnread {
+  RiftConvKey keys[RIFT_UNREAD_MAX];
+  uint8_t counts[RIFT_UNREAD_MAX];   // capped at 255; the dot only needs "any"
+  int n = 0;
+
+  void mark(const RiftConvKey& k) {
+    if (k.kind == RIFT_CONV_UNKNOWN) return;   // nothing to attribute it to
+    for (int i = 0; i < n; i++) {
+      if (riftConvSame(keys[i], k)) { if (counts[i] < 255) counts[i]++; return; }
+    }
+    if (n >= RIFT_UNREAD_MAX) {
+      memmove(&keys[0], &keys[1], (size_t) (RIFT_UNREAD_MAX - 1) * sizeof(keys[0]));
+      memmove(&counts[0], &counts[1], (size_t) (RIFT_UNREAD_MAX - 1) * sizeof(counts[0]));
+      n = RIFT_UNREAD_MAX - 1;
+    }
+    keys[n] = k;
+    counts[n] = 1;
+    n++;
+  }
+
+  uint8_t count(const RiftConvKey& k) const {
+    for (int i = 0; i < n; i++) if (riftConvSame(keys[i], k)) return counts[i];
+    return 0;
+  }
+
+  // Called from render() rather than from a navigation event: a conversation is read
+  // when it is on screen, which is a thing the frame knows and the navigation does
+  // not - opening COMMS on Public and switching to a channel in the strip never
+  // enters or leaves a screen.
+  void clear(const RiftConvKey& k) {
+    for (int i = 0; i < n; i++) {
+      if (!riftConvSame(keys[i], k)) continue;
+      memmove(&keys[i], &keys[i + 1], (size_t) (n - i - 1) * sizeof(keys[0]));
+      memmove(&counts[i], &counts[i + 1], (size_t) (n - i - 1) * sizeof(counts[0]));
+      n--;
+      return;
+    }
+  }
+};
+
+static RiftUnread msg_unread;
+
 
 // Break text into lines at a pixel width, calling emit() per line (NULL just
 // counts). DisplayDriver::printWordWrap() is only a default that forwards to
@@ -4226,23 +4281,35 @@ public:
     _target_is_channel = false;
     memcpy(_target_key, key6, 6);
     _picking = false;
+    _scroll = 0;   // a different conversation: land on its newest, not at some offset
+
+    // The name was never set here, only by the conversation list - so arriving from
+    // NODES showed the heading of whoever was picked last, or a blank one on a fresh
+    // boot. It read as a bug in NODES rather than in this line. The filter is what
+    // turned it from cosmetic into load-bearing: a version 1 entry with no key is
+    // placed by matching this name.
+    ContactInfo* c = the_mesh.lookupContactByPubKey(_target_key, 6);
+    if (c != NULL) StrHelper::strncpy(_target_name, c->name, sizeof(_target_name));
+    else _target_name[0] = 0;
   }
 
-  // Unconditional, and this is the right answer rather than a compromise.
+  // This used to be unconditional, and the reasoning was sound at the time: the
+  // history walked the whole log without filtering, so an arriving message was
+  // already on screen and a popup would only cover the view that was showing it.
+  // That comment ended by naming the change that would invalidate it - filtering the
+  // history per conversation - and that change has now been made. An idle COMMS
+  // screen showing Public can now miss a direct message entirely.
   //
-  // It was left as an open question here, on the reading that `_picking || _len > 0`
-  // was the honest condition and that an idle history view had no business
-  // suppressing a popup. That reading assumed the popup would add something. It
-  // does not: the history loop in render() walks the whole message log without
-  // filtering by channel or contact, so an arriving message is already on screen,
-  // at the bottom of the list, on the refresh that newMsg() forces. A popup would
-  // cover the view that is showing the message.
-  //
-  // So both cases point the same way. While composing or picking, a popup would
-  // cost a half-typed line; while idle, it would obscure and duplicate. If the
-  // history is ever filtered per target, this has to be revisited - that is the
-  // change that would make an idle COMMS screen able to miss something.
-  bool isModal() const override { return true; }
+  // So the two cases have come apart, and each keeps the answer that fits it.
+  // Composing or picking still suppresses the popup, because it would cost a
+  // half-typed line or a selection. Idle no longer does; whether the popup is worth
+  // raising is a question about the message, and showsConversation() below answers
+  // it.
+  bool isModal() const override { return _picking || _len > 0; }
+
+  bool showsConversation(const RiftConvKey& k) const override {
+    return riftConvSame(currentConv(), k);
+  }
 private:
   char _target_name[32];
 
@@ -4256,6 +4323,8 @@ private:
     bool is_channel;
     uint8_t channel_idx;   // channels only
     uint8_t key[6];        // contacts only
+    uint32_t last_ts;      // newest message in this conversation, 0 if none
+    uint8_t unread;
   };
   PickEntry _picks[RIFT_PICKER_MAX];
   int _pick_count;
@@ -4358,6 +4427,15 @@ private:
       char filtered[sizeof(_tabs[i].name)];
       riftTranslateUTF8(filtered, _tabs[i].name, sizeof(filtered));
       display.drawTextEllipsized(x + 3, _tabs_y, tw - 8, filtered);
+
+      // Unread, on the tabs you are not looking at. The active tab is excluded
+      // because the accent dot would be invisible inside its accent fill - and
+      // because it is the conversation on screen, whose unread render() has just
+      // cleared. A channel scrolled out of the strip has no dot here; the nav bar
+      // still says something is unread somewhere.
+      if (!active && msg_unread.count(riftConvChannel(_tabs[i].idx)) > 0) {
+        renderUnreadDot(display, x + tw - 8, _tabs_y - 1);
+      }
     }
 
     // a contact target is not in the strip, so say so rather than showing no
@@ -4382,6 +4460,56 @@ private:
 
   bool getTargetChannel(ChannelDetails& ch) {
     return the_mesh.getChannel(_target_channel_idx, ch) && ch.name[0] != 0;
+  }
+
+public:
+  // The conversation on screen. Public because the popup gate asks the screen
+  // whether an arriving message is already visible.
+  RiftConvKey currentConv() const {
+    if (_target_is_channel) return riftConvChannel(_target_channel_idx);
+    return riftConvDM(_target_key);
+  }
+private:
+
+  // The current target's name, for placing entries that have no conversation key -
+  // see inCurrentConv(). Channels are named by the mesh rather than by _target_name,
+  // which is only filled in when the target came from the conversation list.
+  const char* currentTargetName(char* buf, size_t buf_len) const {
+    if (!_target_is_channel) return _target_name;
+    ChannelDetails ch;
+    if (!the_mesh.getChannel(_target_channel_idx, ch) || ch.name[0] == 0) return "";
+    StrHelper::strncpy(buf, ch.name, buf_len);
+    return buf;
+  }
+
+  // Whether a history entry belongs in the view.
+  //
+  // Entries written by this build carry the conversation, so the test is exact.
+  // Entries restored from a version 1 file do not, and are placed by matching the
+  // origin name - which is what the whole screen did before this change, so it is
+  // not a regression, and dropping them instead would make a history restored from
+  // an older build vanish the moment this shipped. They fade out as the log turns
+  // over, and nothing new ever takes that path.
+  // How many stored messages this conversation has. Walked rather than counted
+  // incrementally: it is asked on a keypress, not per frame, and a cached count would
+  // be one more thing that can disagree with the log.
+  int convCount() const {
+    int n = 0;
+    for (int back = 0; back < msg_log.count; back++) {
+      const RiftMsgLog::Entry* p = msg_log.peek(back);
+      if (p == NULL) break;
+      if (inCurrentConv(p)) n++;
+    }
+    return n;
+  }
+
+  bool inCurrentConv(const RiftMsgLog::Entry* p) const {
+    if (p->conv.kind != RIFT_CONV_UNKNOWN) return riftConvSame(p->conv, currentConv());
+
+    char name[64], target[32];
+    if (!riftOriginName(p->origin, name, sizeof(name))) return false;
+    const char* want = currentTargetName(target, sizeof(target));
+    return want[0] != 0 && strcmp(name, want) == 0;
   }
 
   // from ContactVisitor - called by scanRecentContacts(), already ordered by
@@ -4421,13 +4549,73 @@ private:
       e->channel_idx = (uint8_t) i;
       memset(e->key, 0, sizeof(e->key));
     }
+    int first_dm = _pick_count;
 
     // then contacts, most recently heard first (scanRecentContacts sorts them)
     the_mesh.scanRecentContacts(0, this);
 
+    // Every row now carries what the list needs to say about it. Both are looked up
+    // here rather than while drawing: the log walk is 48 entries per row and render()
+    // shares the SPI bus with the radio, so it belongs on the open rather than in
+    // every frame.
+    for (int i = 0; i < _pick_count; i++) {
+      RiftConvKey k = _picks[i].is_channel ? riftConvChannel(_picks[i].channel_idx)
+                                           : riftConvDM(_picks[i].key);
+      _picks[i].last_ts = newestIn(k, _picks[i].name);
+      _picks[i].unread = msg_unread.count(k);
+    }
+
+    // Direct rows sort by their newest message, most recent first, with contacts you
+    // have never exchanged anything with after them in the order the mesh last heard
+    // them. The channel section keeps slot order: a strip you can learn the position
+    // of is worth more than one ranked by traffic, and the strip uses the same order.
+    //
+    // Insertion sort, over at most RIFT_PICKER_MAX rows, once per open. It is stable,
+    // which is what preserves the recently-heard order among the rows that tie at
+    // zero - a faster sort that reordered them would lose information the mesh
+    // supplied for free.
+    for (int i = first_dm + 1; i < _pick_count; i++) {
+      PickEntry tmp = _picks[i];
+      int j = i - 1;
+      while (j >= first_dm && _picks[j].last_ts < tmp.last_ts) {
+        _picks[j + 1] = _picks[j];
+        j--;
+      }
+      _picks[j + 1] = tmp;
+    }
+
     _picking = true;
-    _pick_idx = 0;
     _pick_scroll = 0;
+
+    // Open on the conversation you are in, so the list says where you are before it
+    // asks where you want to go.
+    _pick_idx = 0;
+    for (int i = 0; i < _pick_count; i++) {
+      RiftConvKey k = _picks[i].is_channel ? riftConvChannel(_picks[i].channel_idx)
+                                           : riftConvDM(_picks[i].key);
+      if (riftConvSame(k, currentConv())) { _pick_idx = i; break; }
+    }
+    ensurePickVisible();
+  }
+
+  // Timestamp of the newest message in a conversation, or 0 if it has none.
+  //
+  // `name` is for the version 1 entries that carry no key: they are placed by the
+  // same origin match the history uses, so a conversation restored from an older
+  // file still reports a time instead of reading as empty.
+  uint32_t newestIn(const RiftConvKey& k, const char* name) const {
+    for (int back = 0; back < msg_log.count; back++) {
+      const RiftMsgLog::Entry* p = msg_log.peek(back);
+      if (p == NULL) break;
+      if (p->conv.kind != RIFT_CONV_UNKNOWN) {
+        if (riftConvSame(p->conv, k)) return p->timestamp;   // newest first, so done
+        continue;
+      }
+      char origin_name[64];
+      if (riftOriginName(p->origin, origin_name, sizeof(origin_name))
+          && strcmp(origin_name, name) == 0) return p->timestamp;
+    }
+    return 0;
   }
 
   void sendToChannel() {
@@ -4540,27 +4728,84 @@ private:
 
   int pickerRows() const { return (BODY_BOTTOM - (BODY_TOP + 4)) / RIFT_LINE_H; }
 
+  // A 3x3 accent square, not a letter and not a colour change.
+  //
+  // The accent already means active tab, your own message, and you can act here.
+  // This is a fourth use and it only works because it is a shape: the palette rules
+  // forbid encoding data in brightness where shape can carry it, and a mark either
+  // occupying its three pixels or not is the least ambiguous state a 6x8 cell has
+  // room for. The count is deliberately not drawn - one glyph of digits in this
+  // space would be unreadable, and the question the row answers is whether to open
+  // it, not how far behind you are.
+  void renderUnreadDot(DisplayDriver& display, int x, int y) {
+    display.setColor(rift_pal.accent);
+    display.fillRect(x, y, 3, 3);
+  }
+
   int renderPicker(DisplayDriver& display) {
-    renderHeading(display, "SELECT TARGET");
+    renderHeading(display, "CONVERSATIONS");
     display.setTextSize(1);
 
     int total = _pick_count;
-    int rows = pickerRows();
     int y = BODY_TOP + 4;
+    bool drew_channels = false, drew_direct = false;
 
-    for (int i = _pick_scroll; i < total && i < _pick_scroll + rows; i++, y += RIFT_LINE_H) {
+    // Bounded by the space left rather than by a row count: the two section headings
+    // take a line each, so a fixed count would have run off the bottom of one list
+    // and stopped short on another.
+    for (int i = _pick_scroll; i < total; i++) {
+      bool is_ch = _picks[i].is_channel;
+
+      // Section heading, drawn at the first row of each kind that is actually
+      // visible - so scrolling into the middle of the direct section still says
+      // which section that is.
+      if ((is_ch && !drew_channels) || (!is_ch && !drew_direct)) {
+        if (is_ch) drew_channels = true; else drew_direct = true;
+        if (y + RIFT_LINE_H * 2 > BODY_BOTTOM) break;
+        display.setColor(rift_pal.mid);
+        display.drawTextLeftAlign(4, y, is_ch ? "CHANNELS" : "DIRECT");
+        display.setColor(rift_pal.rule);
+        display.fillRect(4, y + 9, 76, 1);
+        y += RIFT_LINE_H;
+      }
+      if (y + RIFT_LINE_H > BODY_BOTTOM) break;
+
       bool sel = (_pick_idx == i);
+      if (_picks[i].unread > 0) renderUnreadDot(display, 1, y + 2);
+
+      // The channel's colour, as the 2px chip the strip borders already use. Only
+      // four channels get one - see design/channel-colours.md - so a fifth draws
+      // nothing rather than repeating a colour, which would be worse than none.
+      if (is_ch) {
+        uint16_t cc = riftChannelColour(_picks[i].channel_idx);
+        if (cc != RIFT_CHAN_COL_NONE) {
+          display.setColor(cc);
+          display.fillRect(6, y, 2, 7);
+        }
+      }
+
       display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
       char filtered[32];
       riftTranslateUTF8(filtered, _picks[i].name, sizeof(filtered));
-      display.setCursor(4, y);
+      display.setCursor(11, y);
       display.print(sel ? "> " : "  ");
       display.print(filtered);
 
-      // channels are broadcast, contacts are addressed - worth distinguishing,
-      // not least because only contacts can report delivery
-      display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
-      display.drawTextRightAlign(display.width() - 4, y, _picks[i].is_channel ? "channel" : "direct");
+      // The time of the last message replaces the old "channel" / "direct" label,
+      // which the section headings now say once instead of on every row. A
+      // conversation with no history says so rather than showing a zero clock.
+      char right[16];
+      if (_picks[i].last_ts == 0) {
+        StrHelper::strncpy(right, "-", sizeof(right));
+      } else {
+        snprintf(right, sizeof(right), "%02d:%02d",
+                 (int) ((_picks[i].last_ts / 3600) % 24),
+                 (int) ((_picks[i].last_ts / 60) % 60));
+      }
+      display.setColor(rift_pal.mid);
+      display.drawTextRightAlign(display.width() - 4, y, right);
+
+      y += RIFT_LINE_H;
     }
 
     if (_pick_count == 0) {
@@ -4572,7 +4817,7 @@ private:
     }
 
     // scroll position indicator when the list doesn't fit
-    if (total > rows) {
+    if (total > pickerRows()) {
       display.setColor(UIColor::secondary_txt);
       char pos[16];
       snprintf(pos, sizeof(pos), "%d/%d", _pick_idx + 1, total);
@@ -4580,7 +4825,7 @@ private:
     }
 
     display.setColor(UIColor::secondary_txt);
-    display.drawTextLeftAlign(4, INPUT_Y, "trackball up/down  ENTER pick  click back");
+    display.drawTextLeftAlign(4, INPUT_Y, "trackball up/down  ENTER open  click back");
 
     renderNavBar(display, RIFT_NAV_COMMS);
     return 1000;
@@ -4588,7 +4833,12 @@ private:
 
   // keep the selected row inside the visible window
   void ensurePickVisible() {
-    int rows = pickerRows();
+    // Two fewer than the raw row count: the CHANNELS and DIRECT headings each take a
+    // line, so scrolling by the unadjusted count put the selected row just off the
+    // bottom. Conservative rather than exact - a list with only one section wastes a
+    // row, which is cheaper than a selection you cannot see.
+    int rows = pickerRows() - 2;
+    if (rows < 1) rows = 1;
     if (_pick_idx < _pick_scroll) _pick_scroll = _pick_idx;
     if (_pick_idx >= _pick_scroll + rows) _pick_scroll = _pick_idx - rows + 1;
     if (_pick_scroll < 0) _pick_scroll = 0;
@@ -4622,6 +4872,7 @@ private:
       }
       StrHelper::strncpy(_target_name, e->name, sizeof(_target_name));
       _picking = false;
+      _scroll = 0;   // a different conversation: land on its newest
       return true;
     }
     // no dedicated ESC key on this keyboard - backspace and trackball click both back out
@@ -4708,6 +4959,11 @@ public:
     // A channel target needs none. It is already in the strip under an accent
     // fill, and naming it again above said the same thing twice. That case gets
     // the strip at the top of the screen and the 16px into the history instead.
+    // On screen is read. Done here rather than on navigation because switching
+    // channel in the strip neither enters nor leaves a screen, so there is no
+    // navigation event to hang it on - and the frame is what actually knows.
+    msg_unread.clear(currentConv());
+
     ChannelDetails ch;
     bool headed = true;
     if (!_target_is_channel) {
@@ -4727,11 +4983,26 @@ public:
     display.setTextSize(1);
 
     // History, newest at the bottom: lay entries out upward from the input line.
+    //
+    // _scroll counts messages in this conversation rather than positions in the log.
+    // Indexing the log directly meant a scroll step through a run of other
+    // conversations moved the counter without moving the view, and coming back then
+    // cost one press per entry that had never been shown.
     int avail_px = display.width() - 8;
     int y = BODY_BOTTOM;
-    for (int back = _scroll; back < msg_log.count; back++) {
+
+    // Eviction can take the entry the scroll position was counted against, and a
+    // scroll past the end drew nothing at all - the same failure the event log and
+    // the packet log both clamp for, a few hundred lines up.
+    int n_conv = convCount();
+    if (_scroll >= n_conv) _scroll = n_conv > 0 ? n_conv - 1 : 0;
+
+    int seen = 0;
+    for (int back = 0; back < msg_log.count; back++) {
       auto p = msg_log.peek(back);
       if (p == NULL) break;
+      if (!inCurrentConv(p)) continue;   // a different conversation, not this one
+      if (seen++ < _scroll) continue;    // scrolled past
 
       char filtered[sizeof(p->msg)];
       riftTranslateUTF8(filtered, p->msg, sizeof(filtered));
@@ -4807,13 +5078,24 @@ public:
       wrapText(filtered, avail_px, y + RIFT_LINE_H, &display, 6);
     }
 
+    // An empty conversation now exists, where it could not before: the history used
+    // to show every message from everywhere, so it was blank only on a device that
+    // had never received anything. A blank panel reads as a screen that failed to
+    // draw, so it says which of the two it is.
+    if (n_conv == 0) {
+      display.setColor(rift_pal.dim);
+      display.drawTextLeftAlign(6, _hist_top + 6,
+                                msg_log.count > 0 ? "No messages here yet."
+                                                  : "No messages yet.");
+    }
+
     // Compose line - show the tail once the text outgrows one line.
     display.setColor(rift_pal.rule);
     display.fillRect(0, INPUT_Y - 4, display.width(), 1);
 
     display.setColor(rift_pal.dim);
     if (_len == 0) {
-      display.drawTextRightAlign(display.width() - 2, INPUT_Y, "ENTER: pick target");
+      display.drawTextRightAlign(display.width() - 2, INPUT_Y, "ENTER: conversations");
     } else {
       // MeshCore truncates at MAX_TEXT_LEN, so show how close the message is
       char cnt[12];
@@ -4865,6 +5147,7 @@ public:
     _target_is_channel = true;
     _target_channel_idx = _tabs[i].idx;
     StrHelper::strncpy(_target_name, _tabs[i].name, sizeof(_target_name));
+    _scroll = 0;   // a different conversation: land on its newest
     return true;
   }
 
@@ -4877,7 +5160,7 @@ public:
     if (c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
 
     if (c == KEY_UP) {     // scroll back through history
-      if (_scroll + 1 < msg_log.count) _scroll++;
+      if (_scroll + 1 < convCount()) _scroll++;
       return true;
     }
     if (c == KEY_DOWN) {
@@ -5483,6 +5766,12 @@ void UITask::newMsgConv(uint8_t path_len, const char* from_name, const char* tex
   } else {
     riftLogf("rx %dh %s: %s", (int) riftHopCount(path_len), origin, text);
   }
+  // Marked before the popup decision, and cleared again by COMMS on the next frame
+  // if this is the conversation on screen. Marking unconditionally and letting the
+  // frame retract it keeps one rule - what is displayed is read - rather than two
+  // that have to agree.
+  msg_unread.mark(conv);
+
   ((RiftMsgPreviewScreen *) msg_preview)->onNewMsg();
 
   // Don't take the screen away from someone mid-input: a half-typed line in
@@ -5492,7 +5781,14 @@ void UITask::newMsgConv(uint8_t path_len, const char* from_name, const char* tex
   //
   // Nothing stacks: a second message while the preview is already up must leave
   // it where it is, or dismissing would land back on the popup.
-  if (_overlay == NULL && curr != NULL && !curr->isModal()) {
+  //
+  // The second condition is new, and it is what the history filter forced. COMMS
+  // used to be able to say "always already showing it"; now it shows one
+  // conversation, so a message arriving in a different one has to announce itself
+  // even though COMMS is on screen. showsConversation() defaults to false, so every
+  // other screen behaves exactly as before.
+  if (_overlay == NULL && curr != NULL && !curr->isModal()
+      && !curr->showsConversation(conv)) {
     pushOverlay(msg_preview);
   }
 
