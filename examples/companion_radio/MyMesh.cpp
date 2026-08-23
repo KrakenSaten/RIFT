@@ -298,6 +298,27 @@ uint8_t MyMesh::getExtraAckTransmitCount() const {
   return _prefs.multi_acks;
 }
 
+#ifdef RIFT_VERSION
+void MyMesh::logTx(mesh::Packet* packet, int len) {
+  unsigned long total = getTotalAirTime();
+  unsigned long air = total - _last_air_total;
+  _last_air_total = total;
+  riftRxLog().addTx(true, (uint32_t) air, packet->header, packet->path_len, len);
+}
+
+void MyMesh::logTxFail(mesh::Packet* packet, int len) {
+  // Deliberately does not resync _last_air_total. The send-timeout path in Dispatcher
+  // does not add to the total, so there is nothing to consume - and the CAD-failure
+  // path has not transmitted either. Resyncing here would silently charge the next
+  // successful send with this one's non-existent air time.
+  riftRxLog().addTx(false, 0, packet->header, packet->path_len, len);
+  riftLogf("TX FAILED on air: %s", riftPayloadTypeName(riftHeaderPayloadType(packet->header)));
+}
+#else
+void MyMesh::logTx(mesh::Packet* packet, int len) { (void) packet; (void) len; }
+void MyMesh::logTxFail(mesh::Packet* packet, int len) { (void) packet; (void) len; }
+#endif
+
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
   // Recorded before the companion-link check below, and deliberately outside it:
   // this is the device's own record of mesh activity, and gating it on a

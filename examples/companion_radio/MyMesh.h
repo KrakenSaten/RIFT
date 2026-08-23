@@ -216,6 +216,17 @@ protected:
   void sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
 
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
+
+  // The transmit side of the air log. Upstream declares both of these empty, so
+  // overriding them costs no divergence - the log was receive-only because nothing
+  // here had asked, not because the hooks were missing.
+  void logTx(mesh::Packet* packet, int len) override;
+  void logTxFail(mesh::Packet* packet, int len) override;
+
+  // getTotalAirTime() is cumulative and outbound_start is private in Dispatcher, so
+  // this packet's air time is the delta since the last transmit. logTx() is called
+  // immediately after Dispatcher adds to the total, so the delta is exactly this send.
+  unsigned long _last_air_total = 0;
   bool isAutoAddEnabled() const override;
   bool shouldAutoAddContactType(uint8_t type) const override;
   bool shouldOverwriteWhenFull() const override;

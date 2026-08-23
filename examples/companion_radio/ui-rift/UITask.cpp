@@ -1417,7 +1417,11 @@ class RiftSystemScreen : public RiftScreen {
       "Delete channel",
     };
     if (i == IT_RXLOG) {
-      snprintf(buf, len, "View RX log (%u)", (unsigned) riftRxLog().total);
+      // Both totals in the label, so the split is visible without opening it. A node
+      // that has heard thousands and sent nothing is a node whose transmit path is
+      // broken, and that was previously indistinguishable from a quiet one.
+      snprintf(buf, len, "View air log (%u rx, %u tx)",
+               (unsigned) riftRxLog().total, (unsigned) riftRxLog().total_tx);
     } else if (i == IT_SETTIME) {
       // the current value in the label, so a wrong clock is visible without having
       // to open the editor to find out
@@ -1944,21 +1948,30 @@ private:
   // are not arriving" and "this radio is not hearing anything", which are two
   // problems and were previously one symptom.
   int renderRxLog(DisplayDriver& display) {
-    renderHeading(display, "RX LOG");
+    renderHeading(display, "AIR LOG");
     display.setTextSize(1);
 
     RiftRxLog& log = riftRxLog();
     char tmp[64];
 
+    // Two totals, beside the heading rather than on the header row. Received and sent
+    // are different questions - a node that has heard 4000 and sent 3 is in a very
+    // different situation from one that has sent 400 - and the pair is wide enough
+    // that on the header row it ran into the TYPE column.
     display.setColor(rift_pal.mid);
-    snprintf(tmp, sizeof(tmp), "%u heard", (unsigned) log.total);
-    display.drawTextLeftAlign(2, 20, tmp);
+    snprintf(tmp, sizeof(tmp), "%u rx  %u tx", (unsigned) log.total,
+             (unsigned) log.total_tx);
+    display.drawTextRightAlign(318, 2, tmp);
+
     // drawn at the same x as the data below it, not as one right-aligned string:
     // a header that does not sit over its column is worse than no header
-    display.drawTextLeftAlign(48, 20, "TYPE");
-    display.drawTextLeftAlign(108, 20, "RT HOP");
-    display.drawTextRightAlign(206, 20, "RSSI");
-    display.drawTextRightAlign(262, 20, "SNR");
+    display.drawTextLeftAlign(54, 20, "TYPE");
+    display.drawTextLeftAlign(110, 20, "RT HOP");
+    // One header over both value columns, because no per-column header is true for
+    // both directions: a receive fills them with RSSI and SNR, a transmit with the
+    // air time it spent. Naming all three is honest where naming two would have left
+    // half the rows sitting under the wrong word.
+    display.drawTextRightAlign(262, 20, "RSSI SNR / AIR");
     display.drawTextRightAlign(316, 20, "LEN");
 
     display.setColor(rift_pal.rule);
@@ -1966,10 +1979,10 @@ private:
 
     if (log.count == 0) {
       display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(2, 40, "Nothing heard yet.");
+      display.drawTextLeftAlign(2, 40, "Nothing on the air yet.");
       display.setColor(rift_pal.dim);
-      display.drawTextLeftAlign(2, 56, "This counts every packet on the air,");
-      display.drawTextLeftAlign(2, 68, "not only messages for this node.");
+      display.drawTextLeftAlign(2, 56, "Every packet heard and every packet sent,");
+      display.drawTextLeftAlign(2, 68, "not only the ones meant for this node.");
       renderNavBar(display, RIFT_NAV_SYSTEM);
       return 400;
     }
@@ -1989,11 +2002,22 @@ private:
       display.setColor(rift_pal.dim);
       snprintf(tmp, sizeof(tmp), "%u.%u", (unsigned) (e->at_ms / 1000u),
                (unsigned) ((e->at_ms % 1000u) / 100u));
-      display.drawTextRightAlign(42, y, tmp);
+      display.drawTextRightAlign(40, y, tmp);
+
+      bool tx   = (e->dir != RIFT_AIR_RX);
+      bool fail = (e->dir == RIFT_AIR_TXFAIL);
+
+      // Direction as a glyph, and a failed send as a third glyph rather than as a
+      // colour on the second. Colour alone disappears in sunlight, and a send that
+      // never reached the air is the row you most need to find - it is a different
+      // fault from one that was sent and never acknowledged, which is the distinction
+      // the message log already makes between "no ack" and "failed".
+      display.setColor(fail ? rift_pal.accent : (tx ? rift_pal.ok : rift_pal.mid));
+      display.drawTextLeftAlign(44, y, fail ? "!" : (tx ? ">" : "<"));
 
       uint8_t pt = riftHeaderPayloadType(e->header);
       display.setColor(rift_pal.fg);
-      display.drawTextLeftAlign(48, y, riftPayloadTypeName(pt));
+      display.drawTextLeftAlign(54, y, riftPayloadTypeName(pt));
 
       display.setColor(rift_pal.mid);
       if (e->path_len == 0xFF) {
@@ -2003,23 +2027,37 @@ private:
         snprintf(tmp, sizeof(tmp), "%s %uh", riftRouteTypeName(riftHeaderRouteType(e->header)),
                  (unsigned) riftHopCount(e->path_len));
       }
-      display.drawTextLeftAlign(108, y, tmp);
+      display.drawTextLeftAlign(110, y, tmp);
 
-      // RSSI and SNR are what say whether a packet was comfortable or marginal, and
-      // a marginal one that decoded is the interesting case
-      display.setColor(rift_pal.fg);
-      snprintf(tmp, sizeof(tmp), "%d", (int) e->rssi);
-      display.drawTextRightAlign(206, y, tmp);
-      // Formatted from the magnitude with an explicit sign. Dividing a negative by
-      // four truncates toward zero, so an SNR of -0.5 came out as "0.5" - the sign
-      // vanished for exactly the marginal packets this column exists to show.
-      {
-        int q = (int) e->snr4;
+      if (tx) {
+        // Air time, with its unit, so the value labels itself whatever the shared
+        // header says. A failed row prints "-" rather than "0ms": the send-timeout
+        // path in Dispatcher never adds to the air-time total, so zero there is the
+        // absence of a measurement and not a measurement of zero.
+        display.setColor(fail ? rift_pal.accent : rift_pal.mid);
+        if (fail) {
+          strcpy(tmp, "-");
+        } else {
+          snprintf(tmp, sizeof(tmp), "%ums", (unsigned) e->air_ms);
+        }
+        display.drawTextRightAlign(262, y, tmp);
+      } else {
+        // RSSI and SNR are what say whether a packet was comfortable or marginal, and
+        // a marginal one that decoded is the interesting case
+        display.setColor(rift_pal.fg);
+        snprintf(tmp, sizeof(tmp), "%d", (int) e->rx.rssi);
+        display.drawTextRightAlign(206, y, tmp);
+        // Formatted from the magnitude with an explicit sign. Dividing a negative by
+        // four truncates toward zero, so an SNR of -0.5 came out as "0.5" - the sign
+        // vanished for exactly the marginal packets this column exists to show.
+        int q = (int) e->rx.snr4;
         bool neg = q < 0;
         if (neg) q = -q;
         snprintf(tmp, sizeof(tmp), "%s%d.%d", neg ? "-" : "", q / 4, (q % 4) * 25 / 10);
+        display.drawTextRightAlign(262, y, tmp);
       }
-      display.drawTextRightAlign(262, y, tmp);
+
+      display.setColor(rift_pal.mid);
       snprintf(tmp, sizeof(tmp), "%u", (unsigned) e->len);
       display.drawTextRightAlign(316, y, tmp);
     }
