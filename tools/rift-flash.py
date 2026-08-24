@@ -44,6 +44,9 @@ def esptool_cmd():
     return [sys.executable, tool]
 
 
+_chunks_written = 0
+
+
 def run(cmd, attempts=4):
     """Write one chunk, retrying a failed attempt.
 
@@ -57,16 +60,24 @@ def run(cmd, attempts=4):
     Each esptool invocation resets the board, so a retry is a clean attempt at that
     chunk rather than a resumption of a partial one.
     """
+    global _chunks_written
     print("  " + " ".join(str(c) for c in cmd[2:] if not str(c).endswith("esptool.py")))
     for attempt in range(1, attempts + 1):
         if subprocess.call(cmd) == 0:
+            _chunks_written += 1
             return
         if attempt < attempts:
             # the port often needs a moment before it will open again
             print("  attempt %d failed, retrying in 3s" % attempt)
             time.sleep(3)
-    sys.exit("write failed after %d attempts - the image is now partly written, "
-             "so run this again before power-cycling" % attempts)
+    if _chunks_written:
+        sys.exit("write failed after %d attempts - the image is now partly written, "
+                 "so run this again before power-cycling" % attempts)
+    # Nothing reached the chip, so the device is untouched. Saying "partly
+    # written" here sends the reader looking for a half-flashed device that
+    # does not exist.
+    sys.exit("write failed after %d attempts and no chunk was written - the "
+             "device is untouched" % attempts)
 
 
 def main():
@@ -146,6 +157,18 @@ def main():
         return
     if not args.port:
         sys.exit("--port is required unless --dry-run")
+
+    # Fail before writing anything if the board is not there.
+    # Without this the first chunk burns four attempts and twelve seconds on a
+    # port that does not exist, and reports a partly-written image.
+    try:
+        from serial.tools import list_ports
+        ports = [p.device for p in list_ports.comports()]
+        if ports and args.port not in ports:
+            sys.exit("%s is not connected - available: %s"
+                     % (args.port, ", ".join(ports)))
+    except ImportError:
+        pass  # no pySerial: let esptool report it instead
 
     # --before default_reset on both halves: leaving the first in the bootloader
     # and reconnecting with --before no_reset was tried, and the reconnect timed
