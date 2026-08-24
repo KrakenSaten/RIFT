@@ -1161,3 +1161,128 @@ static inline int riftEvictIndex(const RiftConvKey* keys, int n) {
   }
   return 0;   // unreachable: riftLargestConv only names a key it found
 }
+
+// ---- Repeater status ------------------------------------------------------
+//
+// A repeater answers REQ_TYPE_GET_STATUS with a four-byte tag followed by its
+// RepeaterStats struct, memcpy'd straight out of the sender's memory. RIFT does
+// not include the repeater's header, and that struct has grown across firmware
+// versions: err_events was called n_full_events, and the last twelve bytes did
+// not exist at all. An older repeater therefore answers with a shorter reply.
+//
+// So this decodes field by field against the length actually received, rather
+// than copying into a struct of its own. A struct copy would read past a short
+// reply and show an old repeater twelve bytes of whatever followed it in the
+// receive buffer, presented as duplicate counts and receive airtime. The two
+// growth tiers carry a flag each so the screen can print a dash instead of a
+// number nobody sent.
+//
+// Byte order is the sender's memcpy of a packed little-endian struct, which is
+// what every MeshCore target is, so each field is read back the same way.
+
+#define RIFT_STATS_TAG_LEN   4    // response tag, ahead of the struct
+#define RIFT_STATS_MIN      44    // through last_snr: sent by every version
+#define RIFT_STATS_DUPS     48    // adds n_direct_dups, n_flood_dups
+#define RIFT_STATS_FULL     56    // adds total_rx_air_time_secs, n_recv_errors
+
+struct RiftRepeaterStats {
+  uint16_t batt_milli_volts;
+  uint16_t tx_queue_len;
+  int16_t  noise_floor;
+  int16_t  last_rssi;
+  uint32_t packets_recv;
+  uint32_t packets_sent;
+  uint32_t air_time_secs;
+  uint32_t up_time_secs;
+  uint32_t sent_flood;
+  uint32_t sent_direct;
+  uint32_t recv_flood;
+  uint32_t recv_direct;
+  uint16_t err_events;
+  int16_t  last_snr_x4;     // SNR times four, as the repeater sends it
+  uint16_t direct_dups;
+  uint16_t flood_dups;
+  uint32_t rx_air_time_secs;
+  uint32_t recv_errors;
+  bool have_dups;           // reply reached RIFT_STATS_DUPS
+  bool have_rx_air;         // reply reached RIFT_STATS_FULL
+};
+
+static inline uint16_t riftRd16(const uint8_t* p) {
+  return (uint16_t) ((uint16_t) p[0] | ((uint16_t) p[1] << 8));
+}
+
+static inline uint32_t riftRd32(const uint8_t* p) {
+  return (uint32_t) p[0] | ((uint32_t) p[1] << 8)
+       | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
+}
+
+// `data`/`len` are the whole response as onContactResponse receives it, tag
+// included, so a caller cannot get the offset wrong by forgetting to skip it.
+static inline bool riftDecodeRepeaterStats(const uint8_t* data, int len,
+                                          RiftRepeaterStats* out) {
+  if (data == NULL || out == NULL) return false;
+  if (len < RIFT_STATS_TAG_LEN + RIFT_STATS_MIN) return false;
+
+  const uint8_t* s = data + RIFT_STATS_TAG_LEN;
+  int n = len - RIFT_STATS_TAG_LEN;
+
+  memset(out, 0, sizeof(*out));
+  out->batt_milli_volts = riftRd16(s + 0);
+  out->tx_queue_len     = riftRd16(s + 2);
+  out->noise_floor      = (int16_t) riftRd16(s + 4);
+  out->last_rssi        = (int16_t) riftRd16(s + 6);
+  out->packets_recv     = riftRd32(s + 8);
+  out->packets_sent     = riftRd32(s + 12);
+  out->air_time_secs    = riftRd32(s + 16);
+  out->up_time_secs     = riftRd32(s + 20);
+  out->sent_flood       = riftRd32(s + 24);
+  out->sent_direct      = riftRd32(s + 28);
+  out->recv_flood       = riftRd32(s + 32);
+  out->recv_direct      = riftRd32(s + 36);
+  out->err_events       = riftRd16(s + 40);
+  out->last_snr_x4      = (int16_t) riftRd16(s + 42);
+
+  if (n >= RIFT_STATS_DUPS) {
+    out->direct_dups = riftRd16(s + 44);
+    out->flood_dups  = riftRd16(s + 46);
+    out->have_dups   = true;
+  }
+  if (n >= RIFT_STATS_FULL) {
+    out->rx_air_time_secs = riftRd32(s + 48);
+    out->recv_errors      = riftRd32(s + 52);
+    out->have_rx_air      = true;
+  }
+  return true;
+}
+
+// Uptime and airtime arrive as seconds and are read at a glance, so the unit
+// that matters is the largest one present rather than a full breakdown. Written
+// into a caller-owned buffer because nothing here may allocate.
+static inline void riftFormatDuration(uint32_t secs, char* buf, int sz) {
+  if (buf == NULL || sz < 1) return;
+  if (sz < 8) { buf[0] = 0; return; }   // "999d23h" is seven plus terminator
+
+  uint32_t mins = secs / 60;
+  uint32_t hours = mins / 60;
+  uint32_t days = hours / 24;
+  if (days > 0) {
+    snprintf(buf, (size_t) sz, "%ud%02uh", (unsigned) days, (unsigned) (hours % 24));
+  } else if (hours > 0) {
+    snprintf(buf, (size_t) sz, "%uh%02um", (unsigned) hours, (unsigned) (mins % 60));
+  } else if (mins > 0) {
+    snprintf(buf, (size_t) sz, "%um%02us", (unsigned) mins, (unsigned) (secs % 60));
+  } else {
+    snprintf(buf, (size_t) sz, "%us", (unsigned) secs);
+  }
+}
+
+// Airtime as a share of uptime is the number that says whether a repeater is
+// busy or merely switched on, and it is the one a duty-cycle limit is stated
+// against. Returned in tenths of a percent to stay integer; -1 when uptime is
+// zero, which is a repeater that has just booted rather than an idle one.
+static inline int riftDutyTenths(uint32_t air_secs, uint32_t up_secs) {
+  if (up_secs == 0) return -1;
+  if (air_secs > up_secs) return -1;      // cannot be over 100%: reject, don't clamp
+  return (int) ((air_secs * 1000ULL) / up_secs);
+}

@@ -2,6 +2,8 @@
 #include "RiftLogic.h"
 #include "RiftEventLog.h"
 #include "RiftRxLog.h"
+#include "RiftRepeater.h"
+#include <helpers/sensors/LPPDataHelpers.h>   // LPP_* type codes, for the telemetry labels
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/UTF8Helpers.h>
 #include "../MyMesh.h"
@@ -641,12 +643,17 @@ struct RiftTextInput {
   char buf[68];       // fits a 44-char base64 PSK and a 32-char name
   int len;
   int cap;
+  // Renders as dots instead of characters. For the repeater password, which is
+  // somebody else's shared secret and is typed in the field where the screen is
+  // the most public part of the device.
+  bool mask;
 
   void begin(const char* initial, int capacity) {
     cap = (capacity < (int) sizeof(buf) - 1) ? capacity : (int) sizeof(buf) - 1;
     StrHelper::strncpy(buf, initial ? initial : "", sizeof(buf));
     len = strlen(buf);
     if (len > cap) { len = cap; buf[len] = 0; }
+    mask = false;
   }
 
   // returns true if the key was consumed as text editing
@@ -665,13 +672,22 @@ struct RiftTextInput {
 
   void render(DisplayDriver& display, int x, int y, int max_px) {
     int max_chars = (max_px - 2 * RIFT_CHAR_W) / RIFT_CHAR_W;
-    const char* shown = buf;
-    if (len > max_chars && max_chars > 0) shown = buf + (len - max_chars);
 
     display.setColor(UIColor::primary_txt);
     display.setCursor(x, y);
     display.print("> ");
-    display.print(shown);
+    if (mask) {
+      // One dot per character actually held, capped at what fits. Never the
+      // characters themselves, and never a fixed width that would hide whether
+      // the keyboard is registering at all.
+      int n = len;
+      if (max_chars > 0 && n > max_chars) n = max_chars;
+      for (int i = 0; i < n; i++) display.print(RIFT_DOT);
+    } else {
+      const char* shown = buf;
+      if (len > max_chars && max_chars > 0) shown = buf + (len - max_chars);
+      display.print(shown);
+    }
     display.print("_");
   }
 };
@@ -3247,7 +3263,10 @@ class RiftConstellationScreen : public RiftScreen {
         return true;
       }
       if (!riftCanDirectMessage(contact->type)) {
-        _task->showAlert("Repeaters can't receive a DM", 1600);
+        // Not a dead end any more. A repeater or room server cannot take a
+        // direct message, but it can be logged into and read, so Enter opens
+        // that panel instead of reporting what the key cannot do.
+        _task->openRepeaterPanel(key);
         return true;
       }
       _task->startDirectMessage(key);
@@ -5679,6 +5698,332 @@ public:
   }
 };
 
+// Repeater control: log in, read the stats, ask for telemetry, run a CLI command.
+//
+// An overlay reached with ENTER on a repeater in NODES, where that key used to
+// report "Repeaters can't receive a DM" and stop. Everything it shows was
+// already arriving at the radio and being forwarded to a phone that is usually
+// not attached; RiftRepeater.h keeps it, and this draws it.
+//
+// Three modes rather than three screens. Typing a password and typing a command
+// are the same interaction with a different prompt, and a mode keeps the stats
+// on screen underneath instead of replacing them.
+#define RIFT_RP_VIEW      0
+#define RIFT_RP_PASSWORD  1
+#define RIFT_RP_COMMAND   2
+
+// LPP type to a label narrow enough for the panel. Only the types the reader in
+// MyMesh decodes can reach here, so anything else is a bug rather than a device
+// we have not met.
+static const char* riftLppLabel(uint8_t type) {
+  switch (type) {
+    case LPP_VOLTAGE:             return "volt";
+    case LPP_CURRENT:             return "amp";
+    case LPP_POWER:               return "watt";
+    case LPP_TEMPERATURE:         return "temp";
+    case LPP_BAROMETRIC_PRESSURE: return "pres";
+    case LPP_RELATIVE_HUMIDITY:   return "hum";
+    case LPP_ALTITUDE:            return "alt";
+    default:                      return "?";
+  }
+}
+
+static const char* riftLppUnit(uint8_t type) {
+  switch (type) {
+    case LPP_VOLTAGE:             return "V";
+    case LPP_CURRENT:             return "A";
+    case LPP_POWER:               return "W";
+    case LPP_TEMPERATURE:         return "C";
+    case LPP_BAROMETRIC_PRESSURE: return "hPa";
+    case LPP_RELATIVE_HUMIDITY:   return "%";
+    case LPP_ALTITUDE:            return "m";
+    default:                      return "";
+  }
+}
+
+class RiftRepeaterScreen : public RiftScreen {
+  UITask* _task;
+  uint8_t _key[6];
+  bool _have_key;
+  int _mode;
+  RiftTextInput _edit;
+
+  ContactInfo* contact() const {
+    if (!_have_key) return NULL;
+    return the_mesh.lookupContactByPubKey((uint8_t*) _key, 6);
+  }
+
+  static const char* loginText(uint8_t state) {
+    switch (state) {
+      case RIFT_LOGIN_WAITING: return "logging in";
+      case RIFT_LOGIN_OK:      return "logged in";
+      case RIFT_LOGIN_FAILED:  return "login refused";
+      case RIFT_LOGIN_TIMEOUT: return "no answer";
+      default:                 return "not logged in";
+    }
+  }
+
+public:
+  RiftRepeaterScreen(UITask* task) : _task(task), _have_key(false), _mode(RIFT_RP_VIEW) {
+    memset(_key, 0, sizeof(_key));
+  }
+
+  bool isOverlay() const override { return true; }
+  // Modal only while typing. In view mode an arriving message may take the
+  // screen, the same as anywhere else; half-typed text may not be thrown away.
+  bool isModal() const override { return _mode != RIFT_RP_VIEW; }
+
+  bool openFor(const uint8_t* pub_key) {
+    if (pub_key == NULL) return false;
+    ContactInfo* c = the_mesh.lookupContactByPubKey((uint8_t*) pub_key, 6);
+    if (c == NULL) return false;
+    memcpy(_key, pub_key, sizeof(_key));
+    _have_key = true;
+    _mode = RIFT_RP_VIEW;
+    riftRepeater().setTarget(pub_key);   // drops any state belonging to another node
+    return true;
+  }
+
+  int render(DisplayDriver& display) override {
+    RiftRepeaterSession& s = riftRepeater();
+    if (s.checkTimeout()) {
+      // Said once, here, rather than every frame: checkTimeout only returns true
+      // on the transition.
+      riftLogf("repeater: no answer");
+    }
+
+    const int x = 4, w = display.width() - 8;
+    const int y = 18, h = 202;
+
+    display.setColor(rift_pal.bg);
+    display.fillRect(x, y, w, h);
+    display.setColor(rift_pal.accent);
+    display.drawRect(x, y, w, h);
+
+    display.setTextSize(1);
+    const int lx = x + 5;
+    int ly = y + 5;
+
+    ContactInfo* c = contact();
+    char line[64];
+    snprintf(line, sizeof(line), "%s", c ? c->name : "gone");
+    display.setColor(rift_pal.accent);
+    display.drawTextLeftAlign(lx, ly, line);
+
+    // Session state on the same row, right-aligned, because it is the one thing
+    // that decides what the keys below will do.
+    display.setColor(s.loginState() == RIFT_LOGIN_OK ? UIColor::primary_txt : rift_pal.dim);
+    snprintf(line, sizeof(line), "%s%s", loginText(s.loginState()),
+             s.isAdmin() ? " (admin)" : "");
+    display.drawTextRightAlign(x + w - 5, ly, line);
+    ly += 12;
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(lx, ly, w - 10, 1);
+    ly += 5;
+
+    // ---- stats ----
+    if (s.haveStats()) {
+      const RiftRepeaterStats& st = s.stats();
+      char up[12], air[12];
+      riftFormatDuration(st.up_time_secs, up, sizeof(up));
+      riftFormatDuration(st.air_time_secs, air, sizeof(air));
+      int duty = riftDutyTenths(st.air_time_secs, st.up_time_secs);
+
+      display.setColor(UIColor::primary_txt);
+      snprintf(line, sizeof(line), "up %-8s  air %-8s", up, air);
+      display.drawTextLeftAlign(lx, ly, line);
+      ly += 11;
+
+      if (duty >= 0) {
+        snprintf(line, sizeof(line), "duty %d.%d%%   queue %u",
+                 duty / 10, duty % 10, (unsigned) st.tx_queue_len);
+      } else {
+        snprintf(line, sizeof(line), "duty -       queue %u", (unsigned) st.tx_queue_len);
+      }
+      display.drawTextLeftAlign(lx, ly, line);
+      ly += 11;
+
+      snprintf(line, sizeof(line), "batt %u.%02uV  noise %d",
+               (unsigned) (st.batt_milli_volts / 1000),
+               (unsigned) ((st.batt_milli_volts % 1000) / 10),
+               (int) st.noise_floor);
+      display.drawTextLeftAlign(lx, ly, line);
+      ly += 11;
+
+      // SNR arrives multiplied by four. Printed as one decimal rather than
+      // divided into an int, which would report -6.5 dB as -6. The sign is
+      // carried separately: between -1 and 0 the integer part is zero, so
+      // printing it signed loses the minus - and -0.5 dB is a normal reading.
+      int snr10 = (st.last_snr_x4 * 10) / 4;
+      int snr_abs = snr10 < 0 ? -snr10 : snr10;
+      snprintf(line, sizeof(line), "rssi %d      snr %s%d.%d",
+               (int) st.last_rssi, snr10 < 0 ? "-" : "", snr_abs / 10, snr_abs % 10);
+      display.drawTextLeftAlign(lx, ly, line);
+      ly += 11;
+
+      snprintf(line, sizeof(line), "rx %u  tx %u  err %u",
+               (unsigned) st.packets_recv, (unsigned) st.packets_sent,
+               (unsigned) st.err_events);
+      display.drawTextLeftAlign(lx, ly, line);
+      ly += 11;
+
+      // A dash where an older repeater sent nothing, never a zero we invented.
+      if (st.have_dups) {
+        snprintf(line, sizeof(line), "dups %u/%u",
+                 (unsigned) st.direct_dups, (unsigned) st.flood_dups);
+      } else {
+        snprintf(line, sizeof(line), "dups -    (older firmware)");
+      }
+      display.setColor(st.have_dups ? UIColor::primary_txt : rift_pal.dim);
+      display.drawTextLeftAlign(lx, ly, line);
+      ly += 11;
+
+      char age[12];
+      riftFormatDuration((millis() - s.statsAt()) / 1000, age, sizeof(age));
+      display.setColor(rift_pal.dim);
+      snprintf(line, sizeof(line), "read %s ago", age);
+      display.drawTextLeftAlign(lx, ly, line);
+      ly += 12;
+    } else {
+      display.setColor(rift_pal.dim);
+      display.drawTextLeftAlign(lx, ly, "no stats yet - press S");
+      ly += 12;
+    }
+
+    // ---- telemetry ----
+    if (s.haveTelemetry()) {
+      display.setColor(rift_pal.rule);
+      display.fillRect(lx, ly, w - 10, 1);
+      ly += 4;
+      display.setColor(UIColor::primary_txt);
+      int shown = 0;
+      char cell[20];
+      line[0] = 0;
+      for (int i = 0; i < s.telemetryCount() && shown < 6; i++) {
+        const RiftTelemReading& r = s.telemetry(i);
+        snprintf(cell, sizeof(cell), "%s %.1f%s ",
+                 riftLppLabel(r.type), r.value, riftLppUnit(r.type));
+        if (strlen(line) + strlen(cell) >= sizeof(line)) break;
+        strcat(line, cell);
+        shown++;
+      }
+      display.drawTextLeftAlign(lx, ly, line);
+      ly += 12;
+    }
+
+    // ---- CLI transcript, newest first ----
+    if (s.cliCount() > 0) {
+      display.setColor(rift_pal.rule);
+      display.fillRect(lx, ly, w - 10, 1);
+      ly += 4;
+      // Stops at the footer rather than at a row count: the blocks above vary in
+      // height, and a fixed count overran the panel when stats were present.
+      const int footer_y = y + h - 26;
+      for (int i = 0; i < s.cliCount() && ly + 10 <= footer_y; i++) {
+        display.setColor(s.cliLine(i)[0] == '>' ? rift_pal.dim : UIColor::primary_txt);
+        display.drawTextLeftAlign(lx, ly, s.cliLine(i));
+        ly += 10;
+      }
+    }
+
+    // ---- footer: prompt or key hints ----
+    const int fy = y + h - 24;
+    if (_mode != RIFT_RP_VIEW) {
+      display.setColor(rift_pal.accent);
+      display.drawTextLeftAlign(lx, fy,
+        _mode == RIFT_RP_PASSWORD ? "PASSWORD" : "COMMAND");
+      _edit.render(display, lx, fy + 11, w - 10);
+      return 400;
+    }
+
+    display.setColor(rift_pal.dim);
+    if (s.pending() != RIFT_REP_IDLE) {
+      display.drawTextLeftAlign(lx, fy, "waiting for answer...");
+      display.drawTextLeftAlign(lx, fy + 11, "BACK close");
+      return 400;   // so the wait ends visibly rather than on the next keypress
+    }
+    display.drawTextLeftAlign(lx, fy, "L login   S stats   T telemetry");
+    display.drawTextLeftAlign(lx, fy + 11,
+      s.isAdmin() ? "C command   BACK close" : "BACK close");
+    return 1000;
+  }
+
+  bool handleInput(char c) override {
+    RiftRepeaterSession& s = riftRepeater();
+
+    if (_mode != RIFT_RP_VIEW) {
+      if (c == KEY_ENTER) {
+        ContactInfo* ct = contact();
+        if (ct == NULL) { _task->showAlert("Contact is gone", 1400); _mode = RIFT_RP_VIEW; return true; }
+        uint32_t est = 0;
+        if (_mode == RIFT_RP_PASSWORD) {
+          if (!the_mesh.riftLogin(*ct, _edit.buf, est)) {
+            _task->showAlert("No packet free - try again", 1400);
+          }
+        } else {
+          if (_edit.len == 0) { _mode = RIFT_RP_VIEW; return true; }
+          if (!the_mesh.riftCliCommand(*ct, _edit.buf, est)) {
+            _task->showAlert("No packet free - try again", 1400);
+          }
+        }
+        // Wiped either way, and immediately: a password left in the edit buffer
+        // would be one keypress from being redrawn unmasked in command mode.
+        memset(_edit.buf, 0, sizeof(_edit.buf));
+        _edit.len = 0;
+        _mode = RIFT_RP_VIEW;
+        return true;
+      }
+      if (_edit.handleKey(c)) return true;
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) {
+        memset(_edit.buf, 0, sizeof(_edit.buf));
+        _edit.len = 0;
+        _mode = RIFT_RP_VIEW;
+        return true;
+      }
+      return true;   // no stray key navigates away mid-entry
+    }
+
+    if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _task->dismissOverlay(); return true; }
+
+    ContactInfo* ct = contact();
+    if (ct == NULL) { _task->dismissOverlay(); return true; }
+
+    // One request at a time, because the radio has one pending slot: starting a
+    // second would discard the first without saying so.
+    bool busy = s.pending() != RIFT_REP_IDLE;
+    uint32_t est = 0;
+
+    if (c == 'l' || c == 'L') {
+      if (busy) { _task->showAlert("Still waiting", 1200); return true; }
+      _edit.begin("", 31);
+      _edit.mask = true;
+      _mode = RIFT_RP_PASSWORD;
+      return true;
+    }
+    if (c == 's' || c == 'S') {
+      if (busy) { _task->showAlert("Still waiting", 1200); return true; }
+      if (!the_mesh.riftStatusReq(*ct, est)) _task->showAlert("No packet free - try again", 1400);
+      return true;
+    }
+    if (c == 't' || c == 'T') {
+      if (busy) { _task->showAlert("Still waiting", 1200); return true; }
+      if (!the_mesh.riftTelemetryReq(*ct, est)) _task->showAlert("No packet free - try again", 1400);
+      return true;
+    }
+    if (c == 'c' || c == 'C') {
+      if (busy) { _task->showAlert("Still waiting", 1200); return true; }
+      // Guests can read stats, but the CLI is admin-only on the far side. Refusing
+      // here means the airtime is not spent on a command that will be rejected.
+      if (!s.isAdmin()) { _task->showAlert("Log in as admin first", 1600); return true; }
+      _edit.begin("", 63);
+      _mode = RIFT_RP_COMMAND;
+      return true;
+    }
+    return true;   // the panel owns its keys; nothing navigates out but BACK
+  }
+};
+
 // Nordic character picker: a long press on a base vowel offers its forms.
 //
 // An overlay, not a screen - the third use of that mechanism and the reason it
@@ -5965,6 +6310,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   nordic_picker = new RiftNordicPickerScreen(this, comms);
   discover_overlay = new RiftDiscoverScreen(this);
   rename_watch = new RiftRenameWatchScreen(this);
+  repeater_panel = new RiftRepeaterScreen(this);
   nav_idx = 0;
   setCurrScreen(splash);
 }
@@ -6247,6 +6593,14 @@ void UITask::openRenameWatch(int watch_idx) {
   if (rename_watch == NULL || _overlay != NULL) return;
   if (!((RiftRenameWatchScreen *) rename_watch)->openFor(watch_idx)) return;
   pushOverlay(rename_watch);
+}
+
+// Repeater control. Refuses quietly when the key is not a contact - the caller
+// offers a heard node, and a node can be heard without ever being added.
+void UITask::openRepeaterPanel(const uint8_t* pub_key) {
+  if (repeater_panel == NULL || _overlay != NULL) return;
+  if (!((RiftRepeaterScreen *) repeater_panel)->openFor(pub_key)) return;
+  pushOverlay(repeater_panel);
 }
 
 void UITask::gotoCommsScreen() {

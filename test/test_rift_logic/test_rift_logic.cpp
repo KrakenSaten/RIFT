@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <cmath>
+#include <vector>
 
 // Included by relative path on purpose: this keeps the native test environments
 // exactly as upstream has them. The header is standalone - stdint and string.h
@@ -1442,6 +1443,172 @@ TEST(ChannelFingerprint, LengthIsPartOfTheInput) {
     memset(k, 0, sizeof(k));
     for (int i = 0; i < 16; i++) k[i] = (uint8_t) (i + 1);
     EXPECT_NE(riftChannelFingerprint(k, 16), riftChannelFingerprint(k, 32));
+}
+
+// ---- Repeater status decoding ---------------------------------------------
+//
+// The reply is a foreign struct copied out of another device's memory, and it
+// has grown across firmware versions. These cover the short forms an older
+// repeater sends, because that is where a struct copy would have read past the
+// end and shown invented numbers.
+
+namespace {
+
+// Builds a reply the way a repeater does: four-byte tag, then the struct.
+// `stats_len` truncates it to what an older firmware would have sent.
+std::vector<uint8_t> makeStatsReply(int stats_len) {
+  std::vector<uint8_t> r;
+  for (int i = 0; i < 4; i++) r.push_back(0xAA);   // tag
+  auto u16 = [&](uint16_t v) { r.push_back(v & 0xFF); r.push_back(v >> 8); };
+  auto u32 = [&](uint32_t v) {
+    for (int i = 0; i < 4; i++) r.push_back((v >> (8 * i)) & 0xFF);
+  };
+  u16(4100);          // batt_milli_volts
+  u16(3);             // curr_tx_queue_len
+  u16((uint16_t)(int16_t)-118);  // noise_floor
+  u16((uint16_t)(int16_t)-92);   // last_rssi
+  u32(120000);        // n_packets_recv
+  u32(80000);         // n_packets_sent
+  u32(3600);          // total_air_time_secs
+  u32(864000);        // total_up_time_secs  (10 days)
+  u32(11);            // n_sent_flood
+  u32(22);            // n_sent_direct
+  u32(33);            // n_recv_flood
+  u32(44);            // n_recv_direct
+  u16(7);             // err_events
+  u16((uint16_t)(int16_t)-26); // last_snr x4  (-6.5 dB)
+  u16(55);            // n_direct_dups
+  u16(66);            // n_flood_dups
+  u32(1800);          // total_rx_air_time_secs
+  u32(9);             // n_recv_errors
+  r.resize(4 + stats_len);
+  return r;
+}
+
+}  // namespace
+
+TEST(RepeaterStats, DecodesEveryFieldOfAFullReply) {
+  auto r = makeStatsReply(RIFT_STATS_FULL);
+  RiftRepeaterStats s;
+  ASSERT_TRUE(riftDecodeRepeaterStats(r.data(), (int) r.size(), &s));
+
+  EXPECT_EQ(4100, s.batt_milli_volts);
+  EXPECT_EQ(3, s.tx_queue_len);
+  EXPECT_EQ(-118, s.noise_floor);
+  EXPECT_EQ(-92, s.last_rssi);
+  EXPECT_EQ(120000u, s.packets_recv);
+  EXPECT_EQ(80000u, s.packets_sent);
+  EXPECT_EQ(3600u, s.air_time_secs);
+  EXPECT_EQ(864000u, s.up_time_secs);
+  EXPECT_EQ(11u, s.sent_flood);
+  EXPECT_EQ(22u, s.sent_direct);
+  EXPECT_EQ(33u, s.recv_flood);
+  EXPECT_EQ(44u, s.recv_direct);
+  EXPECT_EQ(7, s.err_events);
+  EXPECT_EQ(-26, s.last_snr_x4);
+  EXPECT_EQ(55, s.direct_dups);
+  EXPECT_EQ(66, s.flood_dups);
+  EXPECT_EQ(1800u, s.rx_air_time_secs);
+  EXPECT_EQ(9u, s.recv_errors);
+  EXPECT_TRUE(s.have_dups);
+  EXPECT_TRUE(s.have_rx_air);
+}
+
+TEST(RepeaterStats, AShortReplyLeavesTheFieldsItDidNotCarryFlaggedAbsent) {
+  auto r = makeStatsReply(RIFT_STATS_MIN);
+  RiftRepeaterStats s;
+  ASSERT_TRUE(riftDecodeRepeaterStats(r.data(), (int) r.size(), &s));
+
+  // present in every version
+  EXPECT_EQ(864000u, s.up_time_secs);
+  EXPECT_EQ(-26, s.last_snr_x4);
+
+  // A struct copy would have shown whatever followed the reply here.
+  EXPECT_FALSE(s.have_dups);
+  EXPECT_FALSE(s.have_rx_air);
+  EXPECT_EQ(0, s.direct_dups);
+  EXPECT_EQ(0u, s.rx_air_time_secs);
+}
+
+TEST(RepeaterStats, TheMiddleTierIsReportedWithoutTheLastOne) {
+  auto r = makeStatsReply(RIFT_STATS_DUPS);
+  RiftRepeaterStats s;
+  ASSERT_TRUE(riftDecodeRepeaterStats(r.data(), (int) r.size(), &s));
+  EXPECT_TRUE(s.have_dups);
+  EXPECT_EQ(55, s.direct_dups);
+  EXPECT_EQ(66, s.flood_dups);
+  EXPECT_FALSE(s.have_rx_air);
+  EXPECT_EQ(0u, s.recv_errors);
+}
+
+TEST(RepeaterStats, ARelpyShorterThanTheCommonFieldsIsRefused) {
+  RiftRepeaterStats s;
+  for (int stats_len = 0; stats_len < RIFT_STATS_MIN; stats_len++) {
+    auto r = makeStatsReply(stats_len);
+    EXPECT_FALSE(riftDecodeRepeaterStats(r.data(), (int) r.size(), &s))
+        << "accepted a " << stats_len << "-byte struct";
+  }
+}
+
+TEST(RepeaterStats, NullArgumentsAreRefused) {
+  auto r = makeStatsReply(RIFT_STATS_FULL);
+  RiftRepeaterStats s;
+  EXPECT_FALSE(riftDecodeRepeaterStats(NULL, (int) r.size(), &s));
+  EXPECT_FALSE(riftDecodeRepeaterStats(r.data(), (int) r.size(), NULL));
+}
+
+TEST(RepeaterStats, ALongerReplyFromNewerFirmwareStillDecodes) {
+  // Forward compatibility: the struct grows again and we must read what we know
+  // rather than refuse the whole reply.
+  auto r = makeStatsReply(RIFT_STATS_FULL);
+  for (int i = 0; i < 16; i++) r.push_back(0x5A);
+  RiftRepeaterStats s;
+  ASSERT_TRUE(riftDecodeRepeaterStats(r.data(), (int) r.size(), &s));
+  EXPECT_EQ(864000u, s.up_time_secs);
+  EXPECT_TRUE(s.have_rx_air);
+  EXPECT_EQ(9u, s.recv_errors);
+}
+
+TEST(FormatDuration, PicksTheLargestUnitPresent) {
+  char b[16];
+  riftFormatDuration(45, b, sizeof(b));        EXPECT_STREQ("45s", b);
+  riftFormatDuration(90, b, sizeof(b));        EXPECT_STREQ("1m30s", b);
+  riftFormatDuration(3600, b, sizeof(b));      EXPECT_STREQ("1h00m", b);
+  riftFormatDuration(3600 + 1830, b, sizeof(b)); EXPECT_STREQ("1h30m", b);
+  riftFormatDuration(864000, b, sizeof(b));    EXPECT_STREQ("10d00h", b);
+  riftFormatDuration(0, b, sizeof(b));         EXPECT_STREQ("0s", b);
+}
+
+TEST(FormatDuration, RefusesABufferItCannotFillSafely) {
+  char b[4] = { 'x', 'x', 'x', 'x' };
+  riftFormatDuration(864000, b, 4);
+  EXPECT_STREQ("", b);   // empties rather than truncating to a wrong number
+}
+
+TEST(FormatDuration, ASevenCharacterResultFitsTheStatedMinimum) {
+  // The guard above claims eight bytes is enough. 999 days is the widest thing
+  // a uint32 of seconds can produce in the day branch.
+  char b[8];
+  riftFormatDuration(4294967295u, b, sizeof(b));
+  EXPECT_LT(strlen(b), sizeof(b));
+}
+
+TEST(DutyCycle, IsTenthsOfAPercentOfUptime) {
+  EXPECT_EQ(0, riftDutyTenths(0, 3600));
+  EXPECT_EQ(100, riftDutyTenths(360, 3600));      // 10.0%
+  EXPECT_EQ(1000, riftDutyTenths(3600, 3600));    // 100.0%
+  EXPECT_EQ(4, riftDutyTenths(1, 240));           // 0.4%
+}
+
+TEST(DutyCycle, RejectsRatherThanClampsWhatCannotBeTrue) {
+  EXPECT_EQ(-1, riftDutyTenths(3600, 0));         // just booted, not idle
+  EXPECT_EQ(-1, riftDutyTenths(3601, 3600));      // airtime over uptime
+}
+
+TEST(DutyCycle, DoesNotOverflowOnALongUptime) {
+  // air_secs * 1000 exceeds 32 bits above about 50 days of airtime, which a
+  // repeater left up for a year reaches.
+  EXPECT_EQ(500, riftDutyTenths(15768000u, 31536000u));   // half of a year
 }
 
 int main(int argc, char** argv) {

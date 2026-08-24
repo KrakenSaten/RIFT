@@ -208,6 +208,8 @@ private:
   RiftScreen* discover_overlay;
   // renames a watched RF device, raised from RADAR's watch list
   RiftScreen* rename_watch;
+  // repeater control, raised with Enter on a repeater in NODES
+  RiftScreen* repeater_panel;
 
   void userLedHandler();
 
@@ -230,6 +232,7 @@ public:
     nordic_picker = NULL;
     discover_overlay = NULL;
     rename_watch = NULL;
+    repeater_panel = NULL;
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
@@ -252,6 +255,10 @@ public:
   // Give a watched RF device a name you will recognise, instead of what it
   // broadcasts - which is often absent or duplicated.
   void openRenameWatch(int watch_idx);
+
+  // Log into a repeater and read it back. Reached with Enter on a repeater in
+  // NODES, where that key had nothing to offer before.
+  void openRepeaterPanel(const uint8_t* pub_key);
 
   // Real navigation to COMMS, dismissing any popup on the way. The message
   // preview needs it: Enter there means "show me the full history", and the

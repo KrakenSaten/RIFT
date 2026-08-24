@@ -34,7 +34,8 @@ for dir in test/test_*; do
     echo "$name: BUILD FAILED"; tail -15 "$OUT/$name.log"; fail=1; continue
   fi
   out=$("$OUT/$name.exe" 2>&1)
-  n=$(echo "$out" | grep -Eo '^\[==========\] [0-9]+ test' | head -1 | grep -Eo '[0-9]+')
+  # the PASSED line is written last, so it cannot be cut short by interleaving
+  n=$(echo "$out" | grep -Eo 'PASSED  \] [0-9]+ test' | tail -1 | grep -Eo '[0-9]+')
   if echo "$out" | grep -q '\[  FAILED  \]'; then
     echo "$name: TESTS FAILED"; echo "$out" | grep -E '^\[  FAILED  \]' | head -20; fail=1
   else

@@ -161,6 +161,25 @@ public:
   // the other builds do not include.
 #ifdef RIFT_VERSION
   int resolvePathHash(const uint8_t* hash, uint8_t hash_len, char* out_name, size_t name_len);
+
+  // ------------------------------------------------- repeater control
+  //
+  // The four things the device can ask a repeater, for the panel that reaches
+  // them from NODES. Each mirrors the companion command that already exists -
+  // same mesh call, same pending slot, same clearPendingReqs() first - so a
+  // reply is matched and routed by the code that already did it. The difference
+  // is only who asked: nothing here needs a phone.
+  //
+  // Each returns false when the send itself failed, and sets est_timeout so the
+  // UI can size its wait from the airtime rather than from a guess. Replies land
+  // in riftRepeater() via onContactResponse and onCommandDataRecv.
+  //
+  // The password is forwarded to sendLogin and not retained: no field of this
+  // class, and no log line, ever holds it.
+  bool riftLogin(const ContactInfo& contact, const char* password, uint32_t& est_timeout);
+  bool riftStatusReq(const ContactInfo& contact, uint32_t& est_timeout);
+  bool riftTelemetryReq(const ContactInfo& contact, uint32_t& est_timeout);
+  bool riftCliCommand(const ContactInfo& contact, const char* text, uint32_t& est_timeout);
 #endif
   // occupancy and pressure on the path cache, for the SYSTEM diagnostics
   int  getPathCacheUsed() const;
