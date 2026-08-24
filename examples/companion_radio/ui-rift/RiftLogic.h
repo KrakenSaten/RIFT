@@ -1058,8 +1058,12 @@ static inline uint8_t riftEncodeSettings(const RiftSettings& s) {
 //
 // Session-only by design: persisting it would mean another field in the settings
 // file, and a dot that survives a reboot matters less than one that is correct while
-// the device is on. The nav-bar dot keeps its own meaning - something unread
-// somewhere - and is not driven from here.
+// the device is on.
+//
+// The nav-bar dot *is* driven from here: it is any(). It used to be driven from the
+// companion queue length, which lit it for messages already read on the device, and
+// this became the single source of truth when that was fixed. The line that said
+// otherwise outlived the change by a release.
 //
 // Rows are ordered by when they were last marked, oldest first, so a full table
 // drops the conversation that has gone longest without a new message. Overflowing

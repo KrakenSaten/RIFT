@@ -1009,23 +1009,36 @@ void riftSaveSettings() {
 #else
   st.sound_on = false;
 #endif
+  // Every write is checked. This file used to be four bytes of flags, where a failed
+  // write was hard to care about; it now carries up to twelve watch identities and
+  // their names, so a partial write loses real state. Not staged through a temporary
+  // and renamed, for the same reason the message log stopped doing that: remove and
+  // rename are two operations on SPIFFS with a window between them holding no file at
+  // all, and it buys a guarantee it does not deliver.
+  //
+  // Nothing is deleted on failure. The reader stops when the file runs out, so a short
+  // file keeps its flags and loses only the watches that were not written - which is a
+  // better outcome than defaults, and the log line says it happened.
+  bool ok = true;
   uint8_t b[4] = { RIFT_SETTINGS_MAGIC0, RIFT_SETTINGS_MAGIC1,
                    RIFT_SETTINGS_VERSION, riftEncodeSettings(st) };
-  f.write(b, sizeof(b));
+  ok = ok && (f.write(b, sizeof(b)) == sizeof(b));
 #ifdef RIFT_RADAR
   // Appended rather than versioned. The reader below stops when the file runs out,
   // so a settings file written before this existed still loads its flags - bumping
   // the version would have discarded a working day/night choice to add a feature.
   uint8_t nw = (uint8_t) rf_watch_count;
-  f.write(&nw, 1);
-  for (int i = 0; i < rf_watch_count; i++) {
-    f.write(rf_watch[i].key, 6);
+  ok = ok && (f.write(&nw, 1) == 1);
+  for (int i = 0; i < rf_watch_count && ok; i++) {
+    ok = ok && (f.write(rf_watch[i].key, 6) == 6);
     uint8_t flag = rf_watch[i].is_wifi ? 1 : 0;
-    f.write(&flag, 1);
-    f.write((const uint8_t*) rf_watch[i].name, sizeof(rf_watch[i].name));
+    ok = ok && (f.write(&flag, 1) == 1);
+    ok = ok && (f.write((const uint8_t*) rf_watch[i].name, sizeof(rf_watch[i].name))
+                  == sizeof(rf_watch[i].name));
   }
 #endif
   f.close();
+  if (!ok) riftLogf("SETTINGS WRITE FAILED");
 #endif
 }
 int rift_nav_batt_pct = 0;
@@ -2349,9 +2362,12 @@ public:
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(CX, y, "KEYBOARD");
     // status is the only thing colour carries here, and only pass or fail
+    // "lost" and "not found" are different faults: one keyboard was never there, the
+    // other stopped answering and is being re-probed every few seconds.
     display.setColor(rift_keyboard.isPresent() ? rift_pal.ok : rift_pal.accent);
     display.drawTextRightAlign(CR, y,
-                               rift_keyboard.isPresent() ? "ok" : "not found");
+                               rift_keyboard.isPresent() ? "ok"
+                               : (rift_keyboard.wasLost() ? "lost, retrying" : "not found"));
     y += RIFT_LINE_H;
 
     // Two values, because they can differ and the difference is the interesting
@@ -2466,7 +2482,7 @@ public:
       y += RIFT_LINE_H;
     }
 
-    // Occupancy and pressure on the path cache. 16 slots is a guess until it is
+    // Occupancy and pressure on the path cache. The size is a guess until it is
     // measured against a real mesh, and an eviction count is what says whether the
     // number is too small - a cache at 16/16 with evictions climbing is a mesh this
     // screen cannot show all of, which is a different problem from a layout that

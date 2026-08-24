@@ -18,6 +18,14 @@
 #ifndef KEYBOARD_BOOT_MILLIS
   #define KEYBOARD_BOOT_MILLIS 1500   // how long to keep probing for the co-processor
 #endif
+// How long the driver waits before probing a keyboard it has given up on. The point
+// of giving up is to keep a broken peripheral off the main loop, which a probe every
+// few seconds does not undo - and without it a transient I2C glitch cost the physical
+// keyboard until the next reboot, in the field, with no way to tell why.
+#ifndef KEYBOARD_REPROBE_MILLIS
+  #define KEYBOARD_REPROBE_MILLIS 4000
+#endif
+
 #ifndef KEYBOARD_MAX_FAILURES
   #define KEYBOARD_MAX_FAILURES 10
 #endif
@@ -41,6 +49,8 @@
 class TDeckKeyboard {
   bool _present;
   uint8_t _failures;
+  bool _lost;                 // was present, then stopped answering
+  unsigned long _last_reprobe;
   // elapsed-since, not deadline-in-future: millis() wraps after ~49 days and a
   // future deadline compares as already-past across the wrap
   unsigned long _last_poll;
@@ -52,11 +62,16 @@ class TDeckKeyboard {
   uint8_t scanBus();
 
 public:
-  TDeckKeyboard() : _present(false), _failures(0), _last_poll(0), _seen_count(0), _last_raw(0), _last_seen(0) { }
+  TDeckKeyboard() : _present(false), _failures(0), _lost(false), _last_reprobe(0),
+                    _last_poll(0), _seen_count(0), _last_raw(0), _last_seen(0) { }
 
   void begin();
 
   bool isPresent() const { return _present; }
+  // Present at boot and not answering now. SYSTEM can say "lost" rather than
+  // "not found", which are different faults: one is a keyboard that was never
+  // there, the other one that stopped.
+  bool wasLost() const { return _lost; }
 
   // addresses seen on the bus at begin() - shown on the SYSTEM screen so the
   // real bus layout can be read off the device itself

@@ -86,7 +86,13 @@ void ST7789NativeDisplay::turnOff() {
 }
 
 void ST7789NativeDisplay::clear() {
-  display.fillScreen(ST77XX_BLACK);
+  // Through _target, like every other drawing call. Going straight to the panel while
+  // a canvas is active clears what is on screen and leaves the canvas holding the
+  // previous frame, so the next endFrame() blits it back and the clear undoes itself.
+  // Nothing in RIFT calls clear() mid-frame today, which is why it has never been
+  // seen - but an abstraction that is right except in one function is a trap left for
+  // whoever calls it next.
+  _target->fillScreen(ST77XX_BLACK);
 }
 
 void ST7789NativeDisplay::startFrame(ColorVal bkg) {

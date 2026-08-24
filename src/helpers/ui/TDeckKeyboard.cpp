@@ -44,14 +44,34 @@ void TDeckKeyboard::begin() {
 }
 
 char TDeckKeyboard::poll() {
-  if (!_present) return 0;
-
   unsigned long now = millis();
+
+  // Given up on, but not for good. Polling stops at the normal rate so a broken
+  // peripheral cannot hold up the main loop - there is no watchdog on it - and a
+  // probe every four seconds is cheap enough not to reintroduce that while still
+  // letting the keyboard come back. A transient I2C glitch used to cost the physical
+  // keyboard until the next reboot.
+  if (!_present) {
+    if (!_lost) return 0;                        // never detected: nothing to recover
+    if (now - _last_reprobe < KEYBOARD_REPROBE_MILLIS) return 0;
+    _last_reprobe = now;
+    if (i2c_probe(KEYBOARD_I2C_ADDR)) {
+      _present = true;
+      _lost = false;
+      _failures = 0;
+    }
+    return 0;
+  }
+
   if (now - _last_poll < KEYBOARD_POLL_MILLIS) return 0;
   _last_poll = now;
 
   if (!i2c_probe(KEYBOARD_I2C_ADDR)) {
-    if (++_failures >= KEYBOARD_MAX_FAILURES) _present = false;  // give up for good
+    if (++_failures >= KEYBOARD_MAX_FAILURES) {
+      _present = false;
+      _lost = true;                              // eligible for the slow re-probe
+      _last_reprobe = now;
+    }
     return 0;
   }
 

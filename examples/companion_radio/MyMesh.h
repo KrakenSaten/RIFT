@@ -428,7 +428,7 @@ private:
   #define ADVERT_PATH_TABLE_SIZE   96
   AdvertPath advert_paths[ADVERT_PATH_TABLE_SIZE]; // circular table
   // How many times a live entry has been dropped to make room. Exposed because it
-  // is the number that says whether 16 slots is enough for the mesh in front of you,
+  // is the number that says whether the cache is big enough for the mesh in front of
   // and the alternative to guessing is measuring it in the field.
   uint16_t path_evictions = 0;
 };
