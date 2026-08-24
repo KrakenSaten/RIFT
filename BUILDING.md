@@ -40,6 +40,10 @@ pacman -S --needed mingw-w64-ucrt-x86_64-gcc
 
 and put `C:\msys64\ucrt64\bin` on PATH. Verified with GCC 16.1.0 and 16.2.0.
 
+If you would rather not install a toolchain, `tools/run-native-tests.sh` builds
+the same suites with `zig c++` from the `ziglang` pip package, which is already
+in the venv. It mirrors both native environments and prints one line per suite.
+
 ---
 
 ## Commands

@@ -76,3 +76,9 @@ jobs:
 
       - name: Run Unit Tests
         run: pio test -e native -e native_kiss_modem -vv
+
+      # The companion command parser is a 61-branch if/else chain over a
+      # host-supplied frame. Six branches were found acting on bytes the
+      # host may never have sent; this fails the build if a seventh appears.
+      - name: Audit companion command guards
+        run: python3 tools/audit-cmd-guards.py
