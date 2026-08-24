@@ -1178,6 +1178,13 @@ bool MyMesh::onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t i
 #define CTL_TYPE_NODE_DISCOVER_RESP  0x90
 
 bool MyMesh::startRepeaterDiscovery() {
+  // Defence in depth, not a fix: UITask::startRepeaterDiscovery already refuses while
+  // a round is open and re-opens the progress overlay instead. This is here because
+  // re-arming would issue a new tag and reset the count, so every repeater that had
+  // already answered would be discarded - and a method that destroys results should
+  // not depend on its caller remembering to check.
+  if (isDiscovering()) return false;
+
   uint8_t data[10];
   data[0] = CTL_TYPE_NODE_DISCOVER_REQ;      // prefix_only = 0, so we get full keys
   data[1] = (1 << ADV_TYPE_REPEATER);        // type filter: repeaters only

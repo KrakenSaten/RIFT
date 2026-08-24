@@ -2119,9 +2119,15 @@ private:
     // radio enforces, one flood advert is a large fraction of the whole allowance,
     // and "why will it not send" has an answer here rather than nowhere.
     //
-    // Dispatcher defers the next transmit once the budget falls under 100ms, so that
-    // is where the number turns accent: below it the radio is not refusing, it is
-    // waiting, and those look identical from outside.
+    // Accent below 100ms, which is MIN_TX_BUDGET_RESERVE_MS - the floor under which
+    // nothing can transmit at all.
+    //
+    // It is a floor and not the whole rule. Dispatcher also requires at least half the
+    // next packet's estimated airtime (MIN_TX_BUDGET_AIRTIME_DIV), so a 777ms advert is
+    // already being deferred at around 389ms while this figure still reads as normal.
+    // The threshold cannot be exact here because the size of the next packet is not
+    // known yet; what the number does say truthfully is how much allowance is left,
+    // and that below 100ms the answer to "why will it not send" is "it is waiting".
     unsigned long budget = the_mesh.getRemainingTxBudget();
     char bb[20];
     if (budget >= 1000) {
