@@ -1398,12 +1398,24 @@ TEST(ChannelIdentity, TheSameKeyInADifferentSlotDoesNotMatch) {
 // An entry restored from a log written before the fingerprint existed cannot prove
 // which channel it belonged to, so it matches on the slot alone - as good as it was
 // when written, and no better.
-TEST(ChannelIdentity, AMissingFingerprintMatchesOnTheSlotAlone) {
+TEST(ChannelIdentity, AMissingFingerprintIsNotAWildcard) {
+    // This test asserted the opposite until the policy changed, and the policy was
+    // wrong: a slot is not an identity. Delete the channel in slot 2, create another,
+    // and the old one's history would have been handed to the new one - one person's
+    // private conversation displayed under a different channel's name.
+    //
+    // Records without a fingerprint are loaded as unknown conversations now, so
+    // nothing should reach riftConvSame with zero. If anything does, it must fail to
+    // match rather than match every channel in that slot.
     RiftConvKey legacy  = riftConvChannel(2, 0);
     RiftConvKey current = riftConvChannel(2, 0xABCDEF01u);
-    EXPECT_TRUE(riftConvSame(legacy, current));
-    EXPECT_TRUE(riftConvSame(current, legacy));          // and symmetrically
+    EXPECT_FALSE(riftConvSame(legacy, current));
+    EXPECT_FALSE(riftConvSame(current, legacy));          // and symmetrically
     EXPECT_FALSE(riftConvSame(legacy, riftConvChannel(3, 0)));
+
+    // two legacy records in the same slot are still the same conversation as each
+    // other - that much the slot does say
+    EXPECT_TRUE(riftConvSame(legacy, riftConvChannel(2, 0)));
 }
 
 TEST(ChannelFingerprint, DiffersOnASingleBitOfKey) {

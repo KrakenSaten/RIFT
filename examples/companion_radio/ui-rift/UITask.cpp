@@ -499,11 +499,22 @@ struct RiftMsgLog {
                                                                     : convPayloadLen(rec[11]);
         if (clen > 0 && f.read(payload, clen) != clen) break;
         if (rec[11] == RIFT_CONV_CHANNEL) {
-          // clen is 1 on a version 2 file and 5 from version 3, so the fingerprint is
-          // present exactly when it was written
-          uint32_t fp = 0;
-          if (clen >= 5) memcpy(&fp, &payload[1], 4);
-          conv = riftConvChannel(payload[0], fp);
+          // A version 3 record carries the fingerprint and is trusted. A version 2 one
+          // carries only the slot, and a slot is not an identity: delete the channel
+          // that was in slot 2 and create another, and the new one inherits the old
+          // one's history. That is a private conversation shown under someone else's
+          // name, which is worse than showing it under none.
+          //
+          // So a legacy record becomes unknown rather than a channel. It is not lost:
+          // an unknown conversation falls back to matching the name in its origin
+          // string, which is the channel name as it was when the message arrived - so
+          // legacy history groups under the channel it actually came from, and a
+          // channel that no longer exists simply has no conversation to appear in.
+          if (clen >= 5) {
+            uint32_t fp = 0;
+            memcpy(&fp, &payload[1], 4);
+            conv = riftConvChannel(payload[0], fp);
+          }
         }
         else if (rec[11] == RIFT_CONV_DM) conv = riftConvDM(payload);
         // an unrecognised kind - a file from a newer build - stays unknown rather
@@ -1373,10 +1384,12 @@ public:
     // nothing to measure against, so a device that had quietly stopped accepting nodes
     // looked identical to one with room - and the symptom of the difference is a NODES
     // screen that stops changing, which reads as a radio or antenna fault.
-    bool full = the_mesh.contactsWereFull();
+    // Accent while the table is actually full, which is the state you can act on by
+    // deleting a contact. Having once been full is history and does not belong in a
+    // colour that means "attend to this".
     sprintf(tmp, "%d/%d STORED %s %d HEARD", the_mesh.getNumContacts(),
             the_mesh.getContactsCapacity(), RIFT_DOT, the_mesh.getPathCacheUsed());
-    if (full) display.setColor(rift_pal.accent);
+    if (the_mesh.contactsFullNow()) display.setColor(rift_pal.accent);
     display.drawTextLeftAlign(2, 170, tmp);
 
     sprintf(tmp, "LINK %.0f / %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
@@ -2438,10 +2451,17 @@ public:
     display.drawTextLeftAlign(CX, y, "CONTACTS");
     {
       int used = the_mesh.getNumContacts(), cap = the_mesh.getContactsCapacity();
-      bool full = the_mesh.contactsWereFull();
+      bool full = the_mesh.contactsFullNow();
       display.setColor(full ? rift_pal.accent : rift_pal.fg);
-      if (full) snprintf(tmp, sizeof(tmp), "%d/%d FULL", used, cap);
-      else      snprintf(tmp, sizeof(tmp), "%d/%d", used, cap);
+      if (full) {
+        snprintf(tmp, sizeof(tmp), "%d/%d FULL", used, cap);
+      } else if (the_mesh.contactsEverRefused()) {
+        // room now, but nodes were turned away earlier - which is why the mesh may
+        // look smaller than it is, and is not the same claim as FULL
+        snprintf(tmp, sizeof(tmp), "%d/%d was full", used, cap);
+      } else {
+        snprintf(tmp, sizeof(tmp), "%d/%d", used, cap);
+      }
       display.drawTextRightAlign(CR, y, tmp);
       y += RIFT_LINE_H;
     }

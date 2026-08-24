@@ -408,7 +408,8 @@ void MyMesh::onContactsFull() {
   // fault rather than as a table with no room. Third time this pattern has been found
   // here: notify() gated on isConnected, hasConnection() taken to mean "on the mesh",
   // and now this.
-  _contacts_full_at = (uint32_t) millis();
+  _contacts_refused = true;
+  _contacts_refused_at = (uint32_t) millis();
 
 #ifdef RIFT_VERSION
   // Rate limited to one line an hour. The caller is the advert path, so on a busy mesh
@@ -1608,6 +1609,13 @@ void MyMesh::handleCmdFrame(size_t len) {
                         : ERR_CODE_UNSUPPORTED_CMD); // unknown recipient, or unsupported TXT_TYPE_*
     }
   } else if (cmd_frame[0] == CMD_SEND_CHANNEL_TXT_MSG) { // send GroupChannel text msg
+    // 1 type + 1 channel + 4 timestamp, and the text may be empty. Without this the
+    // text length below is len - 7 computed in size_t, so a six-byte frame passed a
+    // value near 2^32 as the message length - not a stale byte but an enormous one.
+    if (len < 7) {
+      writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+      return;
+    }
     int i = 1;
     uint8_t txt_type = cmd_frame[i++]; // should be TXT_TYPE_PLAIN
     uint8_t channel_idx = cmd_frame[i++];
@@ -1757,7 +1765,13 @@ void MyMesh::handleCmdFrame(size_t len) {
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND); // unknown contact
     }
-  } else if (cmd_frame[0] == CMD_ADD_UPDATE_CONTACT && len >= 1 + 32 + 2 + 1) {
+    // 1 code + 32 pubkey + type + flags + out_path_len + MAX_PATH_SIZE + 32 name +
+    // 4 timestamp. updateContactFromFrame reads all of that unconditionally - the
+    // guard used to be 36, so a frame between 36 and 135 bytes filled out_path and
+    // name from whatever came before it. The optional gps and lastmod fields at the
+    // end are length-checked there and are not required here.
+  } else if (cmd_frame[0] == CMD_ADD_UPDATE_CONTACT &&
+             len >= 1 + 32 + 1 + 1 + 1 + MAX_PATH_SIZE + 32 + 4) {
     uint8_t *pub_key = &cmd_frame[1];
     ContactInfo *recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     uint32_t last_mod = getRTCClock()->getCurrentTime();  // fallback value if not present in cmd_frame
@@ -2418,7 +2432,10 @@ void MyMesh::handleCmdFrame(size_t len) {
     writeOKFrame();
   } else if (cmd_frame[0] == CMD_SET_DEFAULT_FLOOD_SCOPE && len >= 1) {
     if (len >= 1+31+16) {
-      int n = strlen((char *) &cmd_frame[1]);
+      // strnlen, bounded to the field. The name is 31 bytes with no guarantee of a
+      // terminator, so strlen ran on into the 16-byte key and past it - the length
+      // test below happens after the read, not before it.
+      int n = (int) strnlen((char *) &cmd_frame[1], 31);
       if (n > 0 && n < 31) {
         strcpy(_prefs.default_scope_name, (char *) &cmd_frame[1]);
         memcpy(_prefs.default_scope_key, &cmd_frame[1+31], 16);
@@ -2681,6 +2698,19 @@ void MyMesh::checkCLIRescueCmd() {
 void MyMesh::checkSerialInterface() {
   size_t len = _serial->checkRecvFrame(cmd_frame);
   if (len > 0) {
+    // Everything past the frame reads as zero rather than as whatever the previous
+    // frame left there. cmd_frame is a persistent member and was never cleared, so a
+    // handler that read past its own payload - and several do, because their length
+    // guards are looser than their reads - picked up bytes from an earlier command.
+    // A short CMD_ADD_UPDATE_CONTACT filled a contact's path and name that way.
+    //
+    // This is defence in depth and not a substitute for the guards below: it turns an
+    // information leak into deterministic zeros, and it gives strlen() something to
+    // stop on, but a handler still has to refuse a frame it cannot parse. The two
+    // sharp cases are fixed properly.
+    if (len <= MAX_FRAME_SIZE) {
+      memset(cmd_frame + len, 0, (MAX_FRAME_SIZE + 1) - len);
+    }
     handleCmdFrame(len);
   } else if (_iter_started              // check if our ContactsIterator is 'running'
              && !_serial->isWriteBusy() // don't spam the Serial Interface too quickly!

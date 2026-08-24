@@ -928,12 +928,13 @@ static inline bool riftConvSame(const RiftConvKey& a, const RiftConvKey& b) {
   switch (a.kind) {
     case RIFT_CONV_CHANNEL:
       if (a.channel_idx != b.channel_idx) return false;
-      // A fingerprint of zero means the entry predates the field - restored from a
-      // log file written before channel identity existed. It cannot prove which
-      // channel it belonged to, so it matches on the slot alone, which is exactly as
-      // good as it was when it was written and no better. Those entries age out of
-      // the log; nothing new is ever written without a fingerprint.
-      if (a.channel_fp == 0 || b.channel_fp == 0) return true;
+      // No wildcard for a missing fingerprint. Matching on the slot alone was
+      // defended as "as good as it was when it was written", but it is not: when it
+      // was written slot 2 was one channel, and after a delete and recreate it is
+      // another - so the wildcard hands one channel's history to a different one.
+      // Records without a fingerprint are now loaded as unknown conversations
+      // instead, so nothing reaches here with zero; if anything ever does, it must
+      // fail to match rather than match everything.
       return a.channel_fp == b.channel_fp;
     case RIFT_CONV_DM:      return memcmp(a.peer, b.peer, RIFT_CONV_PEER_LEN) == 0;
     default:                return false;

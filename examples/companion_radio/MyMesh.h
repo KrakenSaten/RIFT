@@ -133,8 +133,13 @@ public:
   // returns NULL - so it is recorded when it happens. Cleared by nothing: once a node
   // has been turned away, that stays true until the table has room again, which
   // nothing here can undo on its own.
-  bool     contactsWereFull() const { return _contacts_full_at != 0; }
-  uint32_t contactsFullSince() const { return _contacts_full_at; }
+  // Two different questions, and they were one value. "Is the table full right now"
+  // decides whether the UI should say FULL; "has it ever refused a node" is history
+  // worth keeping. The latch answered the second and was read as the first, so after
+  // deleting a contact to make room the screen still said FULL.
+  bool     contactsFullNow() const { return getNumContacts() >= getContactsCapacity(); }
+  bool     contactsEverRefused() const { return _contacts_refused; }
+  uint32_t contactsRefusedAt() const { return _contacts_refused_at; }
 
   // Resolve a path hash to a node, against every identity this node knows.
   //
@@ -273,7 +278,10 @@ protected:
   // millis() when a contact was last turned away, 0 if never. Monotonic on purpose:
   // this has to work on a node whose clock was never set, which is the normal state
   // of a standalone RIFT.
-  uint32_t _contacts_full_at = 0;
+  // An explicit flag rather than a zero timestamp as the sentinel: a refusal in the
+  // first millisecond after boot would have read as "never happened".
+  bool     _contacts_refused = false;
+  uint32_t _contacts_refused_at = 0;
   void onContactOverwrite(const uint8_t* pub_key) override;
   bool onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_t in_path_len, uint8_t* out_path, uint8_t out_path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
