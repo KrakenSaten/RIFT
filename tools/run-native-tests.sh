@@ -34,13 +34,19 @@ for dir in test/test_*; do
     echo "$name: BUILD FAILED"; tail -15 "$OUT/$name.log"; fail=1; continue
   fi
   out=$("$OUT/$name.exe" 2>&1)
+  rc=$?
   # the PASSED line is written last, so it cannot be cut short by interleaving
   n=$(echo "$out" | grep -Eo 'PASSED  \] [0-9]+ test' | tail -1 | grep -Eo '[0-9]+')
   if echo "$out" | grep -q '\[  FAILED  \]'; then
     echo "$name: TESTS FAILED"; echo "$out" | grep -E '^\[  FAILED  \]' | head -20; fail=1
+  elif [ $rc -ne 0 ] || [ -z "$n" ]; then
+    # No count means the binary never reported a run - it crashed, or was still
+    # locked by the linker that had just written it. Counting that as zero passed
+    # and carrying on printed a green total that was ten tests short of the truth.
+    echo "$name: NO RESULT (exit $rc)"; echo "$out" | tail -5; fail=1
   else
-    printf '%-26s %s tests passed\n' "$name" "${n:-?}"
-    total=$((total + ${n:-0}))
+    printf '%-26s %s tests passed\n' "$name" "$n"
+    total=$((total + n))
   fi
 done
 echo "----"

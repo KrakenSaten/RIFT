@@ -3205,7 +3205,17 @@ class RiftConstellationScreen : public RiftScreen {
 
         // Offered only when it would work. A repeater cannot receive a message, and
         // an action that will be refused is worse than no action shown.
-        if (contact != NULL && riftCanDirectMessage(contact->type)) {
+        // The inverse of the rule above is just as true: an action with no hint
+        // is an action nobody finds. Repeater control shipped without this line
+        // and was invisible - the row looked exactly like one where ENTER does
+        // nothing, so the key was never pressed.
+        const char* action = NULL;
+        if (contact != NULL) {
+          if (riftCanDirectMessage(contact->type))          action = "ENTER: message";
+          else if (contact->type == RIFT_ADV_REPEATER)      action = "ENTER: control";
+          else if (contact->type == RIFT_ADV_SENSOR)        action = "ENTER: read";
+        }
+        if (action != NULL) {
           if (rift_day_mode) {
             display.setColor(rift_pal.accent);
             display.fillRect(240, dy + 12, 78, 12);
@@ -3213,7 +3223,7 @@ class RiftConstellationScreen : public RiftScreen {
           } else {
             display.setColor(rift_pal.accent);
           }
-          display.drawTextRightAlign(316, dy + 14, "ENTER: message");
+          display.drawTextRightAlign(316, dy + 14, action);
         }
       }
 
@@ -6595,11 +6605,25 @@ void UITask::openRenameWatch(int watch_idx) {
   pushOverlay(rename_watch);
 }
 
-// Repeater control. Refuses quietly when the key is not a contact - the caller
-// offers a heard node, and a node can be heard without ever being added.
+// Repeater control.
+//
+// Every path out of here either opens the panel or says why. It refused quietly
+// before, which is indistinguishable from a keypress that was never registered -
+// and that is exactly how the feature read on the device: nothing happened, and
+// nothing said anything.
 void UITask::openRepeaterPanel(const uint8_t* pub_key) {
-  if (repeater_panel == NULL || _overlay != NULL) return;
-  if (!((RiftRepeaterScreen *) repeater_panel)->openFor(pub_key)) return;
+  if (repeater_panel == NULL) {
+    showAlert("Repeater panel unavailable", 1600);
+    return;
+  }
+  if (_overlay != NULL) return;    // a popup is already up; it owns the screen
+  if (!((RiftRepeaterScreen *) repeater_panel)->openFor(pub_key)) {
+    // openFor only fails when the node is not a contact, which is a heard node
+    // that was never added - a real and common state on a busy mesh.
+    showAlert("Not a contact yet", 1600);
+    return;
+  }
+  riftLogf("repeater panel opened");
   pushOverlay(repeater_panel);
 }
 
