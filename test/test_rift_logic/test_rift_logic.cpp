@@ -1611,6 +1611,116 @@ TEST(DutyCycle, DoesNotOverflowOnALongUptime) {
   EXPECT_EQ(500, riftDutyTenths(15768000u, 31536000u));   // half of a year
 }
 
+// ---- CLI secret and destructive-command policy ----------------------------
+//
+// The reason these are pure functions rather than checks inside the screen: the
+// rule has to hold for the command menu and for free text alike, and the first
+// version of it only held for the menu.
+
+TEST(CliSecrets, RecognisesEverySecretUpstreamCanEchoBack) {
+  EXPECT_TRUE(riftCliIsSecret("password hunter2"));
+  EXPECT_TRUE(riftCliIsSecret("set guest.password abc"));
+  EXPECT_TRUE(riftCliIsSecret("get guest.password"));
+  EXPECT_TRUE(riftCliIsSecret("set prv.key deadbeef"));
+  EXPECT_TRUE(riftCliIsSecret("set bridge.secret s3cret"));
+  EXPECT_TRUE(riftCliIsSecret("get bridge.secret"));
+}
+
+TEST(CliSecrets, LeavesOrdinaryCommandsAlone) {
+  EXPECT_FALSE(riftCliIsSecret("advert"));
+  EXPECT_FALSE(riftCliIsSecret("neighbors"));
+  EXPECT_FALSE(riftCliIsSecret("get freq"));
+  EXPECT_FALSE(riftCliIsSecret("clock sync"));
+  EXPECT_FALSE(riftCliIsSecret(""));
+  EXPECT_FALSE(riftCliIsSecret(NULL));
+}
+
+TEST(CliSecrets, CoversAKeyNobodyHasAddedYet) {
+  // The suffix rule is the point: a new secret config key upstream is redacted
+  // without anyone remembering to edit the list.
+  EXPECT_TRUE(riftCliIsSecret("set uplink.password x"));
+  EXPECT_TRUE(riftCliIsSecret("set mqtt.secret x"));
+  EXPECT_TRUE(riftCliIsSecret("set signing.key x"));
+}
+
+TEST(CliRedaction, KeepsTheCommandAndDropsTheValue) {
+  char out[64];
+  riftRedactCliCommand("password hunter2", out, sizeof(out));
+  EXPECT_STREQ("password [redacted]", out);
+
+  riftRedactCliCommand("set bridge.secret s3cret", out, sizeof(out));
+  EXPECT_STREQ("set bridge.secret [redacted]", out);
+}
+
+TEST(CliRedaction, ReplacesEverythingAfterTheKeyWithOnePlaceholder) {
+  // A password with spaces in it must not leak its tail, and must not produce a
+  // row of placeholders either.
+  char out[64];
+  riftRedactCliCommand("password one two three", out, sizeof(out));
+  EXPECT_STREQ("password [redacted]", out);
+}
+
+TEST(CliRedaction, PassesThroughWhatCarriesNoSecret) {
+  char out[64];
+  riftRedactCliCommand("get freq", out, sizeof(out));
+  EXPECT_STREQ("get freq", out);
+  riftRedactCliCommand("advert", out, sizeof(out));
+  EXPECT_STREQ("advert", out);
+}
+
+TEST(CliRedaction, NeverWritesPastTheBuffer) {
+  for (int sz = 1; sz <= 24; sz++) {
+    std::vector<char> buf((size_t) sz + 8, '\x7F');
+    riftRedactCliCommand("password hunter2", buf.data(), sz);
+    EXPECT_LT(strlen(buf.data()), (size_t) sz) << "size " << sz;
+    for (int i = 0; i < 8; i++) {
+      EXPECT_EQ('\x7F', buf[(size_t) sz + i]) << "overran at size " << sz;
+    }
+  }
+}
+
+TEST(CliRedaction, HandlesNullAndZeroSizeWithoutWriting) {
+  char out[8] = { 'k', 0 };
+  riftRedactCliCommand(NULL, out, sizeof(out));
+  EXPECT_STREQ("", out);
+  riftRedactCliCommand("password x", out, 0);   // must not touch it
+}
+
+TEST(CliSecrets, RecognisesUpstreamsPasswordEcho) {
+  // CommonCLI confirms a change by replying with the new password in clear.
+  EXPECT_TRUE(riftCliReplyEchoesSecret("password now: hunter2"));
+  EXPECT_FALSE(riftCliReplyEchoesSecret("OK - Advert sent"));
+  EXPECT_FALSE(riftCliReplyEchoesSecret(""));
+  EXPECT_FALSE(riftCliReplyEchoesSecret(NULL));
+}
+
+TEST(DestructiveCli, CatchesTheOnesTypedAsWellAsThePickedOnes) {
+  EXPECT_TRUE(riftCliIsDestructive("reboot"));
+  EXPECT_TRUE(riftCliIsDestructive("clear stats"));
+  EXPECT_TRUE(riftCliIsDestructive("poweroff"));
+  EXPECT_TRUE(riftCliIsDestructive("start ota"));
+  EXPECT_TRUE(riftCliIsDestructive("clock sync"));
+  EXPECT_TRUE(riftCliIsDestructive("erase"));
+  EXPECT_TRUE(riftCliIsDestructive("password x"));
+  EXPECT_TRUE(riftCliIsDestructive("  reboot"));      // leading spaces
+}
+
+TEST(DestructiveCli, LeavesReadOnlyCommandsUnconfirmed) {
+  EXPECT_FALSE(riftCliIsDestructive("advert"));
+  EXPECT_FALSE(riftCliIsDestructive("neighbors"));
+  EXPECT_FALSE(riftCliIsDestructive("ver"));
+  EXPECT_FALSE(riftCliIsDestructive("clock"));        // reading is not syncing
+  EXPECT_FALSE(riftCliIsDestructive("get freq"));
+  EXPECT_FALSE(riftCliIsDestructive(NULL));
+}
+
+TEST(ClockPlausible, RefusesAnUnsetClockAndAcceptsARealOne) {
+  EXPECT_FALSE(riftClockPlausible(0));
+  EXPECT_FALSE(riftClockPlausible(1500000000u));               // July 2017
+  EXPECT_TRUE(riftClockPlausible(1787000000u));                // 2026
+  EXPECT_FALSE(riftClockPlausible(4200000000u));               // past 2100
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

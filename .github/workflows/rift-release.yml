@@ -86,6 +86,16 @@ jobs:
           echo "version=$MC" >> $GITHUB_OUTPUT
           echo "MeshCore: $MC"
 
+      # Gates the release on the same checks the branch runs, rather than
+      # assuming the tagged commit passed them there. A tag can be placed on any
+      # commit, including one that never went through Build Check, and this job
+      # was publishing a browser flasher on that assumption. Under a minute.
+      - name: Run Unit Tests
+        run: pio test -e native -e native_kiss_modem -vv
+
+      - name: Audit companion command guards
+        run: python3 tools/audit-cmd-guards.py
+
       - name: Build firmware
         env:
           FIRMWARE_VERSION: ${{ steps.meshcore.outputs.version }}

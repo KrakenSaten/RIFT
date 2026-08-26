@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "RiftLogic.h"
+#include <helpers/UTF8Helpers.h>   // validUtf8PrefixLength, for cutting a CLI line
 
 // Logging into a repeater and reading it back, from the device rather than from
 // a phone.
@@ -16,22 +17,27 @@
 // phone attached the answers arrived and were discarded. This keeps them.
 //
 // It observes rather than intercepts: the replies still go to the companion app
-// exactly as before, so a phone-attached device behaves the same. That also
-// means there is no ownership to track between the two - whoever asked, the
-// answer lands here as well, and the screen filters on the node it is showing.
+// exactly as before, so a phone-attached device behaves the same.
 //
-// One target at a time. A second login would overwrite the first anyway,
-// because the pending_login slot in the mesh layer is single, and pretending
-// otherwise in the UI would show a session the radio does not have.
+// That claim used to be made about the send path too, and it was wrong there.
+// The panel first reused the companion pending slots and called
+// clearPendingReqs() like the companion handlers do, which meant a local
+// request discarded whatever the phone was waiting for. The panel now owns
+// separate matching state in MyMesh - see rift_pending_kind - and touches none
+// of the five companion slots.
+//
+// One target at a time. The panel shows one node, and a second session would be
+// state with nothing on screen to represent it.
 
 #define RIFT_REP_KEY_LEN     6     // the prefix onContactResponse reports
 #define RIFT_REP_CLI_LINES   8
 #define RIFT_REP_CLI_TEXT   64
 #define RIFT_REP_TELEM      10
 
-// What we are waiting for. Only one at a time: pending_login, pending_status and
-// pending_telemetry are all cleared by clearPendingReqs() on every new send, so
-// two outstanding requests is not a state the radio has.
+// What we are waiting for. One at a time, because the panel offers one action
+// at a time and refuses a second while one is outstanding. These values are also
+// what MyMesh::rift_pending_kind holds, so the two ends agree on the request in
+// flight without a second vocabulary.
 #define RIFT_REP_IDLE        0
 #define RIFT_REP_LOGIN       1
 #define RIFT_REP_STATUS      2
@@ -74,6 +80,10 @@ class RiftRepeaterSession {
 
   char _cli[RIFT_REP_CLI_LINES][RIFT_REP_CLI_TEXT];
   int _cli_n;
+  // Set when the command just sent asks for a secret back. `get guest.password`
+  // answers with a bare "> value" that cannot be recognised from the reply
+  // alone, so the question has to be remembered to redact the answer.
+  bool _expect_secret_reply;
 
   bool isTarget(const uint8_t* pub_key) const {
     return _have_target && pub_key != NULL
@@ -82,7 +92,12 @@ class RiftRepeaterSession {
 
   // Newest at index 0. Shifts before writing so a full ring drops the oldest.
   void pushLine(const char* src, int n) {
-    if (n > RIFT_REP_CLI_TEXT - 1) n = RIFT_REP_CLI_TEXT - 1;
+    if (n > RIFT_REP_CLI_TEXT - 1) {
+      // Cut on a code point boundary, not a byte. A raw cut splits a two-byte
+      // Nordic character and leaves a dangling lead byte, which matters most for
+      // `neighbors` - node names are exactly where those characters live.
+      n = (int) mesh::validUtf8PrefixLength(src, (size_t) (RIFT_REP_CLI_TEXT - 1));
+    }
     if (_cli_n < RIFT_REP_CLI_LINES) _cli_n++;
     for (int i = _cli_n - 1; i > 0; i--) {
       memcpy(_cli[i], _cli[i - 1], RIFT_REP_CLI_TEXT);
@@ -107,6 +122,11 @@ public:
     _telem_n = 0;
     _have_telem = false;
     _cli_n = 0;
+    _expect_secret_reply = false;
+    // Zeroed, not just counted down to nothing. A redaction keeps a secret off
+    // the screen; it does not help if the bytes are still sitting in this buffer
+    // afterwards, and clearing the count alone left them there.
+    memset(_cli, 0, sizeof(_cli));
   }
 
   // Switching target drops everything: stats and a CLI reply belong to the node
@@ -216,6 +236,18 @@ public:
     if (!isTarget(pub_key) || text == NULL) return;
     if (_pending == RIFT_REP_CLI) _pending = RIFT_REP_IDLE;
 
+    // A reply can carry a secret two ways: because we asked for one, or because
+    // upstream echoes a new password back unasked. Either way the whole reply is
+    // replaced rather than edited - it is not worth trying to find the secret
+    // inside a string whose shape belongs to somebody else's firmware.
+    bool secret = _expect_secret_reply || riftCliReplyEchoesSecret(text);
+    _expect_secret_reply = false;
+    if (secret) {
+      const char* safe = "(secret reply not shown)";
+      pushLine(safe, (int) strlen(safe));
+      return;
+    }
+
     const char* p = text;
     while (*p) {
       const char* nl = strchr(p, '\n');
@@ -228,10 +260,21 @@ public:
 
   // Echo of what was sent, so the panel reads as a transcript rather than as a
   // list of answers to questions nobody can see.
+  //
+  // Redacted on the way in, not on the way out: the secret must never be in
+  // _cli at all, because that buffer outlives the screen it was drawn on.
   void noteCliSent(const char* text) {
     if (text == NULL) return;
+    _expect_secret_reply = riftCliIsSecret(text);
+
+    char safe[RIFT_REP_CLI_TEXT];
+    if (_expect_secret_reply) {
+      riftRedactCliCommand(text, safe, sizeof(safe));
+    } else {
+      snprintf(safe, sizeof(safe), "%s", text);
+    }
     char line[RIFT_REP_CLI_TEXT];
-    snprintf(line, sizeof(line), "> %s", text);
+    snprintf(line, sizeof(line), "> %s", safe);
     pushLine(line, (int) strlen(line));
   }
 };

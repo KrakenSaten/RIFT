@@ -560,6 +560,79 @@ int MyMesh::resolvePathHash(const uint8_t* hash, uint8_t hash_len,
   return result;
 }
 
+// Match a response against the repeater panel's own pending request.
+//
+// Reads only, decides only, and clears only the panel's state. It runs ahead of
+// the companion chain in onContactResponse and returns whether it matched purely
+// for the log; the caller ignores it and carries on, so a phone attached to the
+// same radio sees precisely what it saw before this existed.
+bool MyMesh::riftMatchResponse(const ContactInfo& contact, const uint8_t* data,
+                              uint8_t len, uint32_t tag) {
+  if (rift_pending_kind == RIFT_REP_IDLE) return false;
+
+  if (rift_pending_kind == RIFT_REP_LOGIN) {
+    // A login reply carries the server's own timestamp, not our tag, so this is
+    // the one case that has to match on the key.
+    if (memcmp(rift_pending_key, contact.id.pub_key, 4) != 0) return false;
+    rift_pending_kind = RIFT_REP_IDLE;
+
+    // The two shapes upstream accepts, each stating the length it reads. Parsed
+    // here rather than shared with the companion branch below, because sharing
+    // would mean depending on that branch having matched - which is exactly the
+    // coupling being removed.
+    if (len >= 13 && data[4] == RESP_SERVER_LOGIN_OK) {
+      riftRepeater().onLogin(contact.id.pub_key, true, data[6], data[7], data[12]);
+    } else if (len >= 6 && memcmp(&data[4], "OK", 2) == 0) {
+      // legacy repeater: no permissions in the reply, so admin is not claimed
+      riftRepeater().onLogin(contact.id.pub_key, true, 0, 0, 0);
+    } else {
+      riftRepeater().onLogin(contact.id.pub_key, false, 0, 0, 0);
+    }
+    return true;
+  }
+
+  if (tag != rift_pending_tag || len <= 4) return false;
+
+  if (rift_pending_kind == RIFT_REP_STATUS) {
+    rift_pending_kind = RIFT_REP_IDLE;
+    riftRepeater().onStatus(contact.id.pub_key, data, len);   // tag included: the decoder owns the offset
+    return true;
+  }
+
+  if (rift_pending_kind == RIFT_REP_TELEMETRY) {
+    rift_pending_kind = RIFT_REP_IDLE;
+    // Cayenne LPP, walked with the same reader the sensors screen uses rather
+    // than a second parser for the same format. Decoded here rather than stored
+    // raw because the render path would otherwise re-parse it every frame.
+    riftRepeater().beginTelemetry();
+    LPPReader reader(&data[4], (uint8_t) (len - 4));
+    uint8_t lpp_ch, lpp_type;
+    while (reader.readHeader(lpp_ch, lpp_type)) {
+      float v = 0;
+      bool got = false;
+      switch (lpp_type) {
+        case LPP_VOLTAGE:             got = reader.readVoltage(v); break;
+        case LPP_CURRENT:             got = reader.readCurrent(v); break;
+        case LPP_POWER:               got = reader.readPower(v); break;
+        case LPP_TEMPERATURE:         got = reader.readTemperature(v); break;
+        case LPP_BAROMETRIC_PRESSURE: got = reader.readPressure(v); break;
+        case LPP_RELATIVE_HUMIDITY:   got = reader.readRelativeHumidity(v); break;
+        case LPP_ALTITUDE:            got = reader.readAltitude(v); break;
+        default:
+          // Unknown type: skipData knows its width, so the walk stays in step
+          // instead of stopping at the first thing we do not render.
+          reader.skipData(lpp_type);
+          break;
+      }
+      if (got) riftRepeater().addTelemetry(lpp_ch, lpp_type, v);
+    }
+    riftRepeater().endTelemetry(contact.id.pub_key);
+    return true;
+  }
+
+  return false;
+}
+
 // ---- repeater control, issued by the device rather than by a phone ----------
 //
 // Each of these is the body of the matching companion command handler with the
@@ -572,8 +645,10 @@ bool MyMesh::riftLogin(const ContactInfo& contact, const char* password, uint32_
   if (password == NULL) return false;
   int result = sendLogin(contact, password, est_timeout);
   if (result == MSG_SEND_FAILED) return false;
-  clearPendingReqs();
-  memcpy(&pending_login, contact.id.pub_key, 4);   // matched in onContactResponse
+  // No clearPendingReqs() and no companion slot: see rift_pending_kind.
+  rift_pending_kind = RIFT_REP_LOGIN;
+  rift_pending_tag = 0;
+  memcpy(rift_pending_key, contact.id.pub_key, 4);
   riftRepeater().beginPending(RIFT_REP_LOGIN, est_timeout);
   // Deliberately no password in this line, or in any other.
   riftLogf("LOGIN sent to %s", contact.name);
@@ -584,11 +659,12 @@ bool MyMesh::riftStatusReq(const ContactInfo& contact, uint32_t& est_timeout) {
   uint32_t tag;
   int result = sendRequest(contact, REQ_TYPE_GET_STATUS, tag, est_timeout);
   if (result == MSG_SEND_FAILED) return false;
-  clearPendingReqs();
-  // Status still matches on the key prefix rather than the tag, the way the
-  // companion handler does it - onContactResponse notes that as legacy, and
-  // diverging here would mean the reply matched in one path and not the other.
-  memcpy(&pending_status, contact.id.pub_key, 4);
+  // Matched on the tag, which the far side reflects in the first four bytes of
+  // its reply. The companion path still matches status on the key prefix and its
+  // own comment calls that legacy; there is no reason to inherit it here, and
+  // the tag distinguishes two requests to the same node where the key cannot.
+  rift_pending_kind = RIFT_REP_STATUS;
+  rift_pending_tag = tag;
   riftRepeater().beginPending(RIFT_REP_STATUS, est_timeout);
   return true;
 }
@@ -597,8 +673,8 @@ bool MyMesh::riftTelemetryReq(const ContactInfo& contact, uint32_t& est_timeout)
   uint32_t tag;
   int result = sendRequest(contact, REQ_TYPE_GET_TELEMETRY_DATA, tag, est_timeout);
   if (result == MSG_SEND_FAILED) return false;
-  clearPendingReqs();
-  pending_telemetry = tag;
+  rift_pending_kind = RIFT_REP_TELEMETRY;
+  rift_pending_tag = tag;
   riftRepeater().beginPending(RIFT_REP_TELEMETRY, est_timeout);
   return true;
 }
@@ -1145,6 +1221,14 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
   uint32_t tag;
   memcpy(&tag, data, 4);
 
+#ifdef RIFT_VERSION
+  // The repeater panel matches its own request first, against its own state, and
+  // returns nothing - the companion chain below then runs exactly as it would
+  // have. Neither side can consume or clear the other's pending request, which is
+  // the whole point of keeping these separate.
+  riftMatchResponse(contact, data, len, tag);
+#endif
+
   if (pending_login && memcmp(&pending_login, contact.id.pub_key, 4) == 0) { // check for login response
     // yes, is response to pending sendLogin()
     pending_login = 0;
@@ -1157,10 +1241,6 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       out_frame[i++] = 0; // legacy: is_admin = false
       memcpy(&out_frame[i], contact.id.pub_key, 6);
       i += 6;                                     // pub_key_prefix
-#ifdef RIFT_VERSION
-      // Legacy response carries no permissions at all, so admin is not claimed.
-      riftRepeater().onLogin(contact.id.pub_key, true, 0, 0, 0);
-#endif
     } else if (len >= 13 && data[4] == RESP_SERVER_LOGIN_OK) { // new login response
       uint16_t keep_alive_secs = ((uint16_t)data[5]) * 16;
       if (keep_alive_secs > 0) {
@@ -1174,17 +1254,11 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       i += 4; // NEW: include server timestamp
       out_frame[i++] = data[7]; // NEW (v7): ACL permissions
       out_frame[i++] = data[12]; // FIRMWARE_VER_LEVEL
-#ifdef RIFT_VERSION
-      riftRepeater().onLogin(contact.id.pub_key, true, data[6], data[7], data[12]);
-#endif
     } else {
       out_frame[i++] = PUSH_CODE_LOGIN_FAIL;
       out_frame[i++] = 0; // reserved
       memcpy(&out_frame[i], contact.id.pub_key, 6);
       i += 6; // pub_key_prefix
-#ifdef RIFT_VERSION
-      riftRepeater().onLogin(contact.id.pub_key, false, 0, 0, 0);
-#endif
     }
     _serial->writeFrame(out_frame, i);
   } else if (len > 4 && // check for status response
@@ -1202,10 +1276,6 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     memcpy(&out_frame[i], &data[4], len - 4);
     i += (len - 4);
     _serial->writeFrame(out_frame, i);
-#ifdef RIFT_VERSION
-    // The whole response including the tag, so the decoder owns the offset.
-    riftRepeater().onStatus(contact.id.pub_key, data, len);
-#endif
   } else if (len > 4 && tag == pending_telemetry) {  // check for matching response tag
     pending_telemetry = 0;
 
@@ -1217,34 +1287,6 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     memcpy(&out_frame[i], &data[4], len - 4);
     i += (len - 4);
     _serial->writeFrame(out_frame, i);
-#ifdef RIFT_VERSION
-    // Cayenne LPP, walked with the same reader the sensors screen uses rather
-    // than a second parser of the same format. Decoded here rather than stored
-    // raw because the render path would otherwise re-parse it every frame.
-    riftRepeater().beginTelemetry();
-    LPPReader reader(&data[4], (uint8_t) (len - 4));
-    uint8_t lpp_ch, lpp_type;
-    while (reader.readHeader(lpp_ch, lpp_type)) {
-      float v = 0;
-      bool got = false;
-      switch (lpp_type) {
-        case LPP_VOLTAGE:             got = reader.readVoltage(v); break;
-        case LPP_CURRENT:             got = reader.readCurrent(v); break;
-        case LPP_POWER:               got = reader.readPower(v); break;
-        case LPP_TEMPERATURE:         got = reader.readTemperature(v); break;
-        case LPP_BAROMETRIC_PRESSURE: got = reader.readPressure(v); break;
-        case LPP_RELATIVE_HUMIDITY:   got = reader.readRelativeHumidity(v); break;
-        case LPP_ALTITUDE:            got = reader.readAltitude(v); break;
-        default:
-          // Unknown type: skipData knows its width, so the walk stays in step
-          // instead of stopping at the first thing we do not render.
-          reader.skipData(lpp_type);
-          break;
-      }
-      if (got) riftRepeater().addTelemetry(lpp_ch, lpp_type, v);
-    }
-    riftRepeater().endTelemetry(contact.id.pub_key);
-#endif
   } else if (len > 4 && tag == pending_req) {  // check for matching response tag
     pending_req = 0;
 
@@ -1463,6 +1505,14 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   offline_queue_len = 0;
   app_target_ver = 0;
   clearPendingReqs();
+#ifdef RIFT_VERSION
+  // Not covered by clearPendingReqs() on purpose, so it is initialised here.
+  // Left uninitialised it starts as whatever was in that memory, and a non-zero
+  // kind would have riftMatchResponse claiming the first reply that arrived.
+  rift_pending_kind = RIFT_REP_IDLE;
+  rift_pending_tag = 0;
+  memset(rift_pending_key, 0, sizeof(rift_pending_key));
+#endif
   next_ack_idx = 0;
   sign_data = NULL;
   dirty_contacts_expiry = 0;

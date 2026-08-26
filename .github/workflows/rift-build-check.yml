@@ -14,7 +14,13 @@ on:
       - 'examples/**'
       - 'variants/**'
       - 'platformio.ini'
+      # The flash tool is how every device gets its firmware, and a release of
+      # it went out with a silent failure. It was outside these paths, so a
+      # commit touching only tools/ got no CI at all.
+      - 'tools/**'
+      - 'flasher/**'
       - '.github/workflows/rift-build-check.yml'
+      - '.github/workflows/rift-release.yml'
   pull_request:
     # feature work happens on rift-* branches and was getting no CI at all
     branches: [rift-tdeck, 'rift-*']
@@ -23,7 +29,13 @@ on:
       - 'examples/**'
       - 'variants/**'
       - 'platformio.ini'
+      # The flash tool is how every device gets its firmware, and a release of
+      # it went out with a silent failure. It was outside these paths, so a
+      # commit touching only tools/ got no CI at all.
+      - 'tools/**'
+      - 'flasher/**'
       - '.github/workflows/rift-build-check.yml'
+      - '.github/workflows/rift-release.yml'
   workflow_dispatch:
 
 # nothing here writes to the repository
@@ -82,3 +94,10 @@ jobs:
       # host may never have sent; this fails the build if a seventh appears.
       - name: Audit companion command guards
         run: python3 tools/audit-cmd-guards.py
+
+      # The Python tools are not covered by the C++ build, and rift-flash.py is
+      # the only path onto a device. A syntax error in it used to reach a tag.
+      - name: Check the Python tools parse and run
+        run: |
+          python3 -m py_compile tools/rift-flash.py tools/audit-cmd-guards.py
+          python3 tools/rift-flash.py --dry-run --firmware /dev/null 2>&1 | grep -q "not an ESP32 image"

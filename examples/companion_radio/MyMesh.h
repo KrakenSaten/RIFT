@@ -165,10 +165,14 @@ public:
   // ------------------------------------------------- repeater control
   //
   // The four things the device can ask a repeater, for the panel that reaches
-  // them from NODES. Each mirrors the companion command that already exists -
-  // same mesh call, same pending slot, same clearPendingReqs() first - so a
-  // reply is matched and routed by the code that already did it. The difference
-  // is only who asked: nothing here needs a phone.
+  // them from NODES. Each makes the same mesh call the matching companion
+  // command makes; the difference is only who asked, and that nothing here
+  // needs a phone.
+  //
+  // They do NOT share the companion's pending slots and do not call
+  // clearPendingReqs(). They did at first, and it meant a local request silently
+  // discarded whatever the phone was waiting for, and the reverse. See
+  // rift_pending_kind below.
   //
   // Each returns false when the send itself failed, and sets est_timeout so the
   // UI can size its wait from the airtime rather than from a guess. Replies land
@@ -180,6 +184,12 @@ public:
   bool riftStatusReq(const ContactInfo& contact, uint32_t& est_timeout);
   bool riftTelemetryReq(const ContactInfo& contact, uint32_t& est_timeout);
   bool riftCliCommand(const ContactInfo& contact, const char* text, uint32_t& est_timeout);
+
+  // Matches a response against the panel state above, ahead of the companion
+  // chain and without touching it. Returns whether it matched; the caller does
+  // not branch on it.
+  bool riftMatchResponse(const ContactInfo& contact, const uint8_t* data,
+                         uint8_t len, uint32_t tag);
 #endif
   // occupancy and pressure on the path cache, for the SYSTEM diagnostics
   int  getPathCacheUsed() const;
@@ -341,6 +351,9 @@ protected:
   int findFreeChannelSlot();
   int installChannel(int idx, const char* name, const uint8_t* psk, int psk_len);
 
+  // Companion slots only. The RIFT panel's own matching state is deliberately
+  // not cleared here: this runs on every companion send, and clearing it there
+  // is exactly the cross-talk the separate state exists to remove.
   void clearPendingReqs() {
     pending_login = pending_status = pending_telemetry = pending_discovery = pending_req = 0;
   }
@@ -395,6 +408,29 @@ private:
   uint32_t pending_status;
   uint32_t pending_telemetry, pending_discovery;   // pending _TELEMETRY_REQ
   uint32_t pending_req;   // pending _BINARY_REQ
+
+#ifdef RIFT_VERSION
+  // Request matching for the on-device repeater panel, kept entirely separate
+  // from the five slots above.
+  //
+  // The panel first reused them, the way the companion handlers do, and that was
+  // wrong: every send calls clearPendingReqs(), which zeroes all five. A local
+  // status request therefore discarded a phone's outstanding login, telemetry,
+  // path discovery or binary request, and a phone's request discarded the
+  // panel's - each side reporting a timeout for a reply that had arrived and
+  // been dropped on the floor. The release note claimed no arbitration was
+  // needed because the panel only observes replies. That is true of the receive
+  // path and was never true of the send path.
+  //
+  // So the panel owns these and touches nothing else. Matching is by the tag the
+  // request carried, which BaseChatMesh::sendRequest sets from the clock and the
+  // far side reflects back in the first four bytes of its reply - stronger than
+  // the key-prefix match the companion still uses for status. A login response
+  // carries the server's own timestamp instead, so that one matches on the key.
+  uint8_t  rift_pending_kind;      // RIFT_REP_* from ui-rift/RiftRepeater.h
+  uint32_t rift_pending_tag;       // status and telemetry
+  uint8_t  rift_pending_key[4];    // login
+#endif
   BaseSerialInterface *_serial;
   AbstractUITask* _ui;
 

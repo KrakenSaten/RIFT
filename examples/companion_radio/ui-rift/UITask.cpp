@@ -5736,32 +5736,39 @@ public:
 // that, or spare you typing it on a thumb keyboard in the field.
 //
 // Deliberately absent: `password` takes a secret and must never sit in a list
-// where it can be picked by accident; `poweroff`, `erase` and `start ota` are
-// one keypress from unrecoverable. All four remain available by typing, which is
-// the right amount of friction for them.
+// where it can be picked by accident; `poweroff` and `start ota` are one
+// keypress from unrecoverable. Those remain available by typing, which is the
+// right amount of friction for them, and typing now asks for a confirmation too.
+//
+// `erase` is a special case worth stating rather than leaving to be rediscovered:
+// CommonCLI runs it only when sender_timestamp == 0, and every command from here
+// carries the node clock, so it cannot work from RIFT at all. The v0.9.0 notes
+// said it remained available by typing. It does not.
 //
 // The whole CLI is admin-only on the far side - simple_repeater gates it on
 // client->isAdmin() - so this menu is too, and refuses before spending airtime.
 struct RiftRepCmd {
   const char* label;
   const char* cmd;      // NULL: switch to free text entry
-  bool confirm;
 };
 
+// No confirm flag: riftCliIsDestructive() decides, so the menu and free text
+// obey one rule instead of the menu having its own.
 static const RiftRepCmd RIFT_REP_CMDS[] = {
-  { "Send advert (flood)",  "advert",         false },
-  { "Send advert (0-hop)",  "advert.zerohop", false },
-  { "Neighbours heard",     "neighbors",      false },
-  { "Firmware version",     "ver",            false },
-  { "Board",                "board",          false },
-  { "Read clock",           "clock",          false },
+  { "Send advert (flood)",  "advert"         },
+  { "Send advert (0-hop)",  "advert.zerohop" },
+  { "Neighbours heard",     "neighbors"      },
+  { "Firmware version",     "ver"            },
+  { "Board",                "board"          },
+  { "Read clock",           "clock"          },
   // Sends our RTC as the message timestamp, which is what the far side adopts.
   // A repeater with a wrong clock rejects traffic as replayed, so this is a
-  // repair, not a convenience.
-  { "Set clock from RIFT",  "clock sync",     false },
-  { "Clear stats",          "clear stats",    true  },
-  { "Reboot",               "reboot",         true  },
-  { "Type a command...",    NULL,             false },
+  // repair, not a convenience - and it only moves a clock forwards, so it gets a
+  // confirmation showing the value about to be sent.
+  { "Set clock from RIFT",  "clock sync"     },
+  { "Clear stats",          "clear stats"    },
+  { "Reboot",               "reboot"         },
+  { "Type a command...",    NULL             },
 };
 #define RIFT_REP_CMD_COUNT ((int) (sizeof(RIFT_REP_CMDS) / sizeof(RIFT_REP_CMDS[0])))
 
@@ -5800,6 +5807,7 @@ class RiftRepeaterScreen : public RiftScreen {
   bool _have_key;
   int _mode;
   RiftTextInput _edit;
+  uint8_t _type;      // advert type of the node this panel is showing
   int _menu_sel;
   // Armed by the first Enter on an entry that asks for confirmation, cleared by
   // any movement. Holding the index rather than a bool means moving the cursor
@@ -5809,6 +5817,52 @@ class RiftRepeaterScreen : public RiftScreen {
   ContactInfo* contact() const {
     if (!_have_key) return NULL;
     return the_mesh.lookupContactByPubKey((uint8_t*) _key, 6);
+  }
+
+  // What this node type can actually be asked.
+  //
+  // The panel is reached for anything that cannot take a direct message, which
+  // is repeaters and sensors. Offering a sensor a login, a stats request and an
+  // admin CLI is offering three things that will time out, and it made the
+  // "ENTER: read" label on its row untrue. Telemetry is the one a sensor answers.
+  bool allowsLogin()     const { return _type != RIFT_ADV_SENSOR; }
+  bool allowsStats()     const { return _type != RIFT_ADV_SENSOR; }
+  bool allowsTelemetry() const { return true; }
+  bool allowsCli()       const { return _type != RIFT_ADV_SENSOR; }
+
+  // The one place a CLI command leaves this panel, so the destructive-command
+  // rule is enforced once instead of per entry point. Returns true when the
+  // caller should stay where it is - either armed for a confirmation, or
+  // refused - and false when the command has been sent.
+  //
+  // `confirm_key` identifies what is armed: the menu passes its index, free text
+  // passes -2. Comparing it rather than holding a bool means arming Reboot and
+  // then moving to something else cannot fire Reboot.
+  bool sendCli(const char* text, int confirm_key) {
+    RiftRepeaterSession& s = riftRepeater();
+    ContactInfo* ct = contact();
+    if (ct == NULL) { _task->showAlert("Contact is gone", 1400); return false; }
+    if (s.pending() != RIFT_REP_IDLE) { _task->showAlert("Still waiting", 1200); return true; }
+
+    // Refused rather than confirmed: upstream will not move a clock backwards,
+    // so sending an unset one cannot be undone with the same command.
+    if (strncmp(text, "clock sync", 10) == 0
+        && !riftClockPlausible(the_mesh.getRTCClock()->getCurrentTime())) {
+      _task->showAlert("Set RIFT clock first", 1800);
+      return false;
+    }
+
+    if (riftCliIsDestructive(text) && _confirm_idx != confirm_key) {
+      _confirm_idx = confirm_key;
+      return true;
+    }
+    _confirm_idx = -1;
+
+    uint32_t est = 0;
+    if (!the_mesh.riftCliCommand(*ct, text, est)) {
+      _task->showAlert("No packet free - try again", 1400);
+    }
+    return false;
   }
 
   static const char* loginText(uint8_t state) {
@@ -5823,7 +5877,7 @@ class RiftRepeaterScreen : public RiftScreen {
 
 public:
   RiftRepeaterScreen(UITask* task)
-     : _task(task), _have_key(false), _mode(RIFT_RP_VIEW), _menu_sel(0), _confirm_idx(-1) {
+     : _task(task), _have_key(false), _mode(RIFT_RP_VIEW), _type(0), _menu_sel(0), _confirm_idx(-1) {
     memset(_key, 0, sizeof(_key));
   }
 
@@ -5837,6 +5891,7 @@ public:
     ContactInfo* c = the_mesh.lookupContactByPubKey((uint8_t*) pub_key, 6);
     if (c == NULL) return false;
     memcpy(_key, pub_key, sizeof(_key));
+    _type = c->type;
     _have_key = true;
     _mode = RIFT_RP_VIEW;
     _menu_sel = 0;
@@ -5846,12 +5901,7 @@ public:
   }
 
   int render(DisplayDriver& display) override {
-    RiftRepeaterSession& s = riftRepeater();
-    if (s.checkTimeout()) {
-      // Said once, here, rather than every frame: checkTimeout only returns true
-      // on the transition.
-      riftLogf("repeater: no answer");
-    }
+    RiftRepeaterSession& s = riftRepeater();   // observed only; the loop services it
 
     const int x = 4, w = display.width() - 8;
     const int y = 18, h = 202;
@@ -5903,7 +5953,20 @@ public:
       display.setColor(rift_pal.dim);
       if (_confirm_idx == _menu_sel) {
         display.setColor(rift_pal.accent);
-        display.drawTextLeftAlign(lx, mfy, "ENTER again to confirm");
+        const char* cmd = RIFT_REP_CMDS[_menu_sel].cmd;
+        if (cmd != NULL && strncmp(cmd, "clock sync", 10) == 0) {
+          // The value itself, because a clock can only be pushed forwards and a
+          // wrong one cannot be taken back. Seeing 2031 here is the only warning
+          // that exists.
+          uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+          int yy, mo, dd, hh, mi;
+          riftCivilFromEpoch(now, &yy, &mo, &dd, &hh, &mi);
+          char cline[48];
+          snprintf(cline, sizeof(cline), "Send %04d-%02d-%02d %02d:%02d UTC?", yy, mo, dd, hh, mi);
+          display.drawTextLeftAlign(lx, mfy, cline);
+        } else {
+          display.drawTextLeftAlign(lx, mfy, "ENTER again to confirm");
+        }
       } else {
         display.drawTextLeftAlign(lx, mfy, "UP/DOWN choose   ENTER send");
       }
@@ -6011,7 +6074,12 @@ public:
       const int footer_y = y + h - 26;
       for (int i = 0; i < s.cliCount() && ly + 10 <= footer_y; i++) {
         display.setColor(s.cliLine(i)[0] == '>' ? rift_pal.dim : UIColor::primary_txt);
-        display.drawTextLeftAlign(lx, ly, s.cliLine(i));
+        // Stored as UTF-8 and translated here, the same order every other RIFT
+        // screen uses. Drawn raw, a node name from `neighbors` containing a
+        // Nordic character rendered as two CP437 blocks.
+        char shown[RIFT_REP_CLI_TEXT];
+        riftTranslateUTF8(shown, s.cliLine(i), sizeof(shown));
+        display.drawTextLeftAlign(lx, ly, shown);
         ly += 10;
       }
     }
@@ -6020,8 +6088,12 @@ public:
     const int fy = y + h - 24;
     if (_mode != RIFT_RP_VIEW) {
       display.setColor(rift_pal.accent);
-      display.drawTextLeftAlign(lx, fy,
-        _mode == RIFT_RP_PASSWORD ? "PASSWORD" : "COMMAND");
+      if (_mode == RIFT_RP_COMMAND && _confirm_idx == -2) {
+        display.drawTextLeftAlign(lx, fy, "ENTER again to send");
+      } else {
+        display.drawTextLeftAlign(lx, fy,
+          _mode == RIFT_RP_PASSWORD ? "PASSWORD" : "COMMAND");
+      }
       _edit.render(display, lx, fy + 11, w - 10);
       return 400;
     }
@@ -6032,9 +6104,16 @@ public:
       display.drawTextLeftAlign(lx, fy + 11, "BACK close");
       return 400;   // so the wait ends visibly rather than on the next keypress
     }
-    display.drawTextLeftAlign(lx, fy, "L login   S stats   T telemetry");
+    // The hints are the affordance, so they follow capability rather than
+    // listing keys the node will not answer - the mistake that made repeater
+    // control itself invisible.
+    if (allowsLogin()) {
+      display.drawTextLeftAlign(lx, fy, "L login   S stats   T telemetry");
+    } else {
+      display.drawTextLeftAlign(lx, fy, "T telemetry");
+    }
     display.drawTextLeftAlign(lx, fy + 11,
-      s.isAdmin() ? "C commands   BACK close" : "BACK close");
+      (allowsCli() && s.isAdmin()) ? "C commands   BACK close" : "BACK close");
     return 1000;
   }
 
@@ -6055,19 +6134,8 @@ public:
           _confirm_idx = -1;
           return true;
         }
-        if (e.confirm && _confirm_idx != _menu_sel) {
-          _confirm_idx = _menu_sel;       // arm; the footer says so
-          return true;
-        }
-        _confirm_idx = -1;
-        ContactInfo* ct = contact();
-        if (ct == NULL) { _task->showAlert("Contact is gone", 1400); _mode = RIFT_RP_VIEW; return true; }
-        if (s.pending() != RIFT_REP_IDLE) { _task->showAlert("Still waiting", 1200); return true; }
-        uint32_t est = 0;
-        if (!the_mesh.riftCliCommand(*ct, e.cmd, est)) {
-          _task->showAlert("No packet free - try again", 1400);
-        }
-        _mode = RIFT_RP_VIEW;             // back to the transcript, where the reply lands
+        if (sendCli(e.cmd, _menu_sel)) return true;   // armed, refused, or busy
+        _mode = RIFT_RP_VIEW;             // sent: back to the transcript, where the reply lands
         return true;
       }
       return true;   // the menu owns the keyboard while it is up
@@ -6084,9 +6152,9 @@ public:
           }
         } else {
           if (_edit.len == 0) { _mode = RIFT_RP_VIEW; return true; }
-          if (!the_mesh.riftCliCommand(*ct, _edit.buf, est)) {
-            _task->showAlert("No packet free - try again", 1400);
-          }
+          // Same gate as the menu. -2 is the free-text confirmation slot: a
+          // typed `reboot` now asks a second time, which it did not before.
+          if (sendCli(_edit.buf, -2)) return true;   // stay in the field, armed
         }
         // Wiped either way, and immediately: a password left in the edit buffer
         // would be one keypress from being redrawn unmasked in command mode.
@@ -6095,10 +6163,11 @@ public:
         _mode = RIFT_RP_VIEW;
         return true;
       }
-      if (_edit.handleKey(c)) return true;
+      if (_edit.handleKey(c)) { _confirm_idx = -1; return true; }   // text changed: disarm
       if (c == RIFT_KEY_BACK || c == KEY_CANCEL) {
         memset(_edit.buf, 0, sizeof(_edit.buf));
         _edit.len = 0;
+        _confirm_idx = -1;
         _mode = RIFT_RP_VIEW;
         return true;
       }
@@ -6116,6 +6185,7 @@ public:
     uint32_t est = 0;
 
     if (c == 'l' || c == 'L') {
+      if (!allowsLogin()) return true;   // not something this node type answers
       if (busy) { _task->showAlert("Still waiting", 1200); return true; }
       _edit.begin("", 31);
       _edit.mask = true;
@@ -6123,6 +6193,7 @@ public:
       return true;
     }
     if (c == 's' || c == 'S') {
+      if (!allowsStats()) return true;   // not something this node type answers
       if (busy) { _task->showAlert("Still waiting", 1200); return true; }
       if (!the_mesh.riftStatusReq(*ct, est)) _task->showAlert("No packet free - try again", 1400);
       return true;
@@ -6133,6 +6204,7 @@ public:
       return true;
     }
     if (c == 'c' || c == 'C') {
+      if (!allowsCli()) return true;   // not something this node type answers
       if (busy) { _task->showAlert("Still waiting", 1200); return true; }
       // Guests can read stats, but the CLI is admin-only on the far side. Refusing
       // here means the airtime is not spent on a command that will be rejected.
@@ -6948,6 +7020,13 @@ void UITask::loop() {
 #ifdef PIN_BUZZER
   if (buzzer.isPlaying())  buzzer.loop();
 #endif
+
+  // Serviced here rather than from the panel's render, for the same reason RADAR
+  // is: a state machine that only advances while it is on screen stops advancing
+  // when the panel is closed. A request left outstanding then held its pending
+  // state until the panel was reopened, and the first frame after that reported a
+  // timeout that had really expired minutes earlier.
+  if (riftRepeater().checkTimeout()) riftLogf("repeater: no answer");
 
 #ifdef RIFT_RADAR
   // serviced unconditionally, not via curr->poll(), so RF teardown still runs

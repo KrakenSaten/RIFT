@@ -1286,3 +1286,136 @@ static inline int riftDutyTenths(uint32_t air_secs, uint32_t up_secs) {
   if (air_secs > up_secs) return -1;      // cannot be over 100%: reject, don't clamp
   return (int) ((air_secs * 1000ULL) / up_secs);
 }
+
+// ---- CLI secrets ----------------------------------------------------------
+//
+// The repeater CLI carries values that must not be drawn on a screen or held in
+// a buffer: `password <new>`, and the config keys guest.password, prv.key and
+// bridge.secret. Three of them can be read back in plaintext, and upstream's
+// `password` handler confirms the change by echoing the new password - so a
+// secret can reach the panel transcript without anyone having typed it there.
+//
+// Named tokens rather than whole-command matches, and a suffix rule alongside
+// them, because password is demonstrably not the only one and the next key
+// added upstream should be covered without a change here. Over-inclusive on
+// purpose: redacting something harmless costs a line of display, missing a
+// secret costs the secret.
+
+#define RIFT_REDACTED "[redacted]"
+
+static inline bool riftCliTokenIsSecret(const char* tok, int len) {
+  if (tok == NULL || len <= 0) return false;
+  static const char* named[] = { "password", "guest.password", "prv.key", "bridge.secret" };
+  for (int i = 0; i < 4; i++) {
+    int n = (int) strlen(named[i]);
+    if (n == len && memcmp(tok, named[i], (size_t) n) == 0) return true;
+  }
+  // Anything ending in one of these reads as a secret whatever it is prefixed
+  // with, which is how a key added upstream is covered without editing this.
+  static const char* suffixes[] = { ".password", ".secret", ".key" };
+  for (int i = 0; i < 3; i++) {
+    int n = (int) strlen(suffixes[i]);
+    if (len > n && memcmp(tok + len - n, suffixes[i], (size_t) n) == 0) return true;
+  }
+  return false;
+}
+
+// Does this command line carry a secret, or ask for one back?
+static inline bool riftCliIsSecret(const char* cmd) {
+  if (cmd == NULL) return false;
+  const char* p = cmd;
+  while (*p) {
+    while (*p == ' ') p++;
+    const char* start = p;
+    while (*p && *p != ' ') p++;
+    if (riftCliTokenIsSecret(start, (int) (p - start))) return true;
+  }
+  return false;
+}
+
+// Display-safe copy of an outgoing command: every token after the secret-named
+// one is replaced, so `password hunter2` and `set bridge.secret abc` keep the
+// part that says what was done and lose the part that must not be shown.
+static inline void riftRedactCliCommand(const char* cmd, char* out, int sz) {
+  if (out == NULL || sz <= 0) return;
+  out[0] = 0;
+  if (cmd == NULL) return;
+
+  int w = 0;
+  bool hide = false;
+  const char* p = cmd;
+  while (*p) {
+    while (*p == ' ') p++;
+    if (!*p) break;
+    const char* start = p;
+    while (*p && *p != ' ') p++;
+    int len = (int) (p - start);
+
+    const char* piece = start;
+    int piece_len = len;
+    if (hide) {
+      piece = RIFT_REDACTED;
+      piece_len = (int) strlen(RIFT_REDACTED);
+    }
+    if (w > 0) {
+      if (w + 1 >= sz) break;
+      out[w++] = ' ';
+    }
+    if (w + piece_len >= sz) piece_len = sz - w - 1;
+    if (piece_len <= 0) break;
+    memcpy(out + w, piece, (size_t) piece_len);
+    w += piece_len;
+    out[w] = 0;
+
+    if (hide) return;                                   // one placeholder, not one per token
+    if (riftCliTokenIsSecret(start, len)) hide = true;   // everything after this goes
+  }
+  out[w] = 0;
+}
+
+// Upstream confirms a password change by echoing the new password. That reply
+// arrives whether or not this device sent the command, so it is recognised by
+// its own shape rather than only by what we asked for.
+static inline bool riftCliReplyEchoesSecret(const char* reply) {
+  if (reply == NULL) return false;
+  return strncmp(reply, "password now:", 13) == 0;
+}
+
+// ---- destructive CLI commands ---------------------------------------------
+//
+// The rule is "a destructive command needs a second Enter", and it belongs here
+// rather than in one menu. It first lived as a per-entry flag on the command
+// list, which meant free text went straight past it: typing `reboot` rebooted a
+// repeater on one keypress while picking Reboot from the list asked twice.
+//
+// Prefix matches, because these arrive with arguments. Over-inclusive again on
+// purpose - a confirmation on something harmless costs one keypress.
+static inline bool riftCliIsDestructive(const char* cmd) {
+  if (cmd == NULL) return false;
+  while (*cmd == ' ') cmd++;
+  static const char* destructive[] = {
+    "reboot", "clkreboot", "poweroff", "shutdown", "erase",
+    "clear stats", "start ota", "clock sync", "time ",
+    "password", "setperm", "set prv.key", "set guest.password",
+    "set bridge.secret", "neighbor.remove", "tempradio",
+  };
+  for (int i = 0; i < 16; i++) {
+    size_t n = strlen(destructive[i]);
+    if (strncmp(cmd, destructive[i], n) == 0) return true;
+  }
+  return false;
+}
+
+// Is our own clock worth sending to somebody else?
+//
+// `clock sync` hands the repeater our timestamp, and upstream refuses to move a
+// clock backwards - so a wrong value cannot be corrected with the same command.
+// An unset RTC is detectable and refused here. A clock that is set but wrong in
+// the forward direction is not detectable without a reference, which is why the
+// confirmation shows the value: the operator can see 2031 and decline.
+#define RIFT_CLOCK_MIN 1577836800u   // 2020-01-01, below which the RTC is unset
+#define RIFT_CLOCK_MAX 4102444800u   // 2100-01-01
+
+static inline bool riftClockPlausible(uint32_t epoch) {
+  return epoch >= RIFT_CLOCK_MIN && epoch < RIFT_CLOCK_MAX;
+}
