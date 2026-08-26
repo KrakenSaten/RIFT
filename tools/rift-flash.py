@@ -21,6 +21,7 @@ this script has outlived its purpose.
 import argparse
 import glob
 import os
+import struct
 import subprocess
 import time
 import sys
@@ -90,6 +91,8 @@ def main():
     ap.add_argument("--chunk-kb", type=int, default=192,
                     help="target size of each write in KB (default 192)")
     ap.add_argument("--dry-run", action="store_true", help="build the chunks, write nothing")
+    ap.add_argument("--keep-otadata", action="store_true",
+                    help="do not clear the OTA boot selection after writing app0")
     ap.add_argument("--no-stub", action="store_true",
                     help="skip esptool's stub loader; slower, but the only thing that "
                          "works when the stub starts and then goes quiet")
@@ -190,6 +193,68 @@ def main():
         print("writing 0x%X" % addr)
         run(base + ["write_flash", hex(addr), path])
     print("done - %d write%s" % (len(paths), "" if len(paths) == 1 else "s"))
+
+    if not args.keep_otadata:
+        settle_boot_slot(base, os.path.dirname(args.firmware) or ".")
+
+
+# The partition table has two app slots - app0 at 0x10000 and app1 at 0x650000 -
+# and an otadata partition that chooses between them. This tool only ever writes
+# app0. If otadata selects app1, every write here lands in a partition nothing
+# boots: esptool reports success, verifies the hash, and the device keeps running
+# whatever is in the other slot. That failure is completely silent, and it looked
+# from the outside exactly like a feature that had not been built.
+#
+# So the boot selection is reported and then cleared. With otadata erased the
+# bootloader falls back to the first app partition, which is the one written
+# above. Nothing else is touched: nvs keeps the identity and prefs, spiffs keeps
+# the contacts and message history. Only the choice of slot is reset.
+OTADATA_OFFSET = 0xE000
+OTADATA_SIZE = 0x2000
+
+
+def settle_boot_slot(base, workdir):
+    dump = os.path.join(workdir, "rift-otadata.bin")
+    if subprocess.call(base + ["read_flash", hex(OTADATA_OFFSET), hex(OTADATA_SIZE), dump]) != 0:
+        print("could not read otadata - boot slot not verified")
+        return
+
+    try:
+        blob = open(dump, "rb").read()
+    except OSError:
+        print("could not open the otadata dump - boot slot not verified")
+        return
+
+    # Two 32-byte entries, one per sector. ota_seq first, then a 20-byte label,
+    # then ota_state. An erased sector reads as 0xFFFFFFFF, which means unused.
+    seqs = []
+    for sector in (0, 0x1000):
+        entry = blob[sector:sector + 32]
+        if len(entry) < 32:
+            seqs.append(None)
+            continue
+        seq = struct.unpack("<I", entry[0:4])[0]
+        seqs.append(None if seq == 0xFFFFFFFF else seq)
+
+    live = [s for s in seqs if s is not None]
+    if not live:
+        print("boot slot: otadata is empty, so the bootloader already takes app0")
+        os.remove(dump)
+        return
+
+    # ESP-IDF takes the highest sequence number; the slot is (seq - 1) modulo the
+    # number of OTA app partitions, which is two here.
+    slot = (max(live) - 1) % 2
+    print("boot slot: otadata selects app%d (seq %s)"
+          % (slot, ", ".join(str(s) for s in live)))
+    if slot != 0:
+        print("  app1 was booting, so the write above would have had no effect")
+
+    if subprocess.call(base + ["erase_region", hex(OTADATA_OFFSET), hex(OTADATA_SIZE)]) != 0:
+        print("  FAILED to clear otadata - the device may still boot the other slot")
+        return
+    print("  otadata cleared: the bootloader now takes app0, which is what was written")
+    os.remove(dump)
 
 
 if __name__ == "__main__":
