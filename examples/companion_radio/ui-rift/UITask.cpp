@@ -3265,9 +3265,13 @@ class RiftConstellationScreen : public RiftScreen {
     if (c == KEY_UP)   { if (_sel > 0) { _sel--; captureSelection(); } return true; }
     if (c == KEY_DOWN) { if (_sel + 1 < _count) { _sel++; captureSelection(); } return true; }
     if (c == KEY_ENTER) {
-      if (_count == 0) return true;
+      if (_count == 0) { riftLogf("NODES enter: list empty"); return true; }
       const uint8_t* key = _paths[_sel].pubkey_prefix;
       ContactInfo* contact = the_mesh.lookupContactByPubKey((uint8_t*) key, 6);
+      // Logged because this decision is invisible when it goes the wrong way:
+      // three outcomes look identical from the outside if none of them draws.
+      riftLogf("NODES enter %02X%02X: %s", key[0], key[1],
+               contact ? riftAdvertTypeName(contact->type) : "not a contact");
       if (contact == NULL) {
         _task->showAlert("Not a contact yet", 1400);
         return true;
@@ -6616,10 +6620,16 @@ void UITask::openRepeaterPanel(const uint8_t* pub_key) {
     showAlert("Repeater panel unavailable", 1600);
     return;
   }
-  if (_overlay != NULL) return;    // a popup is already up; it owns the screen
+  if (_overlay != NULL) {
+    // Logged rather than ignored: a stuck overlay is invisible from here, and it
+    // makes every later press do nothing for a reason nobody can see.
+    riftLogf("repeater panel: overlay already up");
+    return;
+  }
   if (!((RiftRepeaterScreen *) repeater_panel)->openFor(pub_key)) {
     // openFor only fails when the node is not a contact, which is a heard node
     // that was never added - a real and common state on a busy mesh.
+    riftLogf("repeater panel: not a contact");
     showAlert("Not a contact yet", 1600);
     return;
   }
