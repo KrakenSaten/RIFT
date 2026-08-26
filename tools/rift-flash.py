@@ -14,6 +14,9 @@ hand on the next. It is in the repo so that stops happening.
     python tools/rift-flash.py --port COM5 --single    # try one write anyway
     python tools/rift-flash.py --dry-run               # build the chunks only
 
+Every run ends by comparing the whole app region against the file: per-chunk
+hashes have reported success on a flash the device was not running.
+
 --single exists so the workaround can be retested cheaply. The day it succeeds,
 this script has outlived its purpose.
 """
@@ -193,6 +196,23 @@ def main():
         print("writing 0x%X" % addr)
         run(base + ["write_flash", hex(addr), path])
     print("done - %d write%s" % (len(paths), "" if len(paths) == 1 else "s"))
+
+    # Per-chunk hashes are not proof that the device is running this image.
+    #
+    # A flash of the repeater-control build reported nine writes with every hash
+    # verified, and the device kept running the previous version - reading app0
+    # back afterwards found the old strings and none of the new ones. Whatever
+    # went wrong, "done" was not evidence, and there was no way to tell from the
+    # output that anything had.
+    #
+    # So the whole app region is compared against the file as a final step. This
+    # is the only check here that answers the actual question: is what is in
+    # flash the image that was just built.
+    print("verifying the whole image against flash")
+    if subprocess.call(base + ["verify_flash", hex(APP_OFFSET), args.firmware]) != 0:
+        sys.exit("VERIFY FAILED - flash does not match %s, so the device is not "
+                 "running this build. Run again." % args.firmware)
+    print("verified: flash matches the built image")
 
     if not args.keep_otadata:
         settle_boot_slot(base, os.path.dirname(args.firmware) or ".")
