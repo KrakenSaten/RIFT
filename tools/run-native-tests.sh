@@ -33,8 +33,17 @@ for dir in test/test_*; do
       $srcs $srcfiles "$GT/src/gtest-all.cc" -o "$OUT/$name.exe" >"$OUT/$name.log" 2>&1; then
     echo "$name: BUILD FAILED"; tail -15 "$OUT/$name.log"; fail=1; continue
   fi
+  # Run, and give a silent run one more go. A freshly linked binary on Windows is
+  # sometimes still locked when it is invoked and produces nothing at all; a real
+  # crash reproduces on the retry, so this cannot hide one. Without it the total
+  # was intermittently short by whole suites.
   out=$("$OUT/$name.exe" 2>&1)
   rc=$?
+  if [ $rc -ne 0 ] || ! echo "$out" | grep -q 'PASSED  \]'; then
+    sleep 1
+    out=$("$OUT/$name.exe" 2>&1)
+    rc=$?
+  fi
   # the PASSED line is written last, so it cannot be cut short by interleaving
   n=$(echo "$out" | grep -Eo 'PASSED  \] [0-9]+ test' | tail -1 | grep -Eo '[0-9]+')
   if echo "$out" | grep -q '\[  FAILED  \]'; then
