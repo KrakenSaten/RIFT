@@ -38,8 +38,13 @@ public:
 
   bool isPresent() const { return _ok; }
 
-  // Replaces whatever is playing. Alerts are short and the newest one is the one
-  // that matters, so there is no queue to fall behind.
+  // Starts a sequence, or holds it until the current one has finished sounding.
+  //
+  // It used to replace whatever was playing. With two messages arriving together
+  // that cut one note part way through and restarted it, which is heard as one
+  // broken beep rather than as two messages. The queue is one slot deep, so a
+  // burst does not turn into a minute of beeping - the second alert is what says
+  // it was more than one, and a third adds nothing.
   //
   // gain is 0..100 percent of the driver's own amplitude. Discretion is partly
   // loudness and not only pitch: a low note at full scale is still an interruption,
@@ -96,6 +101,10 @@ private:
   uint32_t _total_ms = 0;
   uint32_t _written_total = 0;   // samples handed over for this sequence
   uint32_t _underruns = 0;
+  Step _pending[MAX_STEPS];
+  int  _pending_count = 0;
+  uint8_t _pending_gain = 100;
+  bool _have_pending = false;
   uint8_t  _gain = 100;
 
   void beginStep();

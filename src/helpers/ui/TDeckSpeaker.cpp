@@ -27,6 +27,9 @@
 // amplitude in a room, and an alert has to be noticed rather than resented.
 #define SPK_AMPLITUDE  8000
 
+// Fade length at each end of a note, in samples. 64 at 16 kHz is 4 ms.
+#define SPK_RAMP       64
+
 // A 256-point sine, built once at begin(). Sixteen points was audibly rough: at 523
 // Hz and 16 kHz each entry was held for two samples, so the output was a staircase
 // rather than a tone, and the harmonics of that staircase are what "scratchy" was.
@@ -92,6 +95,24 @@ void TDeckSpeaker::beginStep() {
 void TDeckSpeaker::play(const Step* steps, int count, uint8_t gain) {
   if (!_ok || steps == NULL || count <= 0) return;
   if (count > MAX_STEPS) count = MAX_STEPS;
+
+  // A second alert while one is sounding waits for it, rather than replacing it.
+  //
+  // Replacing was the documented behaviour - "the newest one is the one that
+  // matters" - and with two messages arriving together it meant one note was cut
+  // part way through and restarted, which is heard as a single broken beep rather
+  // than as two messages. One slot deep: a burst of ten should not queue ten
+  // alerts, and the second one is what tells you it was more than one.
+  if (isPlaying()) {
+    if (!_have_pending) {
+      _have_pending = true;
+      _pending_count = count;
+      _pending_gain = gain > 100 ? 100 : gain;
+      for (int i = 0; i < count; i++) _pending[i] = steps[i];
+    }
+    return;
+  }
+
   _gain = gain > 100 ? 100 : gain;
   for (int i = 0; i < count; i++) _seq[i] = steps[i];
   _count = count;
@@ -109,6 +130,7 @@ void TDeckSpeaker::stop() {
   _audio_started_at = 0;
   _written_total = 0;
   _total_ms = 0;
+  _have_pending = false;
   i2s_zero_dma_buffer(SPK_PORT);   // an explicit cut, unlike finishing normally
 }
 
@@ -126,7 +148,23 @@ uint32_t TDeckSpeaker::bufferedMs() const {
 }
 
 void TDeckSpeaker::loop() {
-  if (!_ok || _step >= _count) return;
+  if (!_ok) return;
+
+  if (_step >= _count) {
+    // Nothing left to generate. The only work here is starting a queued alert,
+    // and only once this one has actually been heard - see below. The early
+    // return this replaced skipped that block entirely, so a queued alert would
+    // never have started.
+    if (_have_pending && !isDraining()) {
+      _have_pending = false;
+      Step seq[MAX_STEPS];
+      const int n = _pending_count;
+      const uint8_t g = _pending_gain;
+      for (int i = 0; i < n; i++) seq[i] = _pending[i];
+      play(seq, n, g);
+    }
+    return;
+  }
 
   // Underrun test, before any writing: at the sample rate the engine consumes
   // exactly _rate samples a second, so by now it must have played this many. If
@@ -163,9 +201,27 @@ void TDeckSpeaker::loop() {
     if (_inc == 0) {
       memset(buf, 0, (size_t) n * sizeof(int16_t));    // a rest still costs time
     } else {
+      const int32_t amp = SPK_AMPLITUDE * _gain / 100;
       for (int i = 0; i < n; i++) {
         uint32_t ph = base + (uint32_t) i * _inc;
-        buf[i] = (int16_t) ((int32_t) s_sine[ph >> 24] * (SPK_AMPLITUDE * _gain / 100) / 32767);
+        int32_t v = (int32_t) s_sine[ph >> 24] * amp / 32767;
+
+        // Ramp in and out over a few milliseconds.
+        //
+        // Without this the waveform went from silence to full amplitude in one
+        // sample and back again at the end of every note, and a step that size is
+        // a click. Two clicks per note, plus one at each pitch change, is most of
+        // what "the sound is odd and interrupted" was: the tone was intact and the
+        // edges around it were not.
+        //
+        // Linear, over SPK_RAMP samples at each end of the note. At 16 kHz that is
+        // 4 ms, short enough not to soften a 100 ms alert and long enough that the
+        // step per sample is inaudible.
+        const uint32_t pos = _step_done + (uint32_t) i;
+        const uint32_t remain = _step_samples > pos ? _step_samples - pos : 0;
+        if (pos < SPK_RAMP)    v = v * (int32_t) pos / SPK_RAMP;
+        if (remain < SPK_RAMP) v = v * (int32_t) remain / SPK_RAMP;
+        buf[i] = (int16_t) v;
       }
     }
 

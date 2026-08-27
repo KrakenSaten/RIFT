@@ -924,8 +924,15 @@ bool rift_sound_on = true;
 // No sound for an acknowledgement. You are looking at the screen when you send, and
 // the delivery state is already there - a tone would be telling you something you
 // are already reading.
-static const TDeckSpeaker::Step SND_DM[]   = { {523,45}, {659,55} };
-static const TDeckSpeaker::Step SND_CHAN[] = { {440,50} };
+// Lengthened from 45/55 and 50 ms. A note that short is heard as a click with a
+// pitch rather than as a tone - about 8 ms of it was the ramp at each end, and a
+// single 50 ms beep was the "short, interrupted" channel alert. These are still
+// brief: 160 ms for a direct message, 130 for a channel.
+//
+// The queue holds 320 ms, so each of these is still handed to the DMA engine in
+// one pass and cannot be affected by what the main loop does next.
+static const TDeckSpeaker::Step SND_DM[]   = { {523,70}, {659,90} };
+static const TDeckSpeaker::Step SND_CHAN[] = { {440,130} };
 static const TDeckSpeaker::Step SND_PROX[] = { {880,70}, {1175,70}, {1568,110} };
 
 #define SND_GAIN_MSG   45     // messages: present, not insistent
