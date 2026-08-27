@@ -7079,6 +7079,13 @@ void UITask::loop() {
   // this being called often. Still first, because the call is bounded by a zero
   // timeout and getting the audio queued before a 153 KB redraw is free.
   rift_speaker.loop();
+  // One log line per tone: samples written, passes it took, and the silence
+  // before it. The two summary counters on SYSTEM have each turned out to be
+  // incapable of failing, so this is the one that can actually be wrong.
+  {
+    char snd[48];
+    if (rift_speaker.takeEvent(snd, sizeof(snd))) riftLogf("%s", snd);
+  }
 #endif
 
   if (curr) curr->poll();

@@ -120,6 +120,7 @@ void TDeckSpeaker::play(const Step* steps, int count, uint8_t gain) {
   _audio_started_at = 0;
   _written_total = 0;
   _total_ms = 0;
+  _passes = 0;
   for (int i = 0; i < count; i++) _total_ms += _seq[i].ms;
   beginStep();
 }
@@ -141,6 +142,14 @@ void TDeckSpeaker::stop() {
 bool TDeckSpeaker::isDraining() const {
   if (_audio_started_at == 0) return false;
   return (int32_t) (millis() - (_audio_started_at + _total_ms + 40)) < 0;
+}
+
+bool TDeckSpeaker::takeEvent(char* out, int sz) {
+  if (!_ev_ready || out == NULL || sz <= 0) return false;
+  _ev_ready = false;
+  snprintf(out, (size_t) sz, "snd %usmp %upass sil %ums",
+           (unsigned) _ev_samples, (unsigned) _ev_passes, (unsigned) _ev_silence_ms);
+  return true;
 }
 
 uint32_t TDeckSpeaker::bufferedMs() const {
@@ -165,6 +174,8 @@ void TDeckSpeaker::loop() {
     }
     return;
   }
+
+  _passes++;
 
   // Underrun test, before any writing: at the sample rate the engine consumes
   // exactly _rate samples a second, so by now it must have played this many. If
@@ -241,6 +252,18 @@ void TDeckSpeaker::loop() {
     if (did < (uint32_t) n) break;    // queue full; come back next pass
   }
 
+  if (_step >= _count && !_ev_ready) {
+    // Recorded when generation finishes, which is also when the previous tone's
+    // end becomes known: _audio_started_at + _total_ms is when this one stops
+    // sounding, and the difference from the last one is the silence between them.
+    _ev_samples = _written_total;
+    _ev_passes = _passes;
+    _ev_silence_ms = (_prev_end_ms != 0 && _audio_started_at > _prev_end_ms)
+                       ? (_audio_started_at - _prev_end_ms) : 0;
+    _prev_end_ms = _audio_started_at + _total_ms;
+    _ev_ready = true;
+  }
+
   // Deliberately does NOT zero the buffers here.
   //
   // This ran the moment the generator had written its last sample, which is not
@@ -265,5 +288,6 @@ void TDeckSpeaker::stop() { }
 void TDeckSpeaker::loop() { }
 bool TDeckSpeaker::isDraining() const { return false; }
 uint32_t TDeckSpeaker::bufferedMs() const { return 0; }
+bool TDeckSpeaker::takeEvent(char*, int) { return false; }
 
 #endif
