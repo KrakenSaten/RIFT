@@ -19,7 +19,13 @@
 // Non-blocking, because there is no watchdog on the main loop and a blocking call
 // silently starves the LoRa radio - the most important constraint in this codebase.
 // loop() writes only as much as the DMA buffer will accept right now, with a zero
-// wait, and returns. A tone therefore takes as many passes as it takes.
+// wait, and returns.
+//
+// The DMA queue is sized to hold a whole alert, so in practice a tone is handed
+// over in one or two passes and then plays out on its own. That is the point: the
+// main loop does a full-frame redraw and a filesystem write on the pass where a
+// message arrives, which is exactly when the alert sounds, and a queue shorter
+// than that pass is a queue that runs dry mid-tone.
 class TDeckSpeaker {
 public:
   struct Step { uint16_t hz; uint16_t ms; };   // hz 0 = a rest
@@ -41,7 +47,11 @@ public:
   // should be audible in how much it insists.
   void play(const Step* steps, int count, uint8_t gain = 100);
 
-  bool isPlaying() const { return _ok && _step < _count; }
+  // True while a tone is still audible, which includes the stretch after the last
+  // sample has been queued but before the DMA engine has played it. Reporting
+  // "not playing" at the handover was how the tail came to be discarded.
+  bool isPlaying() const { return _ok && (_step < _count || isDraining()); }
+  bool isDraining() const;
   void stop();
 
   // Call every main-loop pass. Does nothing when idle.
@@ -50,6 +60,14 @@ public:
   // Frames handed to the driver since boot. On screen so "no sound" can be told
   // apart from "no code ran" without a logic analyser.
   uint32_t framesWritten() const { return _frames; }
+
+  // The longest gap between two loop() calls while a tone was playing, in
+  // milliseconds, since boot. This is the number that says whether the DMA queue
+  // is long enough: if it exceeds the queue depth in milliseconds, the queue ran
+  // dry and the tone stuttered. Nothing measured this before, which is why a
+  // 32 ms queue survived in a loop that does 153 KB redraws.
+  uint32_t maxLoopGapMs() const { return _max_gap; }
+  uint32_t bufferedMs() const;
 
 private:
   static const int MAX_STEPS = 8;
@@ -68,6 +86,12 @@ private:
   uint32_t _phase = 0;          // 8.24 fixed point; the top byte indexes the table
   uint32_t _inc = 0;            // phase step per sample for the current note
   uint32_t _frames = 0;
+  // Millis at which the first sample of this sequence reached the driver, and how
+  // long the whole sequence lasts. Together they say when it has been heard.
+  uint32_t _audio_started_at = 0;
+  uint32_t _total_ms = 0;
+  uint32_t _last_loop_at = 0;
+  uint32_t _max_gap = 0;
   uint8_t  _gain = 100;
 
   void beginStep();

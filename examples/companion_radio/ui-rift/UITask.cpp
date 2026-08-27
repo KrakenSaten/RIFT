@@ -2374,6 +2374,37 @@ public:
     }
     y += RIFT_LINE_H;
 
+#ifdef RIFT_SPEAKER
+    // The one number that says whether alert audio can stutter: the longest gap
+    // between two speaker passes while a tone was playing, against how much audio
+    // the DMA queue holds. Gap under buffer means the queue never ran dry.
+    //
+    // Nothing measured this before, and that is how a 32 ms queue survived in a
+    // loop whose worst pass does a 153 KB full-frame redraw and a filesystem write
+    // - the pass a message arrives on, which is the pass the alert sounds on.
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(CX, y, "AUDIO GAP");
+    {
+      uint32_t gap = rift_speaker.maxLoopGapMs();
+      uint32_t buf = rift_speaker.bufferedMs();
+      display.setColor(gap > buf ? rift_pal.accent : rift_pal.ok);
+      snprintf(tmp, sizeof(tmp), "%ums max / %ums buf", (unsigned) gap, (unsigned) buf);
+      display.drawTextRightAlign(CR, y, tmp);
+    }
+    y += RIFT_LINE_H;
+
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(CX, y, "AUDIO FRAMES");
+    display.setColor(rift_speaker.isPresent() ? rift_pal.fg : rift_pal.accent);
+    if (rift_speaker.isPresent()) {
+      snprintf(tmp, sizeof(tmp), "%u", (unsigned) rift_speaker.framesWritten());
+    } else {
+      snprintf(tmp, sizeof(tmp), "driver not started");
+    }
+    display.drawTextRightAlign(CR, y, tmp);
+    y += RIFT_LINE_H;
+#endif
+
 #ifdef RIFT_INPUT_KEYBOARD
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(CX, y, "KEYBOARD");
@@ -7035,9 +7066,10 @@ void UITask::loop() {
 #endif
 
 #ifdef RIFT_SPEAKER
-  // Before the screen work: it writes at most one DMA buffer with a zero timeout, so
-  // it is bounded, and a tone that stutters because a redraw ran first is worse than
-  // a redraw that waits a few hundred microseconds.
+  // Before the screen work, and it matters less than it used to: the DMA queue now
+  // holds a whole alert, so a tone survives a long pass rather than depending on
+  // this being called often. Still first, because the call is bounded by a zero
+  // timeout and getting the audio queued before a 153 KB redraw is free.
   rift_speaker.loop();
 #endif
 

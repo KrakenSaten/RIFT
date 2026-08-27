@@ -8,11 +8,20 @@
 // there is no contention to arbitrate.
 #define SPK_PORT   I2S_NUM_0
 
-// Small buffers on purpose. The DMA queue is what decides how long a blocking write
-// would block for, and this never blocks - but a long queue would also mean a tone
-// kept sounding well after stop(), which reads as a stuck alert.
-#define SPK_DMA_COUNT  4
-#define SPK_DMA_LEN    128
+// Sized to hold a whole alert, which is what makes the tone immune to the main
+// loop. 10 x 512 samples is 5120 samples, 320 ms at 16 kHz, against a longest
+// alert of 250 ms - so an entire tone is handed to the DMA engine in one or two
+// passes and plays out at the sample rate whatever the loop does afterwards.
+//
+// It was 4 x 128 = 32 ms, and 32 ms is less than one main-loop iteration when a
+// message arrives: that pass does a full-frame redraw, 153 KB over HSPI, plus the
+// message-log write. The queue ran dry mid-tone and tx_desc_auto_clear put
+// silence out, which is the stutter.
+//
+// A long queue was avoided before on the grounds that a tone would keep sounding
+// after stop(). It does not: stop() zeroes the buffers.
+#define SPK_DMA_COUNT  10
+#define SPK_DMA_LEN    512
 
 // A quarter of full scale. This amplifier is loud enough to be unpleasant at full
 // amplitude in a room, and an alert has to be noticed rather than resented.
@@ -87,17 +96,44 @@ void TDeckSpeaker::play(const Step* steps, int count, uint8_t gain) {
   for (int i = 0; i < count; i++) _seq[i] = steps[i];
   _count = count;
   _step = 0;
+  _audio_started_at = 0;
+  _total_ms = 0;
+  for (int i = 0; i < count; i++) _total_ms += _seq[i].ms;
   beginStep();
 }
 
 void TDeckSpeaker::stop() {
   if (!_ok) return;
   _count = _step = 0;
-  i2s_zero_dma_buffer(SPK_PORT);
+  _audio_started_at = 0;
+  _total_ms = 0;
+  i2s_zero_dma_buffer(SPK_PORT);   // an explicit cut, unlike finishing normally
+}
+
+// True until the audio has been heard, not until the samples have been handed
+// over. The DMA engine consumes at exactly the sample rate, so a sequence is done
+// _total_ms after its first sample went in; the margin covers the startup latency
+// of one buffer.
+bool TDeckSpeaker::isDraining() const {
+  if (_audio_started_at == 0) return false;
+  return (int32_t) (millis() - (_audio_started_at + _total_ms + 40)) < 0;
+}
+
+uint32_t TDeckSpeaker::bufferedMs() const {
+  return (uint32_t) SPK_DMA_COUNT * (uint32_t) SPK_DMA_LEN * 1000u / (uint32_t) _rate;
 }
 
 void TDeckSpeaker::loop() {
-  if (!_ok || _step >= _count) return;
+  if (!_ok || _step >= _count) { _last_loop_at = 0; return; }
+
+  // Measured only while a tone is active, because that is the only time a gap
+  // matters. Compared against bufferedMs() on the SYSTEM readings page.
+  const uint32_t now_ms = millis();
+  if (_last_loop_at != 0) {
+    uint32_t gap = now_ms - _last_loop_at;
+    if (gap > _max_gap) _max_gap = gap;
+  }
+  _last_loop_at = now_ms;
 
   int16_t buf[SPK_DMA_LEN];
 
@@ -135,6 +171,10 @@ void TDeckSpeaker::loop() {
     if (i2s_write(SPK_PORT, buf, (size_t) n * sizeof(int16_t), &written, 0) != ESP_OK) break;
 
     const uint32_t did = (uint32_t) (written / sizeof(int16_t));
+    // When the first sample of this sequence actually reached the driver, not when
+    // play() was called. The two differ by however long the loop took to come
+    // back, and the drain deadline has to be measured from the audio.
+    if (did > 0 && _audio_started_at == 0) _audio_started_at = millis();
     _phase = base + did * _inc;
     _step_done += did;
     _frames += did;
@@ -142,11 +182,19 @@ void TDeckSpeaker::loop() {
     if (did < (uint32_t) n) break;    // queue full; come back next pass
   }
 
-  if (_step >= _count) {
-    // Zero the buffers on the way out, or the tail of the last note sits in DMA and
-    // repeats until something else writes.
-    i2s_zero_dma_buffer(SPK_PORT);
-  }
+  // Deliberately does NOT zero the buffers here.
+  //
+  // This ran the moment the generator had written its last sample, which is not
+  // the moment the audio has been heard: everything still queued was thrown away.
+  // At a 32 ms queue that clipped the tail, which is what "cut off" was. When the
+  // loop was idle and fast enough to queue a whole short tone in one pass, it
+  // deleted the tone before a note of it played - which is what "sometimes no
+  // sound" was. A bigger queue would have made that the normal case.
+  //
+  // Nothing needs zeroing: tx_desc_auto_clear is set, so the driver emits silence
+  // once the queue drains rather than repeating the last buffer. The queue is left
+  // to play out, and the session is only marked finished once it has - see
+  // isPlaying(). stop() still zeroes, because that is an explicit cut.
 }
 
 #else   // not ESP32
@@ -156,5 +204,7 @@ void TDeckSpeaker::play(const Step*, int, uint8_t) { }
 void TDeckSpeaker::beginStep() { }
 void TDeckSpeaker::stop() { }
 void TDeckSpeaker::loop() { }
+bool TDeckSpeaker::isDraining() const { return false; }
+uint32_t TDeckSpeaker::bufferedMs() const { return 0; }
 
 #endif
