@@ -97,12 +97,20 @@ the port, or `The chip stopped responding`.
 splitting at a different boundary and watching the same address go through. So it
 is the transport rather than the image.
 
-**The split is automatic; you should not need `--parts`.** The tool aims for 192KB
-per write and computes the count from the image size, because the count that works
-is a function of how big the firmware has become. At 1.54MB, four parts of 405KB
-was fine. At 1.55MB, four parts is 400KB each and fails on the third, while eight
-parts at 200KB goes through — so a fixed count is a default that silently stops
-working as the image grows.
+**The split is automatic and self-correcting; you should not need `--parts` or
+`--chunk-kb`.** The tool aims for 64KB per write, computes the count from the
+image size, and on a failed write halves the size and starts the image over
+rather than stopping with half an image on the device.
+
+The threshold moves, which is why it is not a number to remember. 405KB per write
+was fine at a 1.54MB image. At 1.55MB, 400KB failed on the third write while
+200KB went through. Later 188KB failed on the same board where 64KB succeeded
+immediately. Every fixed value here has stopped working eventually.
+
+**Every run ends by comparing the whole app region against the file.** Per-chunk
+hashes are not evidence: a flash once reported nine writes with every hash
+verified while the device kept running the previous version, which cost two days
+of debugging a feature that was never on the device.
 
 Ruled out **for this failure**, so nobody repeats them: a different cable,
 `upload_speed` (baud is a no-op on native USB CDC), and `--no-stub` — which only

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Flash the RIFT firmware, splitting the write.
 
-A single write of the whole app partition fails reproducibly at roughly 1.2 MB
-with the USB device dropping off the bus - see BUILDING.md for what was ruled
-out. Two writes of half the image each complete in a few seconds with their
-hashes verified, and esptool verifies per chunk, so the pair covers the whole
-image.
+A single write of the whole app partition fails part way through with the USB
+device dropping off the bus - see BUILDING.md for what was ruled out. Splitting
+it into shorter writes works, because the threshold is the length of one transfer
+rather than any address.
+
+That threshold moves. 400 KB pieces were fine, then 200 KB, and then 188 KB
+failed on the same board where 64 KB went straight through. So the size is not
+something to remember: a failed write halves it and starts the image over, rather
+than stopping with half an image on the device.
 
 This lived as a local PowerShell script on one machine and had to be rebuilt by
 hand on the next. It is in the repo so that stops happening.
@@ -69,19 +73,57 @@ def run(cmd, attempts=4):
     for attempt in range(1, attempts + 1):
         if subprocess.call(cmd) == 0:
             _chunks_written += 1
-            return
+            return True
         if attempt < attempts:
             # the port often needs a moment before it will open again
             print("  attempt %d failed, retrying in 3s" % attempt)
             time.sleep(3)
-    if _chunks_written:
-        sys.exit("write failed after %d attempts - the image is now partly written, "
-                 "so run this again before power-cycling" % attempts)
-    # Nothing reached the chip, so the device is untouched. Saying "partly
-    # written" here sends the reader looking for a half-flashed device that
-    # does not exist.
-    sys.exit("write failed after %d attempts and no chunk was written - the "
-             "device is untouched" % attempts)
+    return False
+
+
+def write_all(base, paths):
+    """Write every chunk. False if one of them would not go through."""
+    for addr, path, _ in paths:
+        print("writing 0x%X" % addr)
+        if not run(base + ["write_flash", hex(addr), path]):
+            return False
+    return True
+
+
+def split_image(image, args, chunk_kb=None):
+    """Cut the image into sector-aligned pieces and write them out as files."""
+    kb = chunk_kb if chunk_kb else args.chunk_kb
+    parts = args.parts
+    if parts <= 0:
+        target = max(kb, 1) * 1024
+        parts = max(1, (len(image) + target - 1) // target)
+
+    if args.single or parts <= 1 or len(image) <= 4096:
+        chunks = [(APP_OFFSET, image)]
+    else:
+        # sector-aligned cuts, so no write straddles a 4KB erase boundary
+        step = ((len(image) // parts) + 4095) // 4096 * 4096
+        chunks = []
+        off = 0
+        while off < len(image):
+            chunks.append((APP_OFFSET + off, image[off:off + step]))
+            off += step
+
+    out = os.path.join(os.path.dirname(args.firmware) or ".", "rift-chunks")
+    os.makedirs(out, exist_ok=True)
+
+    paths = []
+    for addr, data in chunks:
+        p = os.path.join(out, "0x%X.bin" % addr)
+        open(p, "wb").write(data)
+        paths.append((addr, p, len(data)))
+
+    total = sum(n for _, _, n in paths)
+    if total != len(image):
+        sys.exit("chunks total %d but image is %d - refusing to write" % (total, len(image)))
+    print("%d chunks of about %d KB, covering the image exactly (%d bytes)"
+          % (len(paths), kb, total))
+    return paths
 
 
 def main():
@@ -91,8 +133,8 @@ def main():
     ap.add_argument("--single", action="store_true", help="one write instead of two")
     ap.add_argument("--parts", type=int, default=0,
                     help="number of writes to split into (default: from --chunk-kb)")
-    ap.add_argument("--chunk-kb", type=int, default=192,
-                    help="target size of each write in KB (default 192)")
+    ap.add_argument("--chunk-kb", type=int, default=64,
+                    help="target size of each write in KB (default 64); halved automatically if a write fails")
     ap.add_argument("--dry-run", action="store_true", help="build the chunks, write nothing")
     ap.add_argument("--keep-otadata", action="store_true",
                     help="do not clear the OTA boot selection after writing app0")
@@ -127,36 +169,7 @@ def main():
     # each and fails, while eight parts at 200KB each goes through. A fixed default
     # is therefore something that silently stops working as the image grows, which is
     # the worst kind of default.
-    parts = args.parts
-    if parts <= 0:
-        target = max(args.chunk_kb, 1) * 1024
-        parts = max(1, (len(image) + target - 1) // target)
-
-    if args.single or parts <= 1 or len(image) <= 4096:
-        chunks = [(APP_OFFSET, image)]
-    else:
-        # sector-aligned cuts, so no write straddles a 4KB erase boundary
-        step = ((len(image) // parts) + 4095) // 4096 * 4096
-        chunks = []
-        off = 0
-        while off < len(image):
-            chunks.append((APP_OFFSET + off, image[off:off + step]))
-            off += step
-
-    out = os.path.join(os.path.dirname(args.firmware) or ".", "rift-chunks")
-    os.makedirs(out, exist_ok=True)
-
-    paths = []
-    for addr, data in chunks:
-        p = os.path.join(out, "0x%X.bin" % addr)
-        open(p, "wb").write(data)
-        paths.append((addr, p, len(data)))
-        print("  0x%06X  %8d bytes  %s" % (addr, len(data), p))
-
-    total = sum(n for _, _, n in paths)
-    if total != len(image):
-        sys.exit("chunks total %d but image is %d - refusing to write" % (total, len(image)))
-    print("chunks cover the image exactly (%d bytes)" % total)
+    paths = split_image(image, args)
 
     if args.dry_run:
         print("dry run: nothing written")
@@ -192,9 +205,31 @@ def main():
     # than part way through a write - the two look nothing alike in the output.
     if args.no_stub:
         base += ["--no-stub"]
-    for addr, path, _ in paths:
-        print("writing 0x%X" % addr)
-        run(base + ["write_flash", hex(addr), path])
+    # Halve the chunk size and start over rather than stopping with a partial
+    # image on the device.
+    #
+    # The failure is a USB drop part way through one transfer, and the threshold
+    # is the transfer length rather than the address - so the same image that will
+    # not go in 188 KB pieces goes in 64 KB pieces on the next try. That threshold
+    # moves: it was fine at 400 KB, then at 200 KB, and today 188 KB failed and 64
+    # KB worked on the same board. Anything a human has to remember to pass here
+    # is something that will be forgotten on the day the device is half-written.
+    kb = args.chunk_kb
+    while True:
+        if write_all(base, paths):
+            break
+        if args.single or args.parts > 0 or kb <= 16:
+            if _chunks_written:
+                sys.exit("write failed and the image is now partly written, so run "
+                         "this again before power-cycling")
+            # Nothing reached the chip in THIS run. A previous run may still have
+            # left a partial image, which is why this does not claim the device is
+            # in any particular state.
+            sys.exit("write failed and no chunk was written by this run")
+        kb = kb // 2
+        print("write failed at about %d KB per chunk - retrying the whole image "
+              "at about %d KB" % (kb * 2, kb))
+        paths = split_image(image, args, kb)
     print("done - %d write%s" % (len(paths), "" if len(paths) == 1 else "s"))
 
     # Per-chunk hashes are not proof that the device is running this image.
