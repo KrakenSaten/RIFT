@@ -61,12 +61,16 @@ public:
   // apart from "no code ran" without a logic analyser.
   uint32_t framesWritten() const { return _frames; }
 
-  // The longest gap between two loop() calls while a tone was playing, in
-  // milliseconds, since boot. This is the number that says whether the DMA queue
-  // is long enough: if it exceeds the queue depth in milliseconds, the queue ran
-  // dry and the tone stuttered. Nothing measured this before, which is why a
-  // 32 ms queue survived in a loop that does 153 KB redraws.
-  uint32_t maxLoopGapMs() const { return _max_gap; }
+  // Underruns since boot: the number of times the DMA engine had consumed every
+  // sample it was given while a tone was still in progress. That is the stutter,
+  // stated directly rather than inferred.
+  //
+  // The first attempt at this measured the gap between loop() calls, which was
+  // useless the moment the queue got big enough to take a whole tone in one pass:
+  // there were no further passes, so the gap read 0 and would have read 0 however
+  // badly the audio behaved. This compares the samples the engine must have
+  // played by now against the samples handed over, which is the actual question.
+  uint32_t underruns() const { return _underruns; }
   uint32_t bufferedMs() const;
 
 private:
@@ -90,8 +94,8 @@ private:
   // long the whole sequence lasts. Together they say when it has been heard.
   uint32_t _audio_started_at = 0;
   uint32_t _total_ms = 0;
-  uint32_t _last_loop_at = 0;
-  uint32_t _max_gap = 0;
+  uint32_t _written_total = 0;   // samples handed over for this sequence
+  uint32_t _underruns = 0;
   uint8_t  _gain = 100;
 
   void beginStep();

@@ -2375,20 +2375,21 @@ public:
     y += RIFT_LINE_H;
 
 #ifdef RIFT_SPEAKER
-    // The one number that says whether alert audio can stutter: the longest gap
-    // between two speaker passes while a tone was playing, against how much audio
-    // the DMA queue holds. Gap under buffer means the queue never ran dry.
+    // A verdict, not a number to interpret. It counts the times the DMA engine had
+    // played everything it was given while a tone was still running, which is the
+    // stutter itself rather than a proxy for it.
     //
-    // Nothing measured this before, and that is how a 32 ms queue survived in a
-    // loop whose worst pass does a 153 KB full-frame redraw and a filesystem write
-    // - the pass a message arrives on, which is the pass the alert sounds on.
+    // The first version of this row showed the gap between speaker passes, and it
+    // read "0ms max" - which it would have read however bad the audio was, because
+    // a queue big enough to take a whole tone in one pass leaves no second pass to
+    // measure against. A measurement that cannot fail is not a measurement.
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "AUDIO GAP");
+    display.drawTextLeftAlign(CX, y, "AUDIO");
     {
-      uint32_t gap = rift_speaker.maxLoopGapMs();
-      uint32_t buf = rift_speaker.bufferedMs();
-      display.setColor(gap > buf ? rift_pal.accent : rift_pal.ok);
-      snprintf(tmp, sizeof(tmp), "%ums max / %ums buf", (unsigned) gap, (unsigned) buf);
+      uint32_t un = rift_speaker.underruns();
+      display.setColor(un > 0 ? rift_pal.accent : rift_pal.ok);
+      if (un > 0) snprintf(tmp, sizeof(tmp), "%u underruns", (unsigned) un);
+      else        snprintf(tmp, sizeof(tmp), "ok, %ums queue", (unsigned) rift_speaker.bufferedMs());
       display.drawTextRightAlign(CR, y, tmp);
     }
     y += RIFT_LINE_H;

@@ -97,6 +97,7 @@ void TDeckSpeaker::play(const Step* steps, int count, uint8_t gain) {
   _count = count;
   _step = 0;
   _audio_started_at = 0;
+  _written_total = 0;
   _total_ms = 0;
   for (int i = 0; i < count; i++) _total_ms += _seq[i].ms;
   beginStep();
@@ -106,6 +107,7 @@ void TDeckSpeaker::stop() {
   if (!_ok) return;
   _count = _step = 0;
   _audio_started_at = 0;
+  _written_total = 0;
   _total_ms = 0;
   i2s_zero_dma_buffer(SPK_PORT);   // an explicit cut, unlike finishing normally
 }
@@ -124,16 +126,16 @@ uint32_t TDeckSpeaker::bufferedMs() const {
 }
 
 void TDeckSpeaker::loop() {
-  if (!_ok || _step >= _count) { _last_loop_at = 0; return; }
+  if (!_ok || _step >= _count) return;
 
-  // Measured only while a tone is active, because that is the only time a gap
-  // matters. Compared against bufferedMs() on the SYSTEM readings page.
-  const uint32_t now_ms = millis();
-  if (_last_loop_at != 0) {
-    uint32_t gap = now_ms - _last_loop_at;
-    if (gap > _max_gap) _max_gap = gap;
+  // Underrun test, before any writing: at the sample rate the engine consumes
+  // exactly _rate samples a second, so by now it must have played this many. If
+  // that exceeds what it has been given, it ran out and put silence out instead -
+  // which is the stutter, measured rather than reasoned about.
+  if (_audio_started_at != 0) {
+    uint32_t due = (millis() - _audio_started_at) * (uint32_t) _rate / 1000u;
+    if (due > _written_total) _underruns++;
   }
-  _last_loop_at = now_ms;
 
   int16_t buf[SPK_DMA_LEN];
 
@@ -178,6 +180,7 @@ void TDeckSpeaker::loop() {
     _phase = base + did * _inc;
     _step_done += did;
     _frames += did;
+    _written_total += did;
 
     if (did < (uint32_t) n) break;    // queue full; come back next pass
   }
