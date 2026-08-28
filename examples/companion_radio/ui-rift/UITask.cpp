@@ -1292,7 +1292,13 @@ class RiftMeshScreen : public RiftScreen {
   NodePrefs* _node_prefs;
   int _tick;
   // recorded at render so a tap hits the box actually drawn, like the COMMS tabs
-  int _btn_x0 = 0, _btn_x1 = 0;
+  // Three actions on this screen now, so their hit boxes are an array and the
+  // selected one is tracked for the trackball. Discovery stays index 0, which is
+  // what Enter does with nothing selected - the behaviour this screen already had.
+  enum HomeBtn { BTN_DISCOVER, BTN_ADVERT_NEAR, BTN_ADVERT_MESH, BTN_COUNT };
+  int _btn_x0[BTN_COUNT] = { 0, 0, 0 };
+  int _btn_x1[BTN_COUNT] = { 0, 0, 0 };
+  int _btn_sel = BTN_DISCOVER;
 
 public:
   RiftMeshScreen(UITask* task, NodePrefs* node_prefs)
@@ -1441,16 +1447,58 @@ public:
     //
     // Zero-hop is in the label on purpose. It asks direct neighbours only, and a
     // name that implied it searched the mesh would be a promise it cannot keep.
+    //
+    // Both adverts moved here from the SYSTEM action list. They are the two
+    // things you do when a node cannot hear you, which is a question this screen
+    // already answers - it is the one showing how many nodes are stored and heard
+    // - and reaching them meant leaving it for a menu two pages deep.
+    //
+    // "0-HOP" and the near/mesh split stay in the labels. An advert to direct
+    // neighbours and an advert flooded through the mesh are different amounts of
+    // airtime and different promises, and a button that hid which one it sent
+    // would be the wrong kind of tidy.
     {
-      const char* label = the_mesh.isDiscovering() ? "DISCOVERING..." : "ENTER: DISCOVER 0-HOP REPEATERS";
-      int lw = (int) strlen(label) * RIFT_CHAR_W + 12;
-      int bx = (display.width() - lw) / 2;
-      display.setColor(rift_pal.accent);
-      display.drawRect(bx, DISCOVER_BTN_Y, lw, 14);
-      display.setColor(the_mesh.isDiscovering() ? rift_pal.accent : rift_pal.fg);
-      display.drawTextCentered(display.width() / 2, DISCOVER_BTN_Y + 3, label);
-      _btn_x0 = bx;
-      _btn_x1 = bx + lw;
+      const char* labels[BTN_COUNT];
+      labels[BTN_DISCOVER]    = the_mesh.isDiscovering() ? "DISCOVERING..." : "DISCOVER 0-HOP";
+      labels[BTN_ADVERT_NEAR] = "ADVERT NEAR";
+      labels[BTN_ADVERT_MESH] = "ADVERT MESH";
+
+      int w[BTN_COUNT], total = 0;
+      for (int i = 0; i < BTN_COUNT; i++) {
+        w[i] = (int) strlen(labels[i]) * RIFT_CHAR_W + 12;
+        total += w[i];
+      }
+      const int gap = 8;
+      int bx = (display.width() - total - gap * (BTN_COUNT - 1)) / 2;
+
+      for (int i = 0; i < BTN_COUNT; i++) {
+        bool sel = (i == _btn_sel);
+        bool busy = (i == BTN_DISCOVER && the_mesh.isDiscovering());
+        // The selected button is filled rather than only outlined: in sunlight the
+        // difference between two accent outlines disappears, and which one Enter
+        // will press has to survive that.
+        display.setColor(rift_pal.accent);
+        if (sel) display.fillRect(bx, DISCOVER_BTN_Y, w[i], 14);
+        else     display.drawRect(bx, DISCOVER_BTN_Y, w[i], 14);
+        display.setColor(sel ? rift_pal.bg : (busy ? rift_pal.accent : rift_pal.fg));
+        display.drawTextCentered(bx + w[i] / 2, DISCOVER_BTN_Y + 3, labels[i]);
+        _btn_x0[i] = bx;
+        _btn_x1[i] = bx + w[i];
+        bx += w[i] + gap;
+      }
+
+      // One line for the selected button, carrying the warning the SYSTEM list
+      // used to attach to these actions. Moving them here would otherwise have
+      // quietly dropped the only place that said a neighbours-only advert is not
+      // enough before a first direct message.
+      const char* note = NULL;
+      switch (_btn_sel) {
+        case BTN_ADVERT_NEAR: note = "direct RF only - use MESH before a first DM"; break;
+        case BTN_ADVERT_MESH: note = "reaches nodes past direct range - more airtime"; break;
+        default:              note = "asks direct neighbours only"; break;
+      }
+      display.setColor(rift_pal.dim);
+      display.drawTextCentered(display.width() / 2, DISCOVER_BTN_Y + 16, note);
     }
 
     renderNavBar(display, RIFT_NAV_MESH);
@@ -1461,8 +1509,12 @@ public:
 
   static const int DISCOVER_BTN_Y = 198;
 
+  // Left and right already move between screens, so the row of buttons is walked
+  // with up and down. They did nothing here before.
   bool handleInput(char c) override {
-    if (c == KEY_ENTER) { _task->startRepeaterDiscovery(); return true; }
+    if (c == KEY_ENTER) { press(_btn_sel); return true; }
+    if (c == KEY_UP)   { if (_btn_sel > 0) _btn_sel--; return true; }
+    if (c == KEY_DOWN) { if (_btn_sel + 1 < BTN_COUNT) _btn_sel++; return true; }
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
     return false;
@@ -1470,9 +1522,41 @@ public:
 
   bool handleTouch(int x, int y) override {
     if (y < DISCOVER_BTN_Y - 2 || y > DISCOVER_BTN_Y + 14) return false;
-    if (_btn_x0 <= 0 || x < _btn_x0 || x > _btn_x1) return false;   // not drawn yet, or a miss
-    _task->startRepeaterDiscovery();
-    return true;
+    for (int i = 0; i < BTN_COUNT; i++) {
+      if (_btn_x0[i] <= 0) continue;                     // not drawn yet
+      if (x < _btn_x0[i] || x > _btn_x1[i]) continue;
+      _btn_sel = i;      // a tap also moves the selection, so Enter repeats it
+      press(i);
+      return true;
+    }
+    return false;
+  }
+
+  void press(int which) {
+    switch (which) {
+      case BTN_ADVERT_NEAR: {
+        // Other nodes cannot decrypt a direct message from a node they have never
+        // heard an advert from - they look the sender up in their contacts and
+        // silently drop it - so this is a prerequisite for two-way DMs.
+        _task->notify(UIEventType::ack);
+        bool ok = the_mesh.advert();
+        riftLogf("advert neighbours: %s", ok ? "sent" : "FAILED");
+        _task->showAlert(ok ? "Advert sent (direct)" : "Advert failed", 1200);
+        break;
+      }
+      case BTN_ADVERT_MESH: {
+        // reaches nodes beyond direct RF range, which is what they need before
+        // they can decrypt a DM from us
+        _task->notify(UIEventType::ack);
+        bool ok = the_mesh.advertFlood();
+        riftLogf("advert whole mesh: %s", ok ? "sent" : "FAILED");
+        _task->showAlert(ok ? "Advert flooded!" : "Advert failed", 1200);
+        break;
+      }
+      default:
+        _task->startRepeaterDiscovery();
+        break;
+    }
   }
 };
 
@@ -1485,7 +1569,12 @@ class RiftSystemScreen : public RiftScreen {
   // it leaves the printable keys free for the text fields.
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
               CH_DELETE, CH_DELETE_CONFIRM, LOG, SET_TIME, RXLOG };
-  enum Item { IT_ADVERT, IT_ADVERT_FLOOD, IT_NAME, IT_CHANNEL, IT_DELCHANNEL,
+  // The two advert actions used to head this list. They live on the home screen
+  // now, as buttons beside DISCOVER - that screen is the one showing how many
+  // nodes are stored and heard, so it is where you already are when the answer
+  // is "send an advert". Moved rather than copied: the same action reachable from
+  // two places is two code paths that drift.
+  enum Item { IT_NAME, IT_CHANNEL, IT_DELCHANNEL,
               IT_PATHMODE, IT_SCREEN, IT_SOUND, IT_DAYMODE, IT_SETTIME, IT_LOG, IT_RXLOG,
               IT_COUNT };
 
@@ -1505,8 +1594,6 @@ class RiftSystemScreen : public RiftScreen {
   // most labels are fixed; the path-mode row shows its current value
   void itemLabel(int i, char* buf, size_t len) {
     static const char* FIXED[] = {
-      "Send advert (neighbours)",
-      "Send advert (whole mesh)",
       "Edit node name",
       "Add channel",
       "Delete channel",
@@ -1595,30 +1682,6 @@ private:
 
   void activate() {
     switch (_sel) {
-      case IT_ADVERT:
-        // Other nodes cannot decrypt a direct message from a node they have
-        // never heard an advert from - they look the sender up in their
-        // contacts and silently drop it - so this is a prerequisite for
-        // two-way DMs, not a nicety.
-        _task->notify(UIEventType::ack);
-        {
-          bool ok = the_mesh.advert();
-          riftLogf("advert neighbours: %s", ok ? "sent" : "FAILED");
-          _task->showAlert(ok ? "Advert sent (direct)" : "Advert failed", 1200);
-        }
-        break;
-
-      case IT_ADVERT_FLOOD:
-        // reaches nodes beyond direct RF range, which is what they need before
-        // they can decrypt a DM from us
-        _task->notify(UIEventType::ack);
-        {
-          bool ok = the_mesh.advertFlood();
-          riftLogf("advert whole mesh: %s", ok ? "sent" : "FAILED");
-          _task->showAlert(ok ? "Advert flooded!" : "Advert failed", 1200);
-        }
-        break;
-
       case IT_PATHMODE: {
         // 0..2 maps to 1..3 bytes per path hash. Bigger hashes mean fewer
         // collisions in a busy mesh, at slightly larger packets - and only
@@ -2295,7 +2358,6 @@ public:
       if (sel) {
         const char* note = NULL;
         switch (i) {
-          case IT_ADVERT:     note = "direct RF only - use whole mesh before a first DM"; break;
           case IT_CHANNEL:    note = "#hashtag channels are not secret"; break;
           case IT_DELCHANNEL: note = "the key is lost with it"; break;
           default: break;
