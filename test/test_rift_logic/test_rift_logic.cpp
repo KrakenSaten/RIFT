@@ -1782,6 +1782,68 @@ TEST(NameColour, TheFirstFourAreStillTheChannelColours) {
   for (int i = 0; i < 4; i++) EXPECT_EQ(riftChannelColour(i + 1), riftNameColourAt(i));
 }
 
+// ---- channel sender prefix ------------------------------------------------
+
+TEST(ChannelSender, TakesTheNameAndPointsAtTheBody) {
+  char who[40];
+  const char* msg = "ALPHA: heading north";
+  int skip = riftChannelSender(msg, who, sizeof(who));
+  EXPECT_STREQ("ALPHA", who);
+  EXPECT_STREQ("heading north", msg + skip);
+}
+
+TEST(ChannelSender, KeepsAColonInsideTheBody) {
+  // Only the first colon-space is the separator; the rest is what was said.
+  char who[40];
+  const char* msg = "BRAVO: eta 14:30, bring water: and rope";
+  int skip = riftChannelSender(msg, who, sizeof(who));
+  EXPECT_STREQ("BRAVO", who);
+  EXPECT_STREQ("eta 14:30, bring water: and rope", msg + skip);
+}
+
+TEST(ChannelSender, LeavesAMessageWithNoPrefixAlone) {
+  // A node that does not add one must not lose its first word.
+  char who[40];
+  EXPECT_EQ(0, riftChannelSender("no prefix here", who, sizeof(who)));
+  EXPECT_STREQ("", who);
+  EXPECT_EQ(0, riftChannelSender("", who, sizeof(who)));
+  EXPECT_EQ(0, riftChannelSender(NULL, who, sizeof(who)));
+}
+
+TEST(ChannelSender, RefusesSomethingTooLongToBeAName) {
+  // Without an upper bound, a colon halfway through a sentence reads as a very
+  // long sender and eats the start of the message.
+  char who[64];
+  EXPECT_EQ(0, riftChannelSender(
+      "this is a long sentence that happens to contain: a colon", who, sizeof(who)));
+}
+
+TEST(ChannelSender, RefusesAnEmptyNameAndAControlCharacter) {
+  char who[40];
+  EXPECT_EQ(0, riftChannelSender(": no name", who, sizeof(who)));
+  // 10 rather than an escape: an escape in this file has twice now been turned
+  // into the character it names on the way in, and silently changed the test.
+  const char with_nl[] = { 'A', (char) 10, 'B', ':', ' ', 'x', 0 };
+  EXPECT_EQ(0, riftChannelSender(with_nl, who, sizeof(who)));
+}
+
+TEST(ChannelSender, TruncatesIntoASmallBufferWithoutOverrunning) {
+  char who[4] = { 'x', 'x', 'x', 'x' };
+  int skip = riftChannelSender("CHARLIE: hi", who, sizeof(who));
+  EXPECT_EQ(9, skip);              // the caller still skips the whole prefix
+  EXPECT_STREQ("CHA", who);
+  EXPECT_LT(strlen(who), sizeof(who));
+}
+
+TEST(ChannelSender, KeepsNordicCharactersInAName) {
+  // Names are UTF-8 here; the separator is ASCII, so a multi-byte name survives.
+  char who[40];
+  const char msg[] = { 'A', (char) 0xC3, (char) 0x85, 'S', ':', ' ', 'h', 'i', 0 };
+  int skip = riftChannelSender(msg, who, sizeof(who));
+  EXPECT_EQ(6, skip);
+  EXPECT_STREQ("hi", msg + skip);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

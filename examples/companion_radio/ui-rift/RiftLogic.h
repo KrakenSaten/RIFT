@@ -1506,3 +1506,45 @@ static inline uint16_t riftNameColour(const char* name) {
   }
   return riftNameColourAt((int) (h % RIFT_NAME_COLOURS));
 }
+
+// ---- who sent a channel message -------------------------------------------
+//
+// A group message goes on the air as "<sender>: <text>" - BaseChatMesh builds
+// that prefix in sendGroupMessage - and the receive path hands the whole string
+// to the UI while telling it the message came from the *channel*. So the row
+// header named the channel, the sender sat unnoticed at the head of the body,
+// and every participant in a channel was drawn in the channel's one colour.
+//
+// Split here rather than at capture, so the stored message stays exactly what
+// arrived and this can be corrected without a migration.
+//
+// Returns the length of the prefix to skip, or 0 when there is none: a message
+// from a node that does not add one, or a body that simply has no colon, must
+// come through untouched rather than losing its first word.
+#define RIFT_SENDER_MAX 32
+
+static inline int riftChannelSender(const char* text, char* out, int out_sz) {
+  if (out != NULL && out_sz > 0) out[0] = 0;
+  if (text == NULL) return 0;
+
+  const char* sep = strstr(text, ": ");
+  if (sep == NULL) return 0;
+
+  int n = (int) (sep - text);
+  // A node name is at most 31 characters, and an empty one is not a name. Both
+  // bounds matter: without the upper one, a body containing a colon halfway
+  // through a sentence would be read as a very long sender.
+  if (n <= 0 || n >= RIFT_SENDER_MAX) return 0;
+
+  for (int i = 0; i < n; i++) {
+    unsigned char c = (unsigned char) text[i];
+    if (c < 32) return 0;    // a newline before the colon is a body, not a name
+  }
+
+  if (out != NULL && out_sz > 0) {
+    int copy = n < out_sz - 1 ? n : out_sz - 1;
+    memcpy(out, text, (size_t) copy);
+    out[copy] = 0;
+  }
+  return n + 2;   // the name, the colon and the space
+}

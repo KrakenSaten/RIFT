@@ -5411,7 +5411,13 @@ public:
       if (!inCurrentConv(q)) continue;
       char m[sizeof(q->msg)];
       riftTranslateUTF8(m, q->msg, sizeof(m));
-      total_h += (wrapText(m, avail_px, 0, NULL, 0) + 1) * RIFT_LINE_H;
+      // Measured on the body the render will actually lay out, prefix removed.
+      // Measuring the whole string and drawing less made the scroll stop short.
+      const char* mb = m;
+      if (!q->outgoing && q->conv.kind == RIFT_CONV_CHANNEL) {
+        mb += riftChannelSender(m, NULL, 0);
+      }
+      total_h += (wrapText(mb, avail_px, 0, NULL, 0) + 1) * RIFT_LINE_H;
     }
     const int view_h = BODY_BOTTOM - _hist_top;
     const int max_scroll = total_h > view_h ? total_h - view_h : 0;
@@ -5438,7 +5444,25 @@ public:
       char ack_buf[16];
       const char* ack = deliveryLabel(p, ack_buf, sizeof(ack_buf));
 
-      int body_lines = wrapText(filtered, avail_px, 0, NULL, 0);
+      // A channel message arrives as "<sender>: <text>" with the row told it came
+      // from the channel, so the header named the channel and the person who
+      // spoke sat unnoticed at the head of the body. On a channel row the sender
+      // is lifted out and becomes the name - which is what a conversation is read
+      // by - and the body is drawn without the prefix.
+      //
+      // Only for incoming: an outgoing row records "to <channel>:", which says
+      // where it went, and the accent bar down its edge already says it was ours.
+      char sender[RIFT_SENDER_MAX];
+      const char* body = filtered;
+      bool have_sender = false;
+      // Channels only. A direct message carries no such prefix, so applying the
+      // split there would take the first word off "hei: noe" and call it a name.
+      if (!p->outgoing && p->conv.kind == RIFT_CONV_CHANNEL) {
+        int skip = riftChannelSender(filtered, sender, sizeof(sender));
+        if (skip > 0) { body = filtered + skip; have_sender = true; }
+      }
+
+      int body_lines = wrapText(body, avail_px, 0, NULL, 0);
       int block_h = (body_lines + 1) * RIFT_LINE_H;
 
       y -= block_h;
@@ -5477,13 +5501,32 @@ public:
       // incoming row, since those record the sender rather than the channel - is
       // coloured from the sender's name instead of falling to grey. Three people
       // in a channel used to be three identical grey rows.
-      uint16_t chan_col = originColour(p->origin);
-      if (chan_col == RIFT_CHAN_COL_NONE) {
-        char who[64];
-        if (riftOriginName(p->origin, who, sizeof(who))) chan_col = riftNameColour(who);
+      uint16_t name_col;
+      const char* shown_name;
+      char decorated[80];
+      if (have_sender) {
+        // Keep the hop count the header carried, so a channel row still says how
+        // far the message travelled.
+        int hops = 0; bool direct = false;
+        if (!riftOriginHops(p->origin, &hops, &direct)) {
+          snprintf(decorated, sizeof(decorated), "%s:", sender);
+        } else if (direct) {
+          snprintf(decorated, sizeof(decorated), "(D) %s:", sender);
+        } else {
+          snprintf(decorated, sizeof(decorated), "(%d) %s:", hops, sender);
+        }
+        shown_name = decorated;
+        name_col = riftNameColour(sender);
+      } else {
+        shown_name = filtered_origin;
+        name_col = originColour(p->origin);
+        if (name_col == RIFT_CHAN_COL_NONE) {
+          char who[64];
+          if (riftOriginName(p->origin, who, sizeof(who))) name_col = riftNameColour(who);
+        }
       }
-      display.setColor(chan_col != RIFT_CHAN_COL_NONE ? chan_col : rift_pal.mid);
-      display.drawTextEllipsized(38, y, 232, filtered_origin);
+      display.setColor(name_col != RIFT_CHAN_COL_NONE ? name_col : rift_pal.mid);
+      display.drawTextEllipsized(38, y, 232, shown_name);
 
       // The right end of this row answers "what happened to this packet", and the
       // hop count is the same kind of answer as the delivery state - so it goes
@@ -5509,7 +5552,7 @@ public:
       }
 
       display.setColor(rift_pal.fg);
-      wrapText(filtered, avail_px, y + RIFT_LINE_H, &display, 6);
+      wrapText(body, avail_px, y + RIFT_LINE_H, &display, 6);
     }
 
     // An empty conversation now exists, where it could not before: the history used
