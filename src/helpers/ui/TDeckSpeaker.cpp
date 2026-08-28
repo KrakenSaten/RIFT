@@ -68,6 +68,8 @@ bool TDeckSpeaker::begin(int bclk, int lrclk, int dout, int sample_rate) {
   }
 
   i2s_zero_dma_buffer(SPK_PORT);
+  // Halted until there is something to play. See the note on _running in play().
+  i2s_stop(SPK_PORT);
 
   if (!s_sine_ready) {
     for (int i = 0; i < 256; i++) {
@@ -113,6 +115,24 @@ void TDeckSpeaker::play(const Step* steps, int count, uint8_t gain) {
     return;
   }
 
+  // Start the engine from a known state for every tone.
+  //
+  // Left running, it keeps cycling the descriptor ring emitting zeros after a
+  // tone drains, and the write pointer stays wherever the last tone left it. The
+  // next tone written seconds later therefore lands partly in descriptors the DMA
+  // has just gone past - which are not read again until it wraps, 320 ms later -
+  // and partly in ones it is about to read. The tone comes out in pieces.
+  //
+  // That is why the first alert after boot always sounded right and later ones did
+  // not: begin() had zeroed the ring and the engine started from its head. Every
+  // tone now gets the same treatment. It also means no bit clock reaches the
+  // amplifier while idle.
+  if (!_running) {
+    i2s_zero_dma_buffer(SPK_PORT);
+    i2s_start(SPK_PORT);
+    _running = true;
+  }
+
   _gain = gain > 100 ? 100 : gain;
   for (int i = 0; i < count; i++) _seq[i] = steps[i];
   _count = count;
@@ -133,6 +153,7 @@ void TDeckSpeaker::stop() {
   _total_ms = 0;
   _have_pending = false;
   i2s_zero_dma_buffer(SPK_PORT);   // an explicit cut, unlike finishing normally
+  if (_running) { i2s_stop(SPK_PORT); _running = false; }
 }
 
 // True until the audio has been heard, not until the samples have been handed
@@ -164,6 +185,12 @@ void TDeckSpeaker::loop() {
     // and only once this one has actually been heard - see below. The early
     // return this replaced skipped that block entirely, so a queued alert would
     // never have started.
+    if (!isDraining() && _running) {
+      // Only once it has been heard, not when the samples were handed over.
+      i2s_stop(SPK_PORT);
+      i2s_zero_dma_buffer(SPK_PORT);
+      _running = false;
+    }
     if (_have_pending && !isDraining()) {
       _have_pending = false;
       Step seq[MAX_STEPS];
@@ -250,6 +277,25 @@ void TDeckSpeaker::loop() {
     _written_total += did;
 
     if (did < (uint32_t) n) break;    // queue full; come back next pass
+  }
+
+  // Pad the tail to a whole descriptor.
+  //
+  // The driver only hands a descriptor to the DMA engine once it is full, so any
+  // samples in a partly-filled one are never played. A tone whose length is not a
+  // multiple of SPK_DMA_LEN therefore loses its tail: 25 ms of the proximity
+  // alert's last note, which is the one that has to be heard.
+  //
+  // Padded with silence rather than by lengthening the note, so the alert keeps
+  // the duration it was designed with.
+  if (_step >= _count && _written_total % SPK_DMA_LEN != 0) {
+    uint32_t pad = SPK_DMA_LEN - (_written_total % SPK_DMA_LEN);
+    int16_t zeros[SPK_DMA_LEN];
+    memset(zeros, 0, sizeof(zeros));
+    size_t written = 0;
+    if (i2s_write(SPK_PORT, zeros, (size_t) pad * sizeof(int16_t), &written, 0) == ESP_OK) {
+      _written_total += (uint32_t) (written / sizeof(int16_t));
+    }
   }
 
   if (_step >= _count && !_ev_ready) {

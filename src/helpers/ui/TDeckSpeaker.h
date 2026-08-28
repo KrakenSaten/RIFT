@@ -116,6 +116,10 @@ private:
   int  _pending_count = 0;
   uint8_t _pending_gain = 100;
   bool _have_pending = false;
+  // Whether the I2S engine is clocked. Halted between tones so every one starts
+  // from the head of the descriptor ring rather than wherever the last one left
+  // the write pointer.
+  bool _running = false;
   // Filled when a tone finishes generating, consumed by the UI into the log.
   uint32_t _ev_samples = 0;
   uint32_t _ev_passes = 0;
