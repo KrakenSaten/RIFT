@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include "CompanionCmdLimits.h"   // one length check ahead of the dispatch chain
 #include <helpers/UTF8Helpers.h>   // mesh::validUtf8PrefixLength, for the frame cuts below
 
 #include <Arduino.h> // needed for PlatformIO
@@ -211,13 +212,31 @@ void MyMesh::updateContactFromFrame(ContactInfo &contact, uint32_t& last_mod, co
   i += PUB_KEY_SIZE;
   contact.type = frame[i++];
   contact.flags = frame[i++];
-  contact.out_path_len = frame[i++];
+  // Validated against the same rule the packet layer uses, rather than stored as
+  // sent. This value decides how many bytes of out_path are put on the air, so a
+  // companion could otherwise persist a length the radio then acts on.
+  // OUT_PATH_UNKNOWN is the legitimate "no path, flood it" value.
+  {
+    uint8_t pl = frame[i++];
+    contact.out_path_len =
+        (pl == OUT_PATH_UNKNOWN || mesh::Packet::isValidPathLen(pl)) ? pl : OUT_PATH_UNKNOWN;
+  }
   memcpy(contact.out_path, &frame[i], MAX_PATH_SIZE);
   i += MAX_PATH_SIZE;
-  memcpy(contact.name, &frame[i], 32);
+  // 31 plus a terminator, not 32. ContactInfo::name is char[32] and the rest of
+  // the firmware treats it as a C string, so a companion sending a full 32-byte
+  // name left it unterminated and every later strlen/strcpy ran past the field
+  // into type, flags and out_path_len.
+  memcpy(contact.name, &frame[i], 31);
+  contact.name[31] = 0;
   i += 32;
   memcpy(&contact.last_advert_timestamp, &frame[i], 4);
   i += 4;
+  // Absent GPS means "leave it as it was", which for an update is the previous
+  // fix and for a new contact is the zero the caller value-initialised. It used
+  // to mean whatever was on the stack: ContactInfo has no constructor, the new
+  // contact was declared uninitialised, and a companion that omitted these fields
+  // got two words of stack presented as coordinates.
   if (len >= i + 8) { // optional fields
     memcpy(&contact.gps_lat, &frame[i], 4);
     i += 4;
@@ -1668,6 +1687,14 @@ void MyMesh::startInterface(BaseSerialInterface &serial) {
 }
 
 void MyMesh::handleCmdFrame(size_t len) {
+  // One length check ahead of the chain, so a branch cannot be reached without
+  // the bytes it consumes. Per-branch guards stay: this is a floor, not a
+  // replacement, and the two disagreeing is caught by the table being tested.
+  if (len >= 1 && len < companionCmdMinLen(cmd_frame[0])) {
+    writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+    return;
+  }
+
   if (cmd_frame[0] == CMD_DEVICE_QUERY && len >= 2) { // sent when app establishes connection
     app_target_ver = cmd_frame[1];                    // which version of protocol does app understand
 
@@ -1820,6 +1847,20 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
 
     // parse provided path if not flood
+    // The encoded path and the two data-type bytes have to have arrived before
+    // they are read. len >= 4 above only covers the command byte, the channel and
+    // the path length itself; a frame that stops there still had up to 64 bytes of
+    // path and a data type taken from whatever followed in the buffer.
+    {
+      size_t need = (size_t) i + 2;
+      if (path_len != OUT_PATH_UNKNOWN) need += mesh::Packet::pathHashSize(path_len)
+                                                * (size_t) mesh::Packet::pathHashCount(path_len);
+      if (len < need) {
+        writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        return;
+      }
+    }
+
     uint8_t path[MAX_PATH_SIZE];
     if (path_len != OUT_PATH_UNKNOWN) {
       i += mesh::Packet::writePath(path, &cmd_frame[i], path_len);
@@ -1949,7 +1990,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
       writeOKFrame();
     } else {
-      ContactInfo contact;
+      ContactInfo contact{};   // value-initialised: see updateContactFromFrame
       updateContactFromFrame(contact, last_mod, cmd_frame, len);
       contact.lastmod = last_mod;
       contact.sync_since = 0;
@@ -2508,6 +2549,10 @@ void MyMesh::handleCmdFrame(size_t len) {
     AdvertPath* found = NULL;
     for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
       auto p = &advert_paths[i];
+      // An unused slot is all zeroes, so an all-zero query matched it and came
+      // back with a path that was never heard. The table has carried an explicit
+      // valid flag since the recency work; this lookup was not using it.
+      if (!p->valid) continue;
       if (memcmp(p->pubkey_prefix, pub_key, sizeof(p->pubkey_prefix)) == 0) {
         found = p;
         break;
@@ -2807,13 +2852,18 @@ void MyMesh::checkCLIRescueCmd() {
       }
       if(file){
 
-        // get file content
-        int file_size = file.available();
-        uint8_t buffer[file_size];
-        file.read(buffer, file_size);
-
-        // print hex
-        mesh::Utils::printHex(Serial, buffer, file_size);
+        // Streamed in fixed blocks rather than read whole.
+        //
+        // This was a variable-length array sized by the file, on the stack, in
+        // the one code path that exists for when everything else has failed. A
+        // contacts file of any size would take the rescue console down with it,
+        // and a stack overflow there is indistinguishable from the fault being
+        // rescued. 128 bytes costs nothing and cannot grow.
+        uint8_t buffer[128];
+        int n;
+        while ((n = file.read(buffer, sizeof(buffer))) > 0) {
+          mesh::Utils::printHex(Serial, buffer, n);
+        }
         Serial.print("\n");
 
         file.close();

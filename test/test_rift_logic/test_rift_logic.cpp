@@ -6,6 +6,7 @@
 // exactly as upstream has them. The header is standalone - stdint and string.h
 // only - so there is nothing to link.
 #include "../../examples/companion_radio/ui-rift/RiftLogic.h"
+#include "../../examples/companion_radio/CompanionCmdLimits.h"
 
 // ---------------------------------------------------------------- hash resolution
 
@@ -1842,6 +1843,65 @@ TEST(ChannelSender, KeepsNordicCharactersInAName) {
   int skip = riftChannelSender(msg, who, sizeof(who));
   EXPECT_EQ(6, skip);
   EXPECT_STREQ("hi", msg + skip);
+}
+
+// ---- companion command minimum lengths ------------------------------------
+//
+// The table exists because a per-branch guard has to be remembered, and several
+// were not. These are the values, stated once where they can be checked, rather
+// than a lint over the parser that could not see cmd_frame[i] at all.
+
+TEST(CmdMinLen, CoversTheHandlersThatReadWithoutGuarding) {
+  EXPECT_EQ(9,  companionCmdMinLen(21));   // SET_TUNING_PARAMS: two 32-bit values
+  EXPECT_EQ(11, companionCmdMinLen(11));   // SET_RADIO_PARAMS: freq, bw, sf, cr
+  EXPECT_EQ(7,  companionCmdMinLen(19));   // REBOOT: memcmp "reboot"
+  EXPECT_EQ(6,  companionCmdMinLen(51));   // FACTORY_RESET: memcmp "reset"
+  EXPECT_EQ(3,  companionCmdMinLen(61));   // SET_PATH_HASH_MODE
+}
+
+TEST(CmdMinLen, DefaultsToNoRestriction) {
+  // A minimum larger than a working companion sends is worse than the bug it
+  // would fix, so anything not read and justified stays at 1.
+  EXPECT_EQ(1, companionCmdMinLen(0));
+  EXPECT_EQ(1, companionCmdMinLen(2));     // SEND_TXT_MSG guards in its branch
+  EXPECT_EQ(1, companionCmdMinLen(200));   // not a command at all
+  EXPECT_EQ(1, companionCmdMinLen(255));
+}
+
+TEST(CmdMinLen, EveryEntryIsAtLeastOne) {
+  // Zero would mean an empty frame reaches a handler; the dispatcher only calls
+  // this when len >= 1, and a zero here would silently undo that.
+  for (int c = 0; c < 256; c++) EXPECT_GE(companionCmdMinLen((uint8_t) c), 1);
+}
+
+// ---- channel sender, nth delimiter ----------------------------------------
+
+TEST(ChannelSenderNth, WalksTheCandidates) {
+  // "Ops: North" is a legal node name, so this message is genuinely ambiguous
+  // and only a caller that knows the contacts can settle it.
+  const char* msg = "Ops: North: hello";
+  char who[40];
+  EXPECT_EQ(5,  riftChannelSenderNth(msg, 0, who, sizeof(who)));
+  EXPECT_STREQ("Ops", who);
+  EXPECT_EQ(12, riftChannelSenderNth(msg, 1, who, sizeof(who)));
+  EXPECT_STREQ("Ops: North", who);
+  EXPECT_EQ(0,  riftChannelSenderNth(msg, 2, who, sizeof(who)));
+}
+
+TEST(ChannelSenderNth, MatchesTheFirstDelimiterAtZero) {
+  char a[40], b[40];
+  const char* msg = "ALPHA: heading north";
+  EXPECT_EQ(riftChannelSender(msg, a, sizeof(a)), riftChannelSenderNth(msg, 0, b, sizeof(b)));
+  EXPECT_STREQ(a, b);
+}
+
+TEST(ChannelSenderNth, StillRefusesWhatIsNotAName) {
+  char who[64];
+  // Second candidate is past the name-length bound, so it is not offered.
+  EXPECT_EQ(0, riftChannelSenderNth(
+      "A: this is a long stretch of words that later contains: a colon", 1, who, sizeof(who)));
+  EXPECT_EQ(0, riftChannelSenderNth("no delimiter", 0, who, sizeof(who)));
+  EXPECT_EQ(0, riftChannelSenderNth(NULL, 0, who, sizeof(who)));
 }
 
 int main(int argc, char** argv) {

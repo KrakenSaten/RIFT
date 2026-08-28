@@ -1521,6 +1521,21 @@ static inline uint16_t riftNameColour(const char* name) {
 // Returns the length of the prefix to skip, or 0 when there is none: a message
 // from a node that does not add one, or a body that simply has no colon, must
 // come through untouched rather than losing its first word.
+//
+// Two things this name is not.
+//
+// It is not authenticated. The prefix is ordinary text inside the encrypted
+// group payload, so any member of a channel can write any name in front of their
+// message. The colour and the name are a reading aid for a cooperative channel,
+// not proof of who spoke - a direct message is where identity is cryptographic,
+// and that is a real difference the UI should not blur.
+//
+// And it is not unambiguous. A node whose own name contains ": " sends
+// "Ops: North: hello", and the first delimiter splits it as "Ops" saying
+// "North: hello". Taking the last delimiter instead breaks the far more common
+// case of a body that contains a colon. The caller resolves it where it can, by
+// preferring a split that names a contact it knows - see riftChannelSenderNth -
+// and falls back to the first delimiter for a sender it has never heard of.
 #define RIFT_SENDER_MAX 32
 
 static inline int riftChannelSender(const char* text, char* out, int out_sz) {
@@ -1547,4 +1562,33 @@ static inline int riftChannelSender(const char* text, char* out, int out_sz) {
     out[copy] = 0;
   }
   return n + 2;   // the name, the colon and the space
+}
+
+// The same split, at the nth delimiter rather than the first, so a caller that
+// can recognise names is able to try the alternatives. n = 0 is riftChannelSender.
+// Returns 0 once there are no more candidates.
+static inline int riftChannelSenderNth(const char* text, int nth, char* out, int out_sz) {
+  if (out != NULL && out_sz > 0) out[0] = 0;
+  if (text == NULL || nth < 0) return 0;
+
+  const char* p = text;
+  for (int i = 0; i < nth; i++) {
+    const char* sep = strstr(p, ": ");
+    if (sep == NULL) return 0;
+    p = sep + 2;
+  }
+  const char* sep = strstr(p, ": ");
+  if (sep == NULL) return 0;
+
+  int n = (int) (sep - text);   // from the start of the message, not of p
+  if (n <= 0 || n >= RIFT_SENDER_MAX) return 0;
+  for (int i = 0; i < n; i++) {
+    if ((unsigned char) text[i] < 32) return 0;
+  }
+  if (out != NULL && out_sz > 0) {
+    int copy = n < out_sz - 1 ? n : out_sz - 1;
+    memcpy(out, text, (size_t) copy);
+    out[copy] = 0;
+  }
+  return n + 2;
 }

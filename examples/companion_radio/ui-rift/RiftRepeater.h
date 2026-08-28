@@ -80,10 +80,20 @@ class RiftRepeaterSession {
 
   char _cli[RIFT_REP_CLI_LINES][RIFT_REP_CLI_TEXT];
   int _cli_n;
-  // Set when the command just sent asks for a secret back. `get guest.password`
-  // answers with a bare "> value" that cannot be recognised from the reply
-  // alone, so the question has to be remembered to redact the answer.
-  bool _expect_secret_reply;
+  // Deadline until which every CLI reply from this node is redacted, not a flag
+  // consumed by the first reply that arrives.
+  //
+  // A CLI response carries no request tag - it is matched on the sender alone -
+  // so with a phone attached to the same radio there is no way to tell whose
+  // command a reply answers. As a one-shot flag this leaked: RIFT asks for
+  // `get guest.password`, the phone sends something harmless to the same
+  // repeater, the harmless reply arrives first and consumes the flag, and the
+  // bare password that follows is then treated as ordinary text.
+  //
+  // Confidentiality first. While a secret read is outstanding, everything from
+  // that node is withheld. It can hide a line that was not secret; the
+  // alternative puts a private key on the screen.
+  uint32_t _secret_until;
 
   bool isTarget(const uint8_t* pub_key) const {
     return _have_target && pub_key != NULL
@@ -122,7 +132,7 @@ public:
     _telem_n = 0;
     _have_telem = false;
     _cli_n = 0;
-    _expect_secret_reply = false;
+    _secret_until = 0;
     // Zeroed, not just counted down to nothing. A redaction keeps a secret off
     // the screen; it does not help if the bytes are still sitting in this buffer
     // afterwards, and clearing the count alone left them there.
@@ -240,8 +250,10 @@ public:
     // upstream echoes a new password back unasked. Either way the whole reply is
     // replaced rather than edited - it is not worth trying to find the secret
     // inside a string whose shape belongs to somebody else's firmware.
-    bool secret = _expect_secret_reply || riftCliReplyEchoesSecret(text);
-    _expect_secret_reply = false;
+    // Not cleared here: the window stands until it expires, because the reply
+    // that consumed it might have been the phone's.
+    bool secret = (_secret_until != 0 && !riftDue(millis(), _secret_until))
+                  || riftCliReplyEchoesSecret(text);
     if (secret) {
       const char* safe = "(secret reply not shown)";
       pushLine(safe, (int) strlen(safe));
@@ -265,10 +277,15 @@ public:
   // _cli at all, because that buffer outlives the screen it was drawn on.
   void noteCliSent(const char* text) {
     if (text == NULL) return;
-    _expect_secret_reply = riftCliIsSecret(text);
+    bool is_secret = riftCliIsSecret(text);
+    if (is_secret) {
+      // Long enough to cover a slow answer over several hops, short enough that
+      // the panel is not silently withholding replies minutes later.
+      _secret_until = millis() + 30000;
+    }
 
     char safe[RIFT_REP_CLI_TEXT];
-    if (_expect_secret_reply) {
+    if (is_secret) {
       riftRedactCliCommand(text, safe, sizeof(safe));
     } else {
       snprintf(safe, sizeof(safe), "%s", text);

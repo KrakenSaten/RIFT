@@ -5477,7 +5477,7 @@ public:
       // Measuring the whole string and drawing less made the scroll stop short.
       const char* mb = m;
       if (!q->outgoing && q->conv.kind == RIFT_CONV_CHANNEL) {
-        mb += riftChannelSender(m, NULL, 0);
+        mb += senderSplit(m, NULL, 0);
       }
       total_h += (wrapText(mb, avail_px, 0, NULL, 0) + 1) * RIFT_LINE_H;
     }
@@ -5520,7 +5520,7 @@ public:
       // Channels only. A direct message carries no such prefix, so applying the
       // split there would take the first word off "hei: noe" and call it a name.
       if (!p->outgoing && p->conv.kind == RIFT_CONV_CHANNEL) {
-        int skip = riftChannelSender(filtered, sender, sizeof(sender));
+        int skip = senderSplit(filtered, sender, sizeof(sender));
         if (skip > 0) { body = filtered + skip; have_sender = true; }
       }
 
@@ -5712,6 +5712,33 @@ public:
 
   // Follows the finger. Dragging down pulls older messages into view, the same
   // direction the content moves, which is the part that has to feel right.
+  // One split, used by both the measuring pass and the render, because a
+  // conversation measured one way and drawn another scrolls to the wrong end.
+  //
+  // The first delimiter is the answer for every ordinary name. Only when the
+  // message offers a second candidate is the contact list consulted, which keeps
+  // an O(contacts) lookup off the common path entirely.
+  int senderSplit(const char* text, char* out, int out_sz) {
+    int first = riftChannelSenderNth(text, 0, out, out_sz);
+    if (first <= 0) return 0;
+    if (riftChannelSenderNth(text, 1, NULL, 0) <= 0) return first;   // unambiguous
+
+    for (int nth = 0; nth < 3; nth++) {
+      char cand[RIFT_SENDER_MAX];
+      int skip = riftChannelSenderNth(text, nth, cand, sizeof(cand));
+      if (skip <= 0) break;
+      ContactInfo* known = the_mesh.searchContactsByPrefix(cand);
+      if (known != NULL && strcmp(known->name, cand) == 0) {
+        if (out != NULL && out_sz > 0) {
+          memcpy(out, cand, (size_t) (out_sz < (int) sizeof(cand) ? out_sz : (int) sizeof(cand)));
+          out[out_sz - 1] = 0;
+        }
+        return skip;
+      }
+    }
+    return first;   // nobody we know: the first delimiter is the best guess
+  }
+
   bool handleDrag(int dy) override {
     if (_picking) return false;
     _scroll += dy;
