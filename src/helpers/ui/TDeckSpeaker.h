@@ -128,11 +128,6 @@ private:
   // Whether the I2S engine is clocked. Halted between tones so every one starts
   // from the head of the descriptor ring rather than wherever the last one left
   // the write pointer.
-  bool _running = false;
-  // The driver hands back a ring already full of descriptors, so the first tone
-  // has to write in lockstep with playback while it drains. Cleared once at boot
-  // instead, long before anything needs to sound. See begin().
-  uint32_t _prime_until = 0;
   // Filled when a tone finishes generating, consumed by the UI into the log.
   uint32_t _ev_samples = 0;
   uint32_t _ev_passes = 0;

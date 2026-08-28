@@ -67,19 +67,25 @@ bool TDeckSpeaker::begin(int bclk, int lrclk, int dout, int sample_rate) {
     return false;
   }
 
-  // Left running for one ring-length, then halted.
+  // Started here and never stopped.
+  //
+  // Two reasons, and the second is the one that took longest to find.
   //
   // The driver returns a ring whose descriptors are already queued, so the first
-  // tone cannot be written in one call: it goes in a couple of samples per pass,
-  // in lockstep with the ring draining. Measured, that was 1176 passes for a
-  // 2560-sample alert against one pass once things had settled, and the first two
-  // alerts after every boot were the ones that sounded wrong.
+  // tone written to a fresh ring goes in a couple of samples per pass, in lockstep
+  // with playback draining it - 1176 passes for a 2560-sample alert, against one
+  // pass once settled. Running from boot drains it during startup, silently.
   //
-  // Draining it here costs nothing - it happens during startup, silently, seconds
-  // before anything needs to sound - and every tone afterwards starts on an empty
-  // ring. loop() performs the stop once this deadline passes.
-  _prime_until = millis() + 400;   // one 320 ms ring, plus slack
-  _running = true;
+  // And this board has no amplifier enable pin: the MAX98357A is woken by the bit
+  // clock alone and shuts down when it stops. Halting I2S between alerts therefore
+  // put the amplifier to sleep after every one, and each tone then began while it
+  // was waking - which is neither instant nor the same twice. With the write path
+  // measured clean at one pass per tone and the sound still clipped and varying,
+  // the clock going away between tones was what was left.
+  //
+  // The cost is a few milliamps of idle current. Correct audio is worth it, and if
+  // it proves to matter the engine can sleep after a long idle rather than after
+  // every note.
 
   if (!s_sine_ready) {
     for (int i = 0; i < 256; i++) {
@@ -137,22 +143,11 @@ void TDeckSpeaker::play(const Step* steps, int count, uint8_t gain) {
   // not: begin() had zeroed the ring and the engine started from its head. Every
   // tone now gets the same treatment. It also means no bit clock reaches the
   // amplifier while idle.
-  // Started, and deliberately not zeroed first.
+  // Nothing to start: the engine runs from begin() onwards. See the note there.
   //
-  // i2s_zero_dma_buffer() writes silence through the same queue the audio goes
-  // through, so it fills it. Called while the engine is stopped, nothing drains
-  // it, and every subsequent write is refused - the tone dribbles in behind
-  // 320 ms of queued zeros a few samples at a time. That is measurable: the first
-  // tone after this was added took 1153 passes to write 2560 samples, against one
-  // pass once the ring had settled, and it sounded exactly as bad as that number
-  // suggests.
-  //
-  // Starting a stopped engine resets the DMA to the head of the ring on its own,
-  // which was the whole point of stopping it.
-  if (!_running) {
-    i2s_start(SPK_PORT);
-    _running = true;
-  }
+  // Never zero here either. i2s_zero_dma_buffer() pushes silence through the same
+  // queue the audio uses, so it fills it rather than clearing it, and a tone
+  // written behind it arrives a few samples at a time.
 
   _gain = gain > 100 ? 100 : gain;
   for (int i = 0; i < count; i++) _seq[i] = steps[i];
@@ -173,13 +168,9 @@ void TDeckSpeaker::stop() {
   _written_total = 0;
   _total_ms = 0;
   _have_pending = false;
-  // Zeroed while still running so the cut is immediate, then halted. The order
-  // matters: zeroing a stopped engine fills the queue instead of clearing it.
-  if (_running) {
-    i2s_zero_dma_buffer(SPK_PORT);
-    i2s_stop(SPK_PORT);
-    _running = false;
-  }
+  // Zeroed, not halted: this is a cut, and stopping the clock would put the
+  // amplifier to sleep and make the next alert start while it wakes.
+  i2s_zero_dma_buffer(SPK_PORT);
 }
 
 // True until the audio has been heard, not until the samples have been handed
@@ -215,10 +206,6 @@ void TDeckSpeaker::loop() {
     // zeroing on the way out - a stopped engine clocks nothing out, and
     // i2s_zero_dma_buffer() pushes silence through the same queue the audio uses,
     // so calling it on a halted engine fills the queue rather than clearing it.
-    if (!isDraining() && _running && (int32_t) (millis() - _prime_until) >= 0) {
-      i2s_stop(SPK_PORT);
-      _running = false;
-    }
     if (_have_pending && !isDraining()) {
       _have_pending = false;
       Step seq[MAX_STEPS];
