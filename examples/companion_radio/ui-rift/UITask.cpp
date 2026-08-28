@@ -7084,13 +7084,11 @@ void UITask::loop() {
   // this being called often. Still first, because the call is bounded by a zero
   // timeout and getting the audio queued before a 153 KB redraw is free.
   rift_speaker.loop();
-  // One log line per tone: samples written, passes it took, and the silence
-  // before it. The two summary counters on SYSTEM have each turned out to be
-  // incapable of failing, so this is the one that can actually be wrong.
-  {
-    char snd[48];
-    if (rift_speaker.takeEvent(snd, sizeof(snd))) riftLogf("%s", snd);
-  }
+  // The per-tone timeline that found the amplifier fault is no longer logged.
+  // It was a line per notification in a log kept for mesh events, and the health
+  // figure it existed to expose - passes per tone - is on the SYSTEM readings
+  // page now. takeEvent() stays: it costs nothing idle and is one line away if
+  // this needs watching again.
 #endif
 
   if (curr) curr->poll();
