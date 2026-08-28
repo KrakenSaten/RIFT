@@ -1737,8 +1737,8 @@ TEST(NameColour, OnlyEverReturnsAVerifiedColour) {
   for (const char* n : names) {
     uint16_t c = riftNameColour(n);
     bool known = false;
-    for (int i = 1; i <= RIFT_NAME_COLOURS; i++) {
-      if (c == riftChannelColour(i)) known = true;
+    for (int i = 0; i < RIFT_NAME_COLOURS; i++) {
+      if (c == riftNameColourAt(i)) known = true;
     }
     EXPECT_TRUE(known) << n << " got an unverified colour";
   }
@@ -1751,19 +1751,35 @@ TEST(NameColour, DistinguishesNamesThatDifferInOneCharacter) {
 }
 
 TEST(NameColour, UsesTheWholePalette) {
-  bool seen[RIFT_NAME_COLOURS + 1] = { false };
-  char buf[8];
-  for (int i = 0; i < 40; i++) {
-    snprintf(buf, sizeof(buf), "n%d", i);
+  bool seen[RIFT_NAME_COLOURS] = { false };
+  char buf[12];
+  for (int i = 0; i < 200; i++) {
+    snprintf(buf, sizeof(buf), "node-%d", i);
     uint16_t c = riftNameColour(buf);
-    for (int k = 1; k <= RIFT_NAME_COLOURS; k++) if (c == riftChannelColour(k)) seen[k] = true;
+    for (int k = 0; k < RIFT_NAME_COLOURS; k++) if (c == riftNameColourAt(k)) seen[k] = true;
   }
-  for (int k = 1; k <= RIFT_NAME_COLOURS; k++) EXPECT_TRUE(seen[k]) << "colour " << k << " never used";
+  for (int k = 0; k < RIFT_NAME_COLOURS; k++) EXPECT_TRUE(seen[k]) << "colour " << k << " never used";
 }
 
 TEST(NameColour, HasNoColourForAnEmptyOrMissingName) {
   EXPECT_EQ(RIFT_CHAN_COL_NONE, riftNameColour(NULL));
   EXPECT_EQ(RIFT_CHAN_COL_NONE, riftNameColour(""));
+}
+
+TEST(NameColour, EveryPaletteEntryIsDistinct) {
+  // A duplicate would silently halve the palette, which is the complaint this
+  // widening exists to answer.
+  for (int i = 0; i < RIFT_NAME_COLOURS; i++) {
+    for (int j = i + 1; j < RIFT_NAME_COLOURS; j++) {
+      EXPECT_NE(riftNameColourAt(i), riftNameColourAt(j)) << i << " and " << j;
+    }
+  }
+}
+
+TEST(NameColour, TheFirstFourAreStillTheChannelColours) {
+  // Widening must not repaint the channels: those are on screen in the tab strip
+  // and in every outgoing row.
+  for (int i = 0; i < 4; i++) EXPECT_EQ(riftChannelColour(i + 1), riftNameColourAt(i));
 }
 
 int main(int argc, char** argv) {

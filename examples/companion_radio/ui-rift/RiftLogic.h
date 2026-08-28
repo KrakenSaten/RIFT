@@ -1439,7 +1439,41 @@ static inline bool riftClockPlausible(uint32_t epoch) {
 // for separation from the accent and the ok green - the work that makes them
 // legal as text - and inventing more without repeating that sweep would be
 // guessing at the only property that matters here.
-#define RIFT_NAME_COLOURS 4
+// Eight rather than the channel palette's four. Four means two names collide
+// one time in four, which in a channel with a handful of people is most of the
+// time - and a colour that is shared is not an identity.
+//
+// The first four are the channel colours unchanged, so a name and a channel that
+// land on the same slot look the same rather than nearly the same. The other four
+// come from the same sweep repeated: every RGB565 value scored for contrast after
+// quantisation, keeping only those at or above 4.5:1 against black AND white,
+// then filtered for distance from the accent and from the ok green - because a
+// name in alert red or in delivery green reads as a status, not as a person - and
+// finally chosen greedily for maximum separation from each other.
+//
+//                             on black  on white  from accent  from ok-green
+//   4  0xD170  rgb(213, 44,131)   4.52      4.65        63           104
+//   5  0x039C  rgb(  0,113,230)   4.50      4.66       137            61
+//   6  0xB81F  rgb(189,  0,255)   4.61      4.56       109           130
+//   7  0x63EC  rgb( 98,125, 98)   4.63      4.54        74            56
+//   8  0xE00B  rgb(230,  0, 90)   4.51      4.65        60           123
+//
+// Seven and eight are the tightest against green and accent respectively. They
+// are kept because they sit in different columns from those two - the delivery
+// state is drawn at the right end of the row and the accent bar at the left edge -
+// and because the alternative is fewer colours, which is the actual complaint.
+#define RIFT_NAME_COLOURS 8
+
+static inline uint16_t riftNameColourAt(int i) {
+  switch (i) {
+    case 0: case 1: case 2: case 3: return riftChannelColour(i + 1);
+    case 4: return 0x039C;
+    case 5: return 0xB81F;
+    case 6: return 0x63EC;
+    case 7: return 0xE00B;
+    default: return RIFT_CHAN_COL_NONE;
+  }
+}
 
 static inline uint16_t riftNameColour(const char* name) {
   if (name == NULL || name[0] == 0) return RIFT_CHAN_COL_NONE;
@@ -1451,5 +1485,5 @@ static inline uint16_t riftNameColour(const char* name) {
     h ^= (uint32_t) (uint8_t) *p;
     h *= 16777619u;
   }
-  return riftChannelColour((int) (h % RIFT_NAME_COLOURS) + 1);
+  return riftNameColourAt((int) (h % RIFT_NAME_COLOURS));
 }

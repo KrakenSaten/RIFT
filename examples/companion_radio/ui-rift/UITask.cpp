@@ -4603,6 +4603,10 @@ class RiftCommsScreen : public RiftScreen, ContactVisitor {
   UITask* _task;
   char _input[MAX_TEXT_LEN + 1];
   int _len;
+  // Pixels of older content scrolled into view, not messages skipped. Counting
+  // messages meant one whole block moved per step whatever its height, which is
+  // the jerk: a one-line reply and a six-line one moved the view by wildly
+  // different amounts for the same gesture.
   int _scroll;      // 0 = pinned to newest
 
   // last printable key and when, for double-tap detection
@@ -5379,7 +5383,7 @@ public:
 
     // History, newest at the bottom: lay entries out upward from the input line.
     //
-    // _scroll counts messages in this conversation rather than positions in the log.
+    // _scroll is in pixels, and counts within this conversation rather than the log.
     // Indexing the log directly meant a scroll step through a run of other
     // conversations moved the counter without moving the view, and coming back then
     // cost one press per entry that had never been shown.
@@ -5390,14 +5394,20 @@ public:
     // scroll past the end drew nothing at all - the same failure the event log and
     // the packet log both clamp for, a few hundred lines up.
     int n_conv = convCount();
-    if (_scroll >= n_conv) _scroll = n_conv > 0 ? n_conv - 1 : 0;
+    if (n_conv == 0) _scroll = 0;
+    if (_scroll < 0) _scroll = 0;
 
-    int seen = 0;
+    // Everything is laid out from the input line upward, shifted down by the
+    // scroll offset. Blocks that fall outside are skipped rather than clipped:
+    // this driver has no clipping, so a partly-visible block would draw over the
+    // tab strip or the compose line.
+    y += _scroll;
+    int top_reached = y;
+    bool ran_out = true;
     for (int back = 0; back < msg_log.count; back++) {
       auto p = msg_log.peek(back);
       if (p == NULL) break;
       if (!inCurrentConv(p)) continue;   // a different conversation, not this one
-      if (seen++ < _scroll) continue;    // scrolled past
 
       char filtered[sizeof(p->msg)];
       riftTranslateUTF8(filtered, p->msg, sizeof(filtered));
@@ -5414,7 +5424,10 @@ public:
       int block_h = (body_lines + 1) * RIFT_LINE_H;
 
       y -= block_h;
-      if (y < _hist_top) break;   // ran out of room going up
+      top_reached = y;
+      if (y + block_h <= _hist_top) { ran_out = false; break; }   // above the view
+      if (y < _hist_top) { ran_out = false; break; }              // only partly in
+      if (y + block_h > BODY_BOTTOM) continue;                    // still below it
 
       // Own messages carry a 2px accent bar down the left edge rather than being
       // right-aligned: on a 320px screen right alignment costs half the width for
@@ -5480,6 +5493,15 @@ public:
 
       display.setColor(rift_pal.fg);
       wrapText(filtered, avail_px, y + RIFT_LINE_H, &display, 6);
+    }
+
+    // Self-correcting clamp. The total height of a conversation is not known
+    // without laying it out, so rather than computing it up front, an overscroll
+    // is detected here - the oldest message was reached and there is still empty
+    // space above it - and taken back on the next frame.
+    if (ran_out && _scroll > 0 && top_reached > _hist_top) {
+      _scroll -= (top_reached - _hist_top);
+      if (_scroll < 0) _scroll = 0;
     }
 
     // An empty conversation now exists, where it could not before: the history used
@@ -5548,10 +5570,13 @@ public:
     // its left and right change screen, so a slightly off flick leaves the
     // conversation entirely.
     // The history runs from _hist_top down to BODY_BOTTOM, below the tab strip.
+    // A tap still pages, for when the panel is easier to poke than to drag; the
+    // finger drag in handleDrag is the smooth one.
     if (y >= _hist_top && y <= BODY_BOTTOM) {
+      const int page = (BODY_BOTTOM - _hist_top) / 2;
       int mid = (_hist_top + BODY_BOTTOM) / 2;
-      if (y < mid) { if (_scroll + 1 < convCount()) _scroll++; }   // older
-      else         { if (_scroll > 0) _scroll--; }                 // newer
+      if (y < mid) _scroll += page;                                // older
+      else         _scroll = _scroll > page ? _scroll - page : 0;  // newer
       return true;
     }
 
@@ -5572,6 +5597,15 @@ public:
     return true;
   }
 
+  // Follows the finger. Dragging down pulls older messages into view, the same
+  // direction the content moves, which is the part that has to feel right.
+  bool handleDrag(int dy) override {
+    if (_picking) return false;
+    _scroll += dy;
+    if (_scroll < 0) _scroll = 0;
+    return true;
+  }
+
   bool handleInput(char c) override {
     if (_picking) return handlePickerInput(c);
 
@@ -5580,12 +5614,11 @@ public:
     if (c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
 
-    if (c == KEY_UP) {     // scroll back through history
-      if (_scroll + 1 < convCount()) _scroll++;
-      return true;
-    }
+    // A line at a time rather than a message at a time: the same units the drag
+    // uses, so the two agree about what a small step is.
+    if (c == KEY_UP) { _scroll += RIFT_LINE_H; return true; }
     if (c == KEY_DOWN) {
-      if (_scroll > 0) _scroll--;
+      _scroll = _scroll > RIFT_LINE_H ? _scroll - RIFT_LINE_H : 0;
       return true;
     }
 
@@ -7027,8 +7060,35 @@ void UITask::loop() {
 
 #ifdef RIFT_INPUT_TOUCH
   {
+    // Drag first: the driver tracks the finger continuously and only reports a
+    // tap on release, so movement has to be read from the live position. A tap
+    // that moved is a scroll and must not also fire as a tap, which is what
+    // _drag_moved suppresses below.
+    if (rift_touch.isDown()) {
+      if (!_dragging) {
+        _dragging = true;
+        _drag_moved = false;
+        _drag_last_y = rift_touch.lastY();
+      } else {
+        int dy = rift_touch.lastY() - _drag_last_y;
+        if (dy != 0) {
+          RiftScreen* t = (_overlay != NULL) ? _overlay : curr;
+          if (t != NULL && t->handleDrag(dy)) {
+            _drag_moved = true;
+            _auto_off = millis() + AUTO_OFF_MILLIS;
+            refreshNow();
+          }
+          _drag_last_y = rift_touch.lastY();
+        }
+      }
+    } else {
+      _dragging = false;
+    }
+
     int tx, ty;
     if (rift_touch.poll(tx, ty)) {
+      if (_drag_moved) { _drag_moved = false; }
+      else
       _touch_x = tx;   // kept for the SYSTEM readout while calibrating
       _touch_y = ty;
 

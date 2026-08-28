@@ -95,6 +95,15 @@ public:
   // unknown conversation cannot be claimed as visible.
   virtual bool showsConversation(const RiftConvKey& k) const { (void) k; return false; }
 
+  // A finger moving on the panel, in display pixels since the last report.
+  // Positive dy is downward.
+  //
+  // Separate from handleTouch because that fires once on release and cannot
+  // express motion. A screen that scrolls implements this and gets movement that
+  // follows the finger rather than a step per tap; everything else ignores it and
+  // still gets the tap.
+  virtual bool handleDrag(int dy) { (void) dy; return false; }
+
   // True for a transient popup drawn over the screen the user is actually on,
   // rather than a destination they navigated to.
   virtual bool isOverlay() const { return false; }
@@ -192,6 +201,11 @@ private:
   RiftScreen* nav_screens[RIFT_NAV_COUNT];   // indexed by RIFT_NAV_*
   int nav_idx;
   RiftScreen* curr;
+  // Finger tracking for drag-to-scroll. _drag_moved suppresses the tap the driver
+  // reports on release, so a scroll does not also count as a press.
+  bool _dragging = false;
+  bool _drag_moved = false;
+  int  _drag_last_y = 0;
 
   // The popup currently drawn over curr, or NULL. One deep, and no allocation:
   // static RAM is already around half used and the design spec is explicit that
