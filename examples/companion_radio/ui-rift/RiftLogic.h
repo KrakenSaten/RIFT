@@ -1439,38 +1439,57 @@ static inline bool riftClockPlausible(uint32_t epoch) {
 // for separation from the accent and the ok green - the work that makes them
 // legal as text - and inventing more without repeating that sweep would be
 // guessing at the only property that matters here.
-// Eight rather than the channel palette's four. Four means two names collide
-// one time in four, which in a channel with a handful of people is most of the
-// time - and a colour that is shared is not an identity.
+// Twelve, and twelve is where this stops being worth widening.
 //
-// The first four are the channel colours unchanged, so a name and a channel that
-// land on the same slot look the same rather than nearly the same. The other four
-// come from the same sweep repeated: every RGB565 value scored for contrast after
-// quantisation, keeping only those at or above 4.5:1 against black AND white,
-// then filtered for distance from the accent and from the ok green - because a
-// name in alert red or in delivery green reads as a status, not as a person - and
-// finally chosen greedily for maximum separation from each other.
+// Four meant two names collided one time in four, which in a channel with a
+// handful of people is most of the time, and a shared colour is not an identity.
+// But the ceiling is not the palette, it is whether two colours can be told apart
+// at a glance on a 6px font in daylight. Measured as the worst separation between
+// any two entries, the greedy pick degrades: 50 at six colours, 33 at eight, 25 at
+// twelve, 21 at sixteen, 16 at twenty. Below about 20 they need to be compared
+// side by side, which is no use for reading a conversation, so twelve is the last
+// count that still buys anything.
 //
-//                             on black  on white  from accent  from ok-green
-//   4  0xD170  rgb(213, 44,131)   4.52      4.65        63           104
-//   5  0x039C  rgb(  0,113,230)   4.50      4.66       137            61
-//   6  0xB81F  rgb(189,  0,255)   4.61      4.56       109           130
-//   7  0x63EC  rgb( 98,125, 98)   4.63      4.54        74            56
-//   8  0xE00B  rgb(230,  0, 90)   4.51      4.65        60           123
+// Colour is an aid here, not the identity - the name is written next to it - so
+// the right answer to a very busy channel is not more hues.
 //
-// Seven and eight are the tightest against green and accent respectively. They
-// are kept because they sit in different columns from those two - the delivery
-// state is drawn at the right end of the row and the accent bar at the left edge -
-// and because the alternative is fewer colours, which is the actual complaint.
-#define RIFT_NAME_COLOURS 8
+// The first four are the channel colours untouched: they are in the tab strip and
+// in every outgoing row. The rest come from the same sweep repeated - every
+// RGB565 value scored after quantisation, keeping 4.5:1 or better against black
+// AND white, then held away from the accent and the ok green, because a name in
+// alert red or delivery green reads as a status rather than as a person - and
+// chosen greedily for maximum separation.
+//
+//                                 on black  on white  from accent  from green  nearest
+//   0  0x73E0  rgb(115,125,  0)   4.66      4.50        49           70         50
+//   1  0x0429  rgb(  0,133, 74)   4.45      4.71       111           19         48
+//   2  0x631E  rgb( 98, 97,246)   4.56      4.61       110           84         29
+//   3  0xD170  rgb(213, 44,131)   4.52      4.65        63          104         31
+//   4  0x039C  rgb(  0,113,230)   4.50      4.66       137           61         31
+//   5  0xB81F  rgb(189,  0,255)   4.61      4.56       109          130         30
+//   6  0x63EC  rgb( 98,125, 98)   4.63      4.54        74           56         29
+//   7  0xE00B  rgb(230,  0, 90)   4.51      4.65        60          123         25
+//   8  0xB1BC  rgb(180, 52,230)   4.57      4.59        95          106         29
+//   9  0x9334  rgb(148,101,164)   4.66      4.51        80           81         29
+//  10  0x2BD7  rgb( 41,121,189)   4.56      4.60       109           56         29
+//  11  0xD814  rgb(222,  0,164)   4.64      4.52        82          126         25
+//
+// Entry 1 is the established channel green and sits 19 from the ok green, well
+// inside what every new entry was rejected for. It is on screen already, so it
+// stays - but it is not a precedent.
+#define RIFT_NAME_COLOURS 12
 
 static inline uint16_t riftNameColourAt(int i) {
   switch (i) {
     case 0: case 1: case 2: case 3: return riftChannelColour(i + 1);
-    case 4: return 0x039C;
-    case 5: return 0xB81F;
-    case 6: return 0x63EC;
-    case 7: return 0xE00B;
+    case 4:  return 0x039C;
+    case 5:  return 0xB81F;
+    case 6:  return 0x63EC;
+    case 7:  return 0xE00B;
+    case 8:  return 0xB1BC;
+    case 9:  return 0x9334;
+    case 10: return 0x2BD7;
+    case 11: return 0xD814;
     default: return RIFT_CHAN_COL_NONE;
   }
 }

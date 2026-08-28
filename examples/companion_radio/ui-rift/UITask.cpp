@@ -5397,13 +5397,31 @@ public:
     if (n_conv == 0) _scroll = 0;
     if (_scroll < 0) _scroll = 0;
 
+    // Measure the whole conversation before laying any of it out, so the scroll
+    // can be clamped to its real end.
+    //
+    // It used to be allowed past the end and taken back on the next frame, which
+    // is exactly the spring-back: the view moved where the finger asked and then
+    // moved itself somewhere else. wrapText with a null display only counts
+    // lines, so this is arithmetic over the text already in RAM.
+    int total_h = 0;
+    for (int back = 0; back < msg_log.count; back++) {
+      auto q = msg_log.peek(back);
+      if (q == NULL) break;
+      if (!inCurrentConv(q)) continue;
+      char m[sizeof(q->msg)];
+      riftTranslateUTF8(m, q->msg, sizeof(m));
+      total_h += (wrapText(m, avail_px, 0, NULL, 0) + 1) * RIFT_LINE_H;
+    }
+    const int view_h = BODY_BOTTOM - _hist_top;
+    const int max_scroll = total_h > view_h ? total_h - view_h : 0;
+    if (_scroll > max_scroll) _scroll = max_scroll;
+
     // Everything is laid out from the input line upward, shifted down by the
     // scroll offset. Blocks that fall outside are skipped rather than clipped:
     // this driver has no clipping, so a partly-visible block would draw over the
     // tab strip or the compose line.
     y += _scroll;
-    int top_reached = y;
-    bool ran_out = true;
     for (int back = 0; back < msg_log.count; back++) {
       auto p = msg_log.peek(back);
       if (p == NULL) break;
@@ -5424,10 +5442,9 @@ public:
       int block_h = (body_lines + 1) * RIFT_LINE_H;
 
       y -= block_h;
-      top_reached = y;
-      if (y + block_h <= _hist_top) { ran_out = false; break; }   // above the view
-      if (y < _hist_top) { ran_out = false; break; }              // only partly in
-      if (y + block_h > BODY_BOTTOM) continue;                    // still below it
+      if (y + block_h <= _hist_top) break;          // wholly above the view
+      if (y < _hist_top) break;                     // only partly in, and no clipping
+      if (y + block_h > BODY_BOTTOM) continue;      // still below it
 
       // Own messages carry a 2px accent bar down the left edge rather than being
       // right-aligned: on a 320px screen right alignment costs half the width for
@@ -5493,15 +5510,6 @@ public:
 
       display.setColor(rift_pal.fg);
       wrapText(filtered, avail_px, y + RIFT_LINE_H, &display, 6);
-    }
-
-    // Self-correcting clamp. The total height of a conversation is not known
-    // without laying it out, so rather than computing it up front, an overscroll
-    // is detected here - the oldest message was reached and there is still empty
-    // space above it - and taken back on the next frame.
-    if (ran_out && _scroll > 0 && top_reached > _hist_top) {
-      _scroll -= (top_reached - _hist_top);
-      if (_scroll < 0) _scroll = 0;
     }
 
     // An empty conversation now exists, where it could not before: the history used
