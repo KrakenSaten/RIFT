@@ -2393,10 +2393,15 @@ public:
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(CX, y, "AUDIO");
     {
+      // Worst passes, not the underrun count. A tone written in one pass is one
+      // the DMA engine took whole; anything above that means writes were being
+      // refused, which is what every bad-sounding alert has had in common.
+      uint32_t mp = rift_speaker.maxPasses();
       uint32_t un = rift_speaker.underruns();
-      display.setColor(un > 0 ? rift_pal.accent : rift_pal.ok);
-      if (un > 0) snprintf(tmp, sizeof(tmp), "%u underruns", (unsigned) un);
-      else        snprintf(tmp, sizeof(tmp), "ok, %ums queue", (unsigned) rift_speaker.bufferedMs());
+      display.setColor((mp > 2 || un > 0) ? rift_pal.accent : rift_pal.ok);
+      if (un > 0)      snprintf(tmp, sizeof(tmp), "%u underruns", (unsigned) un);
+      else if (mp > 2) snprintf(tmp, sizeof(tmp), "%u passes worst", (unsigned) mp);
+      else             snprintf(tmp, sizeof(tmp), "ok, %u pass", (unsigned) mp);
       display.drawTextRightAlign(CR, y, tmp);
     }
     y += RIFT_LINE_H;

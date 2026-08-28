@@ -78,6 +78,15 @@ public:
   uint32_t underruns() const { return _underruns; }
   uint32_t bufferedMs() const;
 
+  // The most passes any single tone needed to be written. One means the whole
+  // tone went to the DMA engine in a single call, which is the healthy state and
+  // the only one that has sounded right.
+  //
+  // This is the number that has actually tracked the fault: 1153, 20, 2 and 1
+  // passes on four consecutive alerts, sounding bad, bad, good, good. The two
+  // counters beside it could not fail; this one moved with what was heard.
+  uint32_t maxPasses() const { return _max_passes; }
+
   // One line per tone, for the event log: how many samples it wrote, how many
   // passes that took, and how long the DMA queue had been empty before it
   // started. Returns false when there is nothing new.
@@ -126,6 +135,7 @@ private:
   uint32_t _ev_silence_ms = 0;   // queue empty for this long before the tone
   bool _ev_ready = false;
   uint32_t _passes = 0;          // passes used by the tone being generated
+  uint32_t _max_passes = 0;      // worst seen since boot
   uint32_t _prev_end_ms = 0;     // when the previous tone finished sounding
   uint8_t  _gain = 100;
 

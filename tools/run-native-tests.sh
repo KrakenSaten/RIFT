@@ -59,5 +59,14 @@ for dir in test/test_*; do
   fi
 done
 echo "----"
-echo "$total tests passed"
+# The verdict goes on the last line, not just in the exit code. Piping this
+# through `tail -2` has hidden a failing suite three times: the count came out
+# short, the NO RESULT line above was cut off, and the pipe replaced the exit
+# status with tail's. A summary that reads "206 tests passed" when a suite did
+# not run is the same class of mistake as a measurement that cannot fail.
+if [ $fail -ne 0 ]; then
+  echo "FAILED - $total tests passed, but at least one suite did not"
+else
+  echo "$total tests passed"
+fi
 exit $fail
