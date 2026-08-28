@@ -67,9 +67,19 @@ bool TDeckSpeaker::begin(int bclk, int lrclk, int dout, int sample_rate) {
     return false;
   }
 
-  // Halted until there is something to play, and nothing has been written yet, so
-  // there is nothing to clear. See the note on zeroing in play().
-  i2s_stop(SPK_PORT);
+  // Left running for one ring-length, then halted.
+  //
+  // The driver returns a ring whose descriptors are already queued, so the first
+  // tone cannot be written in one call: it goes in a couple of samples per pass,
+  // in lockstep with the ring draining. Measured, that was 1176 passes for a
+  // 2560-sample alert against one pass once things had settled, and the first two
+  // alerts after every boot were the ones that sounded wrong.
+  //
+  // Draining it here costs nothing - it happens during startup, silently, seconds
+  // before anything needs to sound - and every tone afterwards starts on an empty
+  // ring. loop() performs the stop once this deadline passes.
+  _prime_until = millis() + 400;   // one 320 ms ring, plus slack
+  _running = true;
 
   if (!s_sine_ready) {
     for (int i = 0; i < 256; i++) {
@@ -197,14 +207,15 @@ void TDeckSpeaker::loop() {
   if (!_ok) return;
 
   if (_step >= _count) {
-    // Nothing left to generate. The only work here is starting a queued alert,
-    // and only once this one has actually been heard - see below. The early
-    // return this replaced skipped that block entirely, so a queued alert would
-    // never have started.
-    if (!isDraining() && _running) {
-      // Only once it has been heard, not when the samples were handed over. No
-      // zeroing: with the engine stopped nothing is clocked out, and zeroing a
-      // stopped engine is what filled the queue above.
+    // Nothing left to generate. Two things still happen here, and an early return
+    // used to skip both: halting the engine, and starting a queued alert.
+    //
+    // Halted only once the audio has been heard, not when the samples were handed
+    // over, and not before the boot-time drain in begin() has finished. No
+    // zeroing on the way out - a stopped engine clocks nothing out, and
+    // i2s_zero_dma_buffer() pushes silence through the same queue the audio uses,
+    // so calling it on a halted engine fills the queue rather than clearing it.
+    if (!isDraining() && _running && (int32_t) (millis() - _prime_until) >= 0) {
       i2s_stop(SPK_PORT);
       _running = false;
     }
