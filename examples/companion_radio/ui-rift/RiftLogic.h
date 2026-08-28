@@ -1419,3 +1419,37 @@ static inline bool riftCliIsDestructive(const char* cmd) {
 static inline bool riftClockPlausible(uint32_t epoch) {
   return epoch >= RIFT_CLOCK_MIN && epoch < RIFT_CLOCK_MAX;
 }
+
+// ---- a colour per name ----------------------------------------------------
+//
+// In a channel every row is the same channel, so colouring the row by channel
+// tells you nothing the tab above does not already say - and it only ever
+// worked in one direction anyway. An outgoing row records "to <channel>:", which
+// matches a tab and gets its colour; an incoming row records the sender's name,
+// which matches nothing, so every other participant was drawn in the same grey.
+// A conversation between three people looked like a conversation between one.
+//
+// Derived from the name rather than assigned, so it is stable: the same person
+// is the same colour on every device, across reboots, and after the channel list
+// is edited. Random would mean somebody changes colour when the firmware
+// restarts, which is worse than no colour at all.
+//
+// Drawn from riftChannelColour's palette rather than a new one. Those four were
+// measured after RGB565 quantisation for 4.5:1 against both black and white and
+// for separation from the accent and the ok green - the work that makes them
+// legal as text - and inventing more without repeating that sweep would be
+// guessing at the only property that matters here.
+#define RIFT_NAME_COLOURS 4
+
+static inline uint16_t riftNameColour(const char* name) {
+  if (name == NULL || name[0] == 0) return RIFT_CHAN_COL_NONE;
+
+  // FNV-1a. Any spread would do; this one is short, has no state, and gives the
+  // same answer for the same bytes on every device.
+  uint32_t h = 2166136261u;
+  for (const char* p = name; *p; p++) {
+    h ^= (uint32_t) (uint8_t) *p;
+    h *= 16777619u;
+  }
+  return riftChannelColour((int) (h % RIFT_NAME_COLOURS) + 1);
+}

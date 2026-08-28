@@ -1721,6 +1721,51 @@ TEST(ClockPlausible, RefusesAnUnsetClockAndAcceptsARealOne) {
   EXPECT_FALSE(riftClockPlausible(4200000000u));               // past 2100
 }
 
+// ---- name colours ---------------------------------------------------------
+
+TEST(NameColour, IsStableForTheSameName) {
+  // The whole point: a person keeps their colour across reboots and devices.
+  EXPECT_EQ(riftNameColour("ALPHA"), riftNameColour("ALPHA"));
+  EXPECT_EQ(riftNameColour("Bravo-2"), riftNameColour("Bravo-2"));
+}
+
+TEST(NameColour, OnlyEverReturnsAVerifiedColour) {
+  // Never an unmeasured value: these four are the ones swept for 4.5:1 after
+  // RGB565 quantisation against both black and white.
+  const char* names[] = { "ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO",
+                          "FOXTROT", "a", "zz", "Andre", "OSLO-1" };
+  for (const char* n : names) {
+    uint16_t c = riftNameColour(n);
+    bool known = false;
+    for (int i = 1; i <= RIFT_NAME_COLOURS; i++) {
+      if (c == riftChannelColour(i)) known = true;
+    }
+    EXPECT_TRUE(known) << n << " got an unverified colour";
+  }
+}
+
+TEST(NameColour, DistinguishesNamesThatDifferInOneCharacter) {
+  // Not a guarantee - four colours cannot separate every pair - but a hash that
+  // ignored the tail would put a whole squad on one colour.
+  EXPECT_NE(riftNameColour("NODE-1"), riftNameColour("NODE-3"));
+}
+
+TEST(NameColour, UsesTheWholePalette) {
+  bool seen[RIFT_NAME_COLOURS + 1] = { false };
+  char buf[8];
+  for (int i = 0; i < 40; i++) {
+    snprintf(buf, sizeof(buf), "n%d", i);
+    uint16_t c = riftNameColour(buf);
+    for (int k = 1; k <= RIFT_NAME_COLOURS; k++) if (c == riftChannelColour(k)) seen[k] = true;
+  }
+  for (int k = 1; k <= RIFT_NAME_COLOURS; k++) EXPECT_TRUE(seen[k]) << "colour " << k << " never used";
+}
+
+TEST(NameColour, HasNoColourForAnEmptyOrMissingName) {
+  EXPECT_EQ(RIFT_CHAN_COL_NONE, riftNameColour(NULL));
+  EXPECT_EQ(RIFT_CHAN_COL_NONE, riftNameColour(""));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

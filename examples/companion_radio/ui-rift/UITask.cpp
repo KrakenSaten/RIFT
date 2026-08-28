@@ -5442,7 +5442,16 @@ public:
       //
       // Matched on the raw origin rather than the CP437-translated copy, because
       // that is what the channel is named.
+      // A channel name keeps the channel's colour, so an outgoing row and the tab
+      // above it still carry the same identity. Anything else - which is every
+      // incoming row, since those record the sender rather than the channel - is
+      // coloured from the sender's name instead of falling to grey. Three people
+      // in a channel used to be three identical grey rows.
       uint16_t chan_col = originColour(p->origin);
+      if (chan_col == RIFT_CHAN_COL_NONE) {
+        char who[64];
+        if (riftOriginName(p->origin, who, sizeof(who))) chan_col = riftNameColour(who);
+      }
       display.setColor(chan_col != RIFT_CHAN_COL_NONE ? chan_col : rift_pal.mid);
       display.drawTextEllipsized(38, y, 232, filtered_origin);
 
@@ -5529,6 +5538,23 @@ public:
   bool handleTouch(int x, int y) override {
     if (_picking) return false;
     if (_tabs_y <= 0) return false;   // strip hasn't been drawn yet
+
+    // Scrolling by tap rather than by swipe: the touch driver reports once per
+    // completed tap, on release, so there is no drag to follow. Upper half of the
+    // history goes back, lower half comes forward - the same direction the text
+    // moves, which is the part that has to be guessed right.
+    //
+    // This exists because the trackball is the only other way to scroll here and
+    // its left and right change screen, so a slightly off flick leaves the
+    // conversation entirely.
+    // The history runs from _hist_top down to BODY_BOTTOM, below the tab strip.
+    if (y >= _hist_top && y <= BODY_BOTTOM) {
+      int mid = (_hist_top + BODY_BOTTOM) / 2;
+      if (y < mid) { if (_scroll + 1 < convCount()) _scroll++; }   // older
+      else         { if (_scroll > 0) _scroll--; }                 // newer
+      return true;
+    }
+
     if (y < _tabs_y - 2 || y > _tabs_y + 13) return false;
 
     if (_tab_w <= 0) return false;   // strip hasn't been drawn yet
