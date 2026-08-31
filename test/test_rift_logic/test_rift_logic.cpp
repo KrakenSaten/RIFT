@@ -2001,6 +2001,39 @@ TEST(Tropo, UsableHopsMasksTheHashSizeBits) {
   EXPECT_FALSE(riftTropoUsableHops(0xFF, &hops));
 }
 
+// ---- flood scope names ----------------------------------------------------
+
+TEST(ScopeName, AcceptsAnOrdinaryRegionName) {
+  EXPECT_TRUE(riftScopeNameValid("#oslo"));
+  EXPECT_TRUE(riftScopeNameValid("North West"));
+  EXPECT_TRUE(riftScopeNameValid("a"));
+}
+
+TEST(ScopeName, RefusesWhatWouldMeanNoScope) {
+  // Empty means "use the node default" everywhere this is stored, so an empty or
+  // blank name must never become a scope in its own right - the two send
+  // differently and nothing on screen would distinguish them.
+  EXPECT_FALSE(riftScopeNameValid(""));
+  EXPECT_FALSE(riftScopeNameValid("   "));
+  EXPECT_FALSE(riftScopeNameValid(NULL));
+}
+
+TEST(ScopeName, RefusesControlCharactersAndOverlongNames) {
+  const char ctrl[] = { 'a', (char) 9, 'b', 0 };
+  EXPECT_FALSE(riftScopeNameValid(ctrl));
+
+  char longname[RIFT_SCOPE_NAME_MAX + 8];
+  memset(longname, 'x', sizeof(longname) - 1);
+  longname[sizeof(longname) - 1] = 0;
+  EXPECT_FALSE(riftScopeNameValid(longname));
+
+  // The longest that still fits with its terminator is accepted.
+  char fits[RIFT_SCOPE_NAME_MAX];
+  memset(fits, 'x', sizeof(fits) - 1);
+  fits[sizeof(fits) - 1] = 0;
+  EXPECT_TRUE(riftScopeNameValid(fits));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

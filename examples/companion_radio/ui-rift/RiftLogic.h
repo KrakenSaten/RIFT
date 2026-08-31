@@ -1697,3 +1697,36 @@ static inline bool riftTropoTick(RiftTropo* t, uint32_t now) {
   t->window_start = 0;
   return true;
 }
+
+// ---- flood scope ----------------------------------------------------------
+//
+// A scope is a region: a name and a 16-byte key. For a publicly-known hashtag
+// region the key is simply SHA256 of the name, so anyone who knows the name can
+// derive it - that is upstream's TransportKeyStore::getAutoKeyFor.
+//
+// Repeaters relay a scoped flood only within their own region, so a scope is how
+// a channel stays local instead of crossing the whole mesh.
+//
+// What cannot be built on this, stated here so nobody tries: the transport code
+// on a packet is HMAC(key, payload_type || payload), so it differs for every
+// packet. It is not a region identifier that can be collected off the air and
+// listed. A scope can be tested - recompute the code for a name you already have
+// and see whether it matches - but it cannot be discovered.
+#define RIFT_SCOPE_NAME_MAX 32
+
+// A scope name is a hashtag region label. Rejecting the empty string matters
+// because empty means "use the node default" everywhere this is stored, and a
+// name of spaces would be a different scope from the one the user thinks they
+// typed.
+static inline bool riftScopeNameValid(const char* name) {
+  if (name == NULL) return false;
+  int n = 0;
+  bool has_visible = false;
+  for (const char* p = name; *p; p++) {
+    unsigned char c = (unsigned char) *p;
+    if (c < 32) return false;
+    if (c != ' ') has_visible = true;
+    if (++n >= RIFT_SCOPE_NAME_MAX) return false;   // must fit with a terminator
+  }
+  return n > 0 && has_visible;
+}

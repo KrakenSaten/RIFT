@@ -12,6 +12,7 @@
 #include "ui-rift/RiftRxLog.h"
 #include "ui-rift/RiftLogic.h"
 #include "ui-rift/RiftRepeater.h"
+#include "ui-rift/RiftScopes.h"
 #include <helpers/sensors/LPPDataHelpers.h>   // LPPReader, to decode a telemetry reply
 #endif
 // Channel PSKs are shared between nodes as base64. Declared rather than
@@ -1038,7 +1039,6 @@ void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, ui
   }
 }
 void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis) {
-  // TODO: have per-channel send_scope
   if (send_unscoped) {
     sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);  // app has explicitly requested un-scoped
   } else {
@@ -1046,6 +1046,24 @@ void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
     memcpy(&default_scope.key, _prefs.default_scope_key, sizeof(default_scope.key));
 
     auto scope = send_scope.isNull() ? &default_scope : &send_scope;
+
+#ifdef RIFT_VERSION
+    // Per-channel scope, which is the TODO this replaced. A channel that should
+    // stay inside a region needs its own, or the node default forces every other
+    // channel to be regional too - and the scope belongs to the channel.
+    //
+    // Ranked below an explicit send_scope, which the app sets for one send, and
+    // above the node default. findChannelIdx is how the GroupChannel handed in
+    // here is mapped back to the slot the name is stored against.
+    TransportKey chan_scope;
+    if (send_scope.isNull()) {
+      int idx = findChannelIdx(channel);
+      if (idx >= 0 && riftScopeKeyFor((uint8_t) idx, chan_scope.key)) {
+        scope = &chan_scope;
+      }
+    }
+#endif
+
     sendFloodScoped(*scope, pkt, delay_millis);
   }
 }

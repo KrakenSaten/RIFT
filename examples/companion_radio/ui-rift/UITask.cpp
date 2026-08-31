@@ -3,6 +3,7 @@
 #include "RiftEventLog.h"
 #include "RiftRxLog.h"
 #include "RiftRepeater.h"
+#include "RiftScopes.h"
 #include <helpers/sensors/LPPDataHelpers.h>   // LPP_* type codes, for the telemetry labels
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/UTF8Helpers.h>
@@ -996,6 +997,29 @@ void riftLoadSettings() {
       }
     }
 #endif
+
+    // Channel scopes. Outside the RADAR guard because a scope has nothing to do
+    // with the radar, and written outside it too - the two sides have to agree
+    // about the file layout for a given build, and they do.
+    {
+      RiftScopeTable& sc = riftScopes();
+      sc.reset();
+      uint8_t ns = 0;
+      if (f.read(&ns, 1) == 1) {
+        if (ns > RIFT_SCOPE_SLOTS) ns = RIFT_SCOPE_SLOTS;
+        for (int i = 0; i < ns; i++) {
+          uint8_t idx = 0;
+          char nm[RIFT_SCOPE_NAME_MAX];
+          // Dropped whole rather than half-read, like a watch record: a file cut
+          // short by a failed write must not produce a channel scoped to rubbish,
+          // which would send its traffic somewhere nobody is listening.
+          if (f.read(&idx, 1) != 1) break;
+          if (f.read((uint8_t*) nm, sizeof(nm)) != (int) sizeof(nm)) break;
+          nm[sizeof(nm) - 1] = 0;
+          if (riftScopeNameValid(nm)) sc.append(idx, nm);
+        }
+      }
+    }
   }
   f.close();
 
@@ -1060,6 +1084,22 @@ void riftSaveSettings() {
                   == sizeof(rf_watch[i].name));
   }
 #endif
+
+  // Channel scopes, appended after the watches for the same reason they were
+  // appended after the flags: a file written before this existed still loads
+  // everything ahead of it, and the reader stops when the file runs out.
+  {
+    RiftScopeTable& sc = riftScopes();
+    uint8_t ns = (uint8_t) sc.count();
+    ok = ok && (f.write(&ns, 1) == 1);
+    for (int i = 0; i < sc.count() && ok; i++) {
+      uint8_t idx = sc.at(i).channel_idx;
+      ok = ok && (f.write(&idx, 1) == 1);
+      ok = ok && (f.write((const uint8_t*) sc.at(i).name, RIFT_SCOPE_NAME_MAX)
+                    == RIFT_SCOPE_NAME_MAX);
+    }
+  }
+
   f.close();
   if (!ok) riftLogf("SETTINGS WRITE FAILED");
 #endif
@@ -1579,13 +1619,14 @@ class RiftSystemScreen : public RiftScreen {
   // A small action menu rather than hidden letter shortcuts - discoverable, and
   // it leaves the printable keys free for the text fields.
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
-              CH_DELETE, CH_DELETE_CONFIRM, LOG, SET_TIME, RXLOG };
+              CH_DELETE, CH_DELETE_CONFIRM, LOG, SET_TIME, RXLOG,
+              SCOPE_PICK, SCOPE_ENTRY };
   // The two advert actions used to head this list. They live on the home screen
   // now, as buttons beside DISCOVER - that screen is the one showing how many
   // nodes are stored and heard, so it is where you already are when the answer
   // is "send an advert". Moved rather than copied: the same action reachable from
   // two places is two code paths that drift.
-  enum Item { IT_NAME, IT_CHANNEL, IT_DELCHANNEL,
+  enum Item { IT_NAME, IT_CHANNEL, IT_DELCHANNEL, IT_SCOPE,
               IT_PATHMODE, IT_SCREEN, IT_SOUND, IT_DAYMODE, IT_SETTIME, IT_LOG, IT_RXLOG,
               IT_COUNT };
 
@@ -1608,6 +1649,7 @@ class RiftSystemScreen : public RiftScreen {
       "Edit node name",
       "Add channel",
       "Delete channel",
+      "Channel scope",
     };
     if (i == IT_RXLOG) {
       // Both totals in the label, so the split is visible without opening it. A node
@@ -1738,6 +1780,12 @@ private:
         _del_sel = 0;
         collectDeletable();
         _mode = CH_DELETE;
+        break;
+
+      case IT_SCOPE:
+        collectScopable();
+        _del_sel = 0;
+        _mode = SCOPE_PICK;
         break;
 
       case IT_LOG:
@@ -1890,6 +1938,74 @@ private:
     _edit.render(display, 4, 54, display.width() - 8);
     display.setColor(UIColor::secondary_txt);
     display.drawTextLeftAlign(4, 90, "ENTER add   BACKSPACE delete / back");
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
+  // Every channel, Public included. A region owning its own Public is exactly the
+  // case a scope exists for, and unlike deletion there is nothing irreversible
+  // about giving one a name.
+  void collectScopable() {
+    _del_count = 0;
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails ch;
+      if (!the_mesh.getChannel(i, ch) || ch.name[0] == 0) continue;
+      _del_idx[_del_count++] = (uint8_t) i;
+    }
+    if (_del_sel >= _del_count) _del_sel = _del_count > 0 ? _del_count - 1 : 0;
+  }
+
+  int renderScopeList(DisplayDriver& display) {
+    renderHeading(display, "CHANNEL SCOPE");
+    display.setTextSize(1);
+
+    if (_del_count == 0) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(4, 40, "No channels.");
+      display.drawTextLeftAlign(4, 64, "BACKSPACE back");
+      renderNavBar(display, RIFT_NAV_SYSTEM);
+      return 1000;
+    }
+
+    int y = 34;
+    char tmp[72];
+    for (int i = 0; i < _del_count && y < 176; i++, y += RIFT_LINE_H) {
+      ChannelDetails ch;
+      if (!the_mesh.getChannel(_del_idx[i], ch)) continue;
+      char nm[sizeof(ch.name)];
+      riftTranslateUTF8(nm, ch.name, sizeof(nm));
+
+      const char* sc = riftScopes().nameFor(_del_idx[i]);
+      snprintf(tmp, sizeof(tmp), "%-16s %s", nm, sc ? sc : "(node default)");
+
+      if (i == _del_sel) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y - 2, display.width(), 12);
+        display.setColor(0xFFFF);
+      } else {
+        display.setColor(rift_pal.fg);
+      }
+      display.drawTextLeftAlign(4, y, tmp);
+    }
+
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(4, 190, "A scope keeps a channel inside a region.");
+    display.drawTextLeftAlign(4, 202, "ENTER edit   BACKSPACE back");
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
+  int renderScopeEntry(DisplayDriver& display) {
+    renderHeading(display, "CHANNEL SCOPE");
+    display.setTextSize(1);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(4, 40, "Region name. Empty clears it back to");
+    display.drawTextLeftAlign(4, 52, "the node default.");
+    display.drawTextLeftAlign(4, 76, "Anyone using the same name reaches the");
+    display.drawTextLeftAlign(4, 88, "same region - the key is the name.");
+    _edit.render(display, 4, 116, display.width() - 8);
+    display.setColor(rift_pal.dim);
+    display.drawTextLeftAlign(4, 202, "ENTER save   BACKSPACE delete / back");
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
   }
@@ -2321,6 +2437,8 @@ public:
       case CH_KEY_CHOICE:  return renderKeyChoice(display);
       case CH_KEY_ENTRY:   return renderKeyEntry(display);
       case CH_SHOW_KEY:    return renderShowKey(display);
+      case SCOPE_PICK:     return renderScopeList(display);
+      case SCOPE_ENTRY:    return renderScopeEntry(display);
       case CH_DELETE:      return renderDeleteList(display);
       case CH_DELETE_CONFIRM: return renderDeleteConfirm(display);
       case LOG:            return renderLog(display);
@@ -2862,6 +2980,48 @@ public:
       if (_edit.handleKey(c)) return true;
       if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = CH_KEY_CHOICE; return true; }
       return true;
+    }
+
+    if (_mode == SCOPE_PICK) {
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = MENU; return true; }
+      if (_del_count == 0) return true;
+      if (c == KEY_UP)   { _del_sel = (_del_sel + _del_count - 1) % _del_count; return true; }
+      if (c == KEY_DOWN) { _del_sel = (_del_sel + 1) % _del_count; return true; }
+      if (c == KEY_ENTER) {
+        const char* cur = riftScopes().nameFor(_del_idx[_del_sel]);
+        _edit.begin(cur ? cur : "", RIFT_SCOPE_NAME_MAX - 1);
+        _mode = SCOPE_ENTRY;
+        return true;
+      }
+      return true;
+    }
+
+    if (_mode == SCOPE_ENTRY) {
+      if (c == KEY_ENTER) {
+        uint8_t idx = _del_idx[_del_sel];
+        if (_edit.len == 0) {
+          // Empty is how a channel goes back to the node default, which is why
+          // the entry screen says so rather than refusing an empty field.
+          riftScopes().clear(idx);
+          riftLogf("scope cleared on channel %d", (int) idx);
+          _task->showAlert("Scope cleared", 1200);
+        } else if (!riftScopeNameValid(_edit.buf)) {
+          _task->showAlert("Not a valid region name", 1600);
+          return true;
+        } else if (!riftScopes().set(idx, _edit.buf)) {
+          _task->showAlert("No scope slots left", 1600);
+          return true;
+        } else {
+          riftLogf("scope on channel %d: %s", (int) idx, _edit.buf);
+          _task->showAlert("Scope saved", 1200);
+        }
+        riftSaveSettings();
+        _mode = SCOPE_PICK;
+        return true;
+      }
+      if (_edit.handleKey(c)) return true;
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = SCOPE_PICK; return true; }
+      return true;   // no stray key navigates away mid-edit
     }
 
     if (_mode == CH_DELETE) {
