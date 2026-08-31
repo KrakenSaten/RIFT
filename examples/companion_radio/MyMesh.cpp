@@ -361,6 +361,10 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
                   (len > 0) ? raw[0] : 0,
                   (len > 1) ? raw[1] : 0,
                   len);
+
+  // Tropo: a mask, a compare and a counter. The transition is noticed by the UI
+  // on its own timer, so nothing here formats a string or takes a decision.
+  riftTropoStep(&riftTropoState(), (uint32_t) millis(), (len > 1) ? raw[1] : 0);
 #endif
 
   if (_serial->isConnected() && len + 3 <= MAX_FRAME_SIZE) {

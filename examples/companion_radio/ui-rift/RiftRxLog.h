@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "RiftLogic.h"   // RiftTropo, fed from the same path byte
+
 // Every packet the radio hears, and every packet it sends.
 //
 // Receive-only until now, which left the most basic field question unanswerable on the
@@ -116,4 +118,15 @@ struct RiftRxLog {
 inline RiftRxLog& riftRxLog() {
   static RiftRxLog log;
   return log;
+}
+
+// Tropo state lives beside the RX log because it is derived from the same thing:
+// the path byte of every packet heard. Same single-object guarantee, same reason.
+//
+// Fed from the packet path and read from the UI, and deliberately nothing else -
+// riftTropoStep is a mask, a compare and a counter, which is all that belongs on
+// a path with no watchdog behind it. Announcing is the UI's job.
+inline RiftTropo& riftTropoState() {
+  static RiftTropo t = { 0, 0, 0, 0, false, 0 };
+  return t;
 }

@@ -203,6 +203,9 @@ private:
   RiftScreen* curr;
   // Finger tracking for drag-to-scroll. _drag_moved suppresses the tap the driver
   // reports on release, so a scroll does not also count as a press.
+  // Last announced tropo state, so an opening is reported on its edges rather
+  // than on every frame it remains true.
+  bool _tropo_was_active = false;
   bool _dragging = false;
   bool _drag_moved = false;
   int  _drag_last_y = 0;

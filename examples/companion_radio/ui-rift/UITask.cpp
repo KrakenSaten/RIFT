@@ -1437,9 +1437,20 @@ public:
     sprintf(tmp, "LINK %.0f / %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
     display.drawTextRightAlign(display.width() - 2, 170, tmp);
 
-    display.setColor(rift_pal.mid);
-    sprintf(tmp, "%.3fMHz  SF%d  %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
-    display.drawTextCentered(display.width() / 2, 182, tmp);
+    // The radio line, unless a tropo opening is running - in which case that is
+    // the more interesting thing this screen can say, and the frequency has not
+    // changed since the last time it was read.
+    {
+      RiftTropo& tr = riftTropoState();
+      if (tr.active) {
+        display.setColor(rift_pal.accent);
+        sprintf(tmp, "TROPO OPEN %s peak %d hops", RIFT_DOT, (int) tr.peak_hops);
+      } else {
+        display.setColor(rift_pal.mid);
+        sprintf(tmp, "%.3fMHz  SF%d  %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
+      }
+      display.drawTextCentered(display.width() / 2, 182, tmp);
+    }
 
     // The one action on this screen, drawn as a button because it is one - an
     // outlined box with the accent, rather than a line of hint text that happens to
@@ -2612,6 +2623,25 @@ public:
     display.setColor(rift_pal.mid);
     group(display, "MESH", CX, y + 4);
     y += RIFT_LINE_H + 6;
+
+    // Both halves of the tropo signal, so it can be judged rather than trusted.
+    // deep is what the detector counted in the current window; peak is how far
+    // the deepest packet had travelled. A peak that never rises above the local
+    // mesh depth means the threshold is set for a mesh this node is not in.
+    //
+    // In the MESH column rather than beside the hardware readings: it is a
+    // statement about the network, and the left column is one row from its
+    // footer.
+    display.drawTextLeftAlign(CX, y, "TROPO");
+    {
+      RiftTropo& tr = riftTropoState();
+      display.setColor(tr.active ? rift_pal.accent : rift_pal.fg);
+      snprintf(tmp, sizeof(tmp), "%s %u deep, peak %u",
+               tr.active ? "OPEN" : "quiet", (unsigned) tr.deep_count, (unsigned) tr.peak_hops);
+      display.drawTextRightAlign(CR, y, tmp);
+    }
+    y += RIFT_LINE_H;
+    display.setColor(rift_pal.mid);
 
     display.drawTextLeftAlign(CX, y, "PATH CACHE");
     {
@@ -7290,6 +7320,24 @@ void UITask::loop() {
 #ifdef PIN_BUZZER
   if (buzzer.isPlaying())  buzzer.loop();
 #endif
+
+  // Tropo openings, announced from here rather than from the packet path: that
+  // path gets a counter and nothing else. Edge-triggered on both sides, so one
+  // opening is one line and one alert however many deep packets arrive.
+  {
+    RiftTropo& tr = riftTropoState();
+    riftTropoTick(&tr, (uint32_t) millis());
+    if (tr.active != _tropo_was_active) {
+      _tropo_was_active = tr.active;
+      if (tr.active) {
+        riftLogf("TROPO open: %d deep, peak %d hops", (int) tr.deep_count, (int) tr.peak_hops);
+        notify(UIEventType::ack);
+        showAlert("Tropo conditions", 2500);
+      } else {
+        riftLogf("TROPO closed");
+      }
+    }
+  }
 
   // Serviced here rather than from the panel's render, for the same reason RADAR
   // is: a state machine that only advances while it is on screen stops advancing

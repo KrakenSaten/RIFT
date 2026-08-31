@@ -1904,6 +1904,103 @@ TEST(ChannelSenderNth, StillRefusesWhatIsNotAName) {
   EXPECT_EQ(0, riftChannelSenderNth(NULL, 0, who, sizeof(who)));
 }
 
+// ---- tropo detector -------------------------------------------------------
+
+namespace {
+uint8_t pathByte(int hops, int hash_size_bits = 1) {
+  return (uint8_t) ((hash_size_bits << 6) | (hops & 63));
+}
+}  // namespace
+
+TEST(Tropo, IgnoresTheNoPathSentinel) {
+  // 0xFF means "no path recorded" and its low six bits are 63. Compared naively
+  // against a hop threshold it fires on every such packet, forever - which is
+  // the whole reason this function exists.
+  RiftTropo t; riftTropoReset(&t);
+  for (int i = 0; i < 100; i++) {
+    EXPECT_FALSE(riftTropoStep(&t, 1000u + i, 0xFF));
+  }
+  EXPECT_FALSE(t.active);
+  EXPECT_EQ(0, t.deep_count);
+}
+
+TEST(Tropo, IgnoresShallowPaths) {
+  RiftTropo t; riftTropoReset(&t);
+  for (int i = 0; i < 50; i++) EXPECT_FALSE(riftTropoStep(&t, 1000u + i, pathByte(3)));
+  EXPECT_FALSE(t.active);
+}
+
+TEST(Tropo, OpensOnceAfterEnoughDeepPackets) {
+  RiftTropo t; riftTropoReset(&t);
+  uint32_t now = 100000;
+  bool opened = false;
+  for (int i = 0; i < RIFT_TROPO_NEEDED; i++) {
+    opened = riftTropoStep(&t, now + i * 1000, pathByte(RIFT_TROPO_HOPS));
+  }
+  EXPECT_TRUE(opened);          // the transition, on the packet that reached it
+  EXPECT_TRUE(t.active);
+
+  // and not again while it stays open
+  for (int i = 0; i < 20; i++) {
+    EXPECT_FALSE(riftTropoStep(&t, now + 20000 + i * 1000, pathByte(30)));
+  }
+  EXPECT_TRUE(t.active);
+  EXPECT_EQ(30, t.peak_hops);
+}
+
+TEST(Tropo, DoesNotOpenOnDeepPacketsSpreadTooThin) {
+  // One deep packet per window is a long path, not an opening.
+  RiftTropo t; riftTropoReset(&t);
+  uint32_t now = 100000;
+  for (int i = 0; i < 10; i++) {
+    now += RIFT_TROPO_WINDOW_MS + 1000;
+    EXPECT_FALSE(riftTropoStep(&t, now, pathByte(40)));
+  }
+  EXPECT_FALSE(t.active);
+}
+
+TEST(Tropo, ClosesAfterTheHoldAndOnlyOnce) {
+  RiftTropo t; riftTropoReset(&t);
+  uint32_t now = 100000;
+  for (int i = 0; i < RIFT_TROPO_NEEDED; i++) riftTropoStep(&t, now + i, pathByte(25));
+  ASSERT_TRUE(t.active);
+
+  EXPECT_FALSE(riftTropoTick(&t, now + RIFT_TROPO_HOLD_MS / 2));   // still open
+  EXPECT_TRUE(t.active);
+
+  EXPECT_TRUE(riftTropoTick(&t, now + RIFT_TROPO_HOLD_MS + 1000)); // the transition
+  EXPECT_FALSE(t.active);
+  EXPECT_FALSE(riftTropoTick(&t, now + RIFT_TROPO_HOLD_MS + 9000)); // not again
+}
+
+TEST(Tropo, SurvivesTheMillisWrap) {
+  // The same wrap-safe comparison the rest of the firmware uses; a window that
+  // straddles the rollover must not look like one that never ends.
+  RiftTropo t; riftTropoReset(&t);
+  uint32_t now = 0xFFFFF000u;
+  for (int i = 0; i < RIFT_TROPO_NEEDED; i++) riftTropoStep(&t, now + i * 100, pathByte(25));
+  EXPECT_TRUE(t.active);
+  EXPECT_TRUE(riftTropoTick(&t, now + RIFT_TROPO_HOLD_MS + 100000));   // wrapped
+  EXPECT_FALSE(t.active);
+}
+
+TEST(Tropo, HandlesNullWithoutCrashing) {
+  EXPECT_FALSE(riftTropoStep(NULL, 1, 0x20));
+  EXPECT_FALSE(riftTropoTick(NULL, 1));
+  riftTropoReset(NULL);
+}
+
+TEST(Tropo, UsableHopsMasksTheHashSizeBits) {
+  // Bits 6-7 carry the hash size, not the count - reading the whole byte was the
+  // bug that once showed a two-hop route as "(66)".
+  uint8_t hops = 0;
+  EXPECT_TRUE(riftTropoUsableHops(pathByte(2, 1), &hops));
+  EXPECT_EQ(2, hops);
+  EXPECT_TRUE(riftTropoUsableHops(pathByte(2, 3), &hops));
+  EXPECT_EQ(2, hops);
+  EXPECT_FALSE(riftTropoUsableHops(0xFF, &hops));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

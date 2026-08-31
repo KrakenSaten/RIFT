@@ -1592,3 +1592,108 @@ static inline int riftChannelSenderNth(const char* text, int nth, char* out, int
   }
   return n + 2;
 }
+
+// ---- tropospheric opening detector ----------------------------------------
+//
+// During a tropo opening, clusters of the mesh that normally cannot reach each
+// other become connected, and flood packets start arriving having traversed far
+// more relays than the local mesh contains. A run of those is the signal.
+//
+// What this measures, stated plainly so it is not over-trusted: it counts
+// received packets whose recorded path is unusually deep. That is a consequence
+// of an opening, not the opening itself. The stronger signature is a distant node
+// suddenly audible at zero hops, which needs identity rather than just the path
+// byte - the counters below are exposed so that can be judged before it is built.
+//
+// The trap this has to avoid is specific and already cost this project once.
+// path_len packs the hash size in bits 6-7 and the hop count in bits 0-5, so the
+// "no path recorded" value 0xFF reads as 63 hops. A naive comparison against a
+// threshold fires on every one of those, forever. Anything at the top of the
+// range is therefore not a measurement and is dropped.
+
+#ifndef RIFT_TROPO_HOPS
+  #define RIFT_TROPO_HOPS 20        // hops at or above this are "deep"
+#endif
+#ifndef RIFT_TROPO_NEEDED
+  #define RIFT_TROPO_NEEDED 5       // deep packets in a window before saying so
+#endif
+#ifndef RIFT_TROPO_WINDOW_MS
+  #define RIFT_TROPO_WINDOW_MS (15UL * 60UL * 1000UL)
+#endif
+// Held for this long after the last deep packet, so one opening is one alert
+// rather than a flutter as the count crosses back and forth.
+#ifndef RIFT_TROPO_HOLD_MS
+  #define RIFT_TROPO_HOLD_MS (20UL * 60UL * 1000UL)
+#endif
+
+// 62 rather than 63: one below the sentinel is still not a plausible mesh depth,
+// and treating it as data would mean trusting a byte that is more likely damaged
+// than true.
+#define RIFT_TROPO_IMPLAUSIBLE 62
+
+struct RiftTropo {
+  uint32_t window_start;
+  uint32_t last_deep;      // millis of the most recent deep packet
+  uint16_t deep_count;     // deep packets in the current window
+  uint8_t  peak_hops;      // deepest seen while active, for the readout
+  bool     active;
+  uint32_t opened_at;
+};
+
+static inline void riftTropoReset(RiftTropo* t) {
+  if (t == NULL) return;
+  t->window_start = 0;
+  t->last_deep = 0;
+  t->deep_count = 0;
+  t->peak_hops = 0;
+  t->active = false;
+  t->opened_at = 0;
+}
+
+// True if this path byte represents a usable hop count at all.
+static inline bool riftTropoUsableHops(uint8_t path_len, uint8_t* out_hops) {
+  uint8_t hops = (uint8_t) (path_len & 63);
+  if (hops >= RIFT_TROPO_IMPLAUSIBLE) return false;   // 0xFF and friends
+  if (out_hops != NULL) *out_hops = hops;
+  return true;
+}
+
+// Fold in one received packet. Returns true on the transition into an opening,
+// so the caller can announce it once rather than on every packet.
+static inline bool riftTropoStep(RiftTropo* t, uint32_t now, uint8_t path_len) {
+  if (t == NULL) return false;
+
+  uint8_t hops = 0;
+  if (!riftTropoUsableHops(path_len, &hops)) return false;
+  if (hops < RIFT_TROPO_HOPS) return false;
+
+  // A window that has run its length starts again from this packet rather than
+  // being cleared on a timer nobody calls: the only thing that has to be true is
+  // that the count describes a bounded stretch of time.
+  if (t->window_start == 0 || riftDue(now, t->window_start + RIFT_TROPO_WINDOW_MS)) {
+    t->window_start = now;
+    t->deep_count = 0;
+  }
+
+  t->last_deep = now;
+  if (t->deep_count < 0xFFFF) t->deep_count++;
+  if (hops > t->peak_hops) t->peak_hops = hops;
+
+  if (!t->active && t->deep_count >= RIFT_TROPO_NEEDED) {
+    t->active = true;
+    t->opened_at = now;
+    return true;
+  }
+  return false;
+}
+
+// Called on a timer. Returns true on the transition out of an opening.
+static inline bool riftTropoTick(RiftTropo* t, uint32_t now) {
+  if (t == NULL || !t->active) return false;
+  if (!riftDue(now, t->last_deep + RIFT_TROPO_HOLD_MS)) return false;
+  t->active = false;
+  t->peak_hops = 0;
+  t->deep_count = 0;
+  t->window_start = 0;
+  return true;
+}
