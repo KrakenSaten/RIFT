@@ -1707,11 +1707,15 @@ static inline bool riftTropoTick(RiftTropo* t, uint32_t now) {
 // Repeaters relay a scoped flood only within their own region, so a scope is how
 // a channel stays local instead of crossing the whole mesh.
 //
-// What cannot be built on this, stated here so nobody tries: the transport code
-// on a packet is HMAC(key, payload_type || payload), so it differs for every
-// packet. It is not a region identifier that can be collected off the air and
-// listed. A scope can be tested - recompute the code for a name you already have
-// and see whether it matches - but it cannot be discovered.
+// A scope cannot be recognised from a packet you merely overhear. The transport
+// code on it is HMAC(key, payload_type || payload), so it differs for every
+// packet and identifies no region; it can only be tested against a name already
+// held, by recomputing the code and comparing.
+//
+// That is a narrow statement and it was first written as a broad one - "scopes
+// cannot be discovered" - which is wrong. They can: simple_repeater answers an
+// ANON_REQ_TYPE_REGIONS request with the names it floods for, so the question is
+// asked rather than overheard. See MyMesh::riftRegionsReq.
 #define RIFT_SCOPE_NAME_MAX 32
 
 // A scope name is a hashtag region label. Rejecting the empty string matters
