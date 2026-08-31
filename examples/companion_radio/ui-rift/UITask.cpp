@@ -6180,9 +6180,13 @@ public:
 //
 // The whole CLI is admin-only on the far side - simple_repeater gates it on
 // client->isAdmin() - so this menu is too, and refuses before spending airtime.
+// A sentinel rather than a flag field: the table stays two columns, and the one
+// entry that is not a CLI command says so by identity.
+#define RIFT_CMD_REGIONS ((const char*) 1)
+
 struct RiftRepCmd {
   const char* label;
-  const char* cmd;      // NULL: switch to free text entry
+  const char* cmd;      // NULL: free text entry. RIFT_CMD_REGIONS: not a command.
 };
 
 // No confirm flag: riftCliIsDestructive() decides, so the menu and free text
@@ -6191,6 +6195,9 @@ static const RiftRepCmd RIFT_REP_CMDS[] = {
   { "Send advert (flood)",  "advert"         },
   { "Send advert (0-hop)",  "advert.zerohop" },
   { "Neighbours heard",     "neighbors"      },
+  // Not a CLI command: an anonymous REGIONS request, which is how a scope is
+  // discovered. NULL cmd would mean free text, so it carries its own marker.
+  { "Regions it floods",    RIFT_CMD_REGIONS },
   { "Firmware version",     "ver"            },
   { "Board",                "board"          },
   { "Read clock",           "clock"          },
@@ -6387,7 +6394,11 @@ public:
       if (_confirm_idx == _menu_sel) {
         display.setColor(rift_pal.accent);
         const char* cmd = RIFT_REP_CMDS[_menu_sel].cmd;
-        if (cmd != NULL && strncmp(cmd, "clock sync", 10) == 0) {
+        // RIFT_CMD_REGIONS is a sentinel pointer, not a string. Nothing arms a
+        // confirmation on it today, so this is unreachable - but a sentinel that
+        // would fault if it ever were reached is not something to leave guarded
+        // by control flow alone.
+        if (cmd != NULL && cmd != RIFT_CMD_REGIONS && strncmp(cmd, "clock sync", 10) == 0) {
           // The value itself, because a clock can only be pushed forwards and a
           // wrong one cannot be taken back. Seeing 2031 here is the only warning
           // that exists.
@@ -6565,6 +6576,19 @@ public:
           _edit.begin("", 63);
           _mode = RIFT_RP_COMMAND;
           _confirm_idx = -1;
+          return true;
+        }
+        if (e.cmd == RIFT_CMD_REGIONS) {
+          _confirm_idx = -1;
+          ContactInfo* ct = contact();
+          if (ct == NULL) { _task->showAlert("Contact is gone", 1400); _mode = RIFT_RP_VIEW; return true; }
+          if (s.pending() != RIFT_REP_IDLE) { _task->showAlert("Still waiting", 1200); return true; }
+          uint32_t est = 0;
+          // Needs a route: the far side answers a directly routed request only.
+          if (!the_mesh.riftRegionsReq(*ct, est)) {
+            _task->showAlert("No packet free - try again", 1400);
+          }
+          _mode = RIFT_RP_VIEW;
           return true;
         }
         if (sendCli(e.cmd, _menu_sel)) return true;   // armed, refused, or busy

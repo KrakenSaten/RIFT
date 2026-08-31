@@ -185,6 +185,17 @@ public:
   bool riftTelemetryReq(const ContactInfo& contact, uint32_t& est_timeout);
   bool riftCliCommand(const ContactInfo& contact, const char* text, uint32_t& est_timeout);
 
+  // Ask a repeater which regions it will flood for.
+  //
+  // An anonymous REGIONS request, which the repeater answers with the names it
+  // knows - so scopes CAN be discovered, by asking rather than by listening. The
+  // transport code on a packet is an HMAC over that packet and identifies
+  // nothing, which is what made this look impossible from the receive side.
+  //
+  // The far side requires a directly routed packet, so this only reaches a
+  // repeater we already hold a path to.
+  bool riftRegionsReq(const ContactInfo& contact, uint32_t& est_timeout);
+
   // Matches a response against the panel state above, ahead of the companion
   // chain and without touching it. Returns whether it matched; the caller does
   // not branch on it.

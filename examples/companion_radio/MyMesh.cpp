@@ -623,6 +623,20 @@ bool MyMesh::riftMatchResponse(const ContactInfo& contact, const uint8_t* data,
     return true;
   }
 
+  if (rift_pending_kind == RIFT_REP_REGIONS) {
+    rift_pending_kind = RIFT_REP_IDLE;
+    // {tag:4}{repeater clock:4}{comma-separated names}. Bounded and terminated
+    // here rather than trusting the sender to have done either.
+    if (len <= 8) { riftRepeater().onRegions(contact.id.pub_key, NULL); return true; }
+    char names[96];
+    int n = len - 8;
+    if (n > (int) sizeof(names) - 1) n = (int) sizeof(names) - 1;
+    memcpy(names, &data[8], (size_t) n);
+    names[n] = 0;
+    riftRepeater().onRegions(contact.id.pub_key, names);
+    return true;
+  }
+
   if (rift_pending_kind == RIFT_REP_TELEMETRY) {
     rift_pending_kind = RIFT_REP_IDLE;
     // Cayenne LPP, walked with the same reader the sensors screen uses rather
@@ -700,6 +714,27 @@ bool MyMesh::riftTelemetryReq(const ContactInfo& contact, uint32_t& est_timeout)
   rift_pending_kind = RIFT_REP_TELEMETRY;
   rift_pending_tag = tag;
   riftRepeater().beginPending(RIFT_REP_TELEMETRY, est_timeout);
+  return true;
+}
+
+bool MyMesh::riftRegionsReq(const ContactInfo& contact, uint32_t& est_timeout) {
+  // {req_type}{reply_path_len}{reply_path...}. sendAnonReq prefixes the tag, and
+  // the repeater reads the type at data[4].
+  //
+  // A zero-length reply path asks it to answer back the way the request came,
+  // which is the only sensible answer for a repeater we hold a direct path to -
+  // and the far side requires a directly routed request anyway.
+  uint8_t req[2];
+  req[0] = 0x01;   // ANON_REQ_TYPE_REGIONS, as simple_repeater defines it
+  req[1] = 0;      // reply path length
+
+  uint32_t tag;
+  int result = sendAnonReq(contact, req, sizeof(req), tag, est_timeout);
+  if (result == MSG_SEND_FAILED) return false;
+  rift_pending_kind = RIFT_REP_REGIONS;
+  rift_pending_tag = tag;
+  riftRepeater().beginPending(RIFT_REP_REGIONS, est_timeout);
+  riftLogf("regions asked of %s", contact.name);
   return true;
 }
 

@@ -43,6 +43,7 @@
 #define RIFT_REP_STATUS      2
 #define RIFT_REP_TELEMETRY   3
 #define RIFT_REP_CLI         4
+#define RIFT_REP_REGIONS     5
 
 // Login outcome, kept apart from the pending kind so a failure stays on screen
 // after the wait has ended.
@@ -267,6 +268,35 @@ public:
       if (n > 0) pushLine(p, n);
       if (!nl) break;
       p = nl + 1;
+    }
+  }
+
+  // The regions a repeater will flood for, from an anonymous REGIONS request.
+  //
+  // Comma-separated on the wire, one line each here, because that is how they are
+  // read. "*" is the wildcard - the repeater floods anything - and is passed
+  // through as it arrives rather than renamed, since it is upstream's notation
+  // and a friendlier word here would make two vocabularies for one thing.
+  void onRegions(const uint8_t* pub_key, const char* names) {
+    if (!isTarget(pub_key)) return;
+    if (_pending == RIFT_REP_REGIONS) _pending = RIFT_REP_IDLE;
+
+    if (names == NULL || names[0] == 0) {
+      const char* none = "regions: none advertised";
+      pushLine(none, (int) strlen(none));
+      return;
+    }
+    const char* p = names;
+    while (*p) {
+      const char* comma = strchr(p, ',');
+      int n = comma ? (int) (comma - p) : (int) strlen(p);
+      if (n > 0) {
+        char line[RIFT_REP_CLI_TEXT];
+        snprintf(line, sizeof(line), "region %.*s", n, p);
+        pushLine(line, (int) strlen(line));
+      }
+      if (!comma) break;
+      p = comma + 1;
     }
   }
 
