@@ -1093,8 +1093,17 @@ void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
     TransportKey chan_scope;
     if (send_scope.isNull()) {
       int idx = findChannelIdx(channel);
-      if (idx >= 0 && riftScopeKeyFor((uint8_t) idx, chan_scope.key)) {
-        scope = &chan_scope;
+      if (idx >= 0) {
+        // The fingerprint comes from the channel handed in here, not from a table
+        // lookup, so what is checked is the key actually about to be used. Same
+        // 16-or-32 rule setChannel uses, so the two agree about which bytes are
+        // the key and which are padding.
+        static const uint8_t zeroes[16] = { 0 };
+        size_t klen = (memcmp(&channel.secret[16], zeroes, 16) == 0) ? 16 : 32;
+        uint32_t fp = riftChannelFingerprint(channel.secret, klen);
+        if (riftScopeKeyFor((uint8_t) idx, fp, chan_scope.key)) {
+          scope = &chan_scope;
+        }
       }
     }
 #endif
@@ -2466,7 +2475,14 @@ void MyMesh::handleCmdFrame(size_t len) {
       int i = 0;
       out_frame[i++] = RESP_CODE_CHANNEL_INFO;
       out_frame[i++] = channel_idx;
-      strcpy((char *)&out_frame[i], channel.name);
+      // The whole 32-byte field is built, not just the string. out_frame is a
+      // persistent member and nothing clears it between responses, so a short name
+      // left the tail of the previous reply in the padding and sent it - which is
+      // a protocol that returns different bytes for the same request depending on
+      // what was asked before it. Every fixed-width wire field should be built
+      // this way.
+      memset(&out_frame[i], 0, 32);
+      StrHelper::strncpy((char *)&out_frame[i], channel.name, 32);
       i += 32;
       memcpy(&out_frame[i], channel.channel.secret, 16);
       i += 16; // NOTE: only 128-bit supported
@@ -2489,17 +2505,28 @@ void MyMesh::handleCmdFrame(size_t len) {
       writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
     }
   } else if (cmd_frame[0] == CMD_SIGN_START) {
-    out_frame[0] = RESP_CODE_SIGN_START;
-    out_frame[1] = 0; // reserved
-    uint32_t len = MAX_SIGN_DATA_LEN;
-    memcpy(&out_frame[2], &len, 4);
-    _serial->writeFrame(out_frame, 6);
-
+    // Allocated before the capacity is announced, not after.
+    //
+    // It used to reply "ready, send up to N bytes" and then malloc, so on a
+    // fragmented heap the app was told it could proceed and the first SIGN_DATA
+    // came back with BAD_STATE. The protocol was describing a state the device did
+    // not have - and on this part the heap genuinely moves, with the radar, BLE,
+    // Wi-Fi and the display canvas all coming and going.
     if (sign_data) {
       free(sign_data);
+      sign_data = NULL;
     }
     sign_data = (uint8_t *)malloc(MAX_SIGN_DATA_LEN);
     sign_data_len = 0;
+    if (sign_data == NULL) {
+      writeErrFrame(ERR_CODE_TABLE_FULL);
+    } else {
+      out_frame[0] = RESP_CODE_SIGN_START;
+      out_frame[1] = 0; // reserved
+      uint32_t cap = MAX_SIGN_DATA_LEN;
+      memcpy(&out_frame[2], &cap, 4);
+      _serial->writeFrame(out_frame, 6);
+    }
   } else if (cmd_frame[0] == CMD_SIGN_DATA && len > 1) {
     if (sign_data == NULL || sign_data_len + (len - 1) > MAX_SIGN_DATA_LEN) {
       writeErrFrame(sign_data == NULL ? ERR_CODE_BAD_STATE : ERR_CODE_TABLE_FULL); // error: too long
@@ -2561,16 +2588,30 @@ void MyMesh::handleCmdFrame(size_t len) {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     }
   } else if (cmd_frame[0] == CMD_GET_CUSTOM_VARS) {
+    // Each field is measured against the room left before it is written.
+    //
+    // The loop condition checked the position at the top and then wrote a name, a
+    // colon and a value with unbounded strcpy - so it held only while every sensor
+    // setting happened to be short. A contract that depends on the data being
+    // small is not a bound; it is a bug that has not fired.
     out_frame[0] = RESP_CODE_CUSTOM_VARS;
     char *dp = (char *)&out_frame[1];
-    for (int i = 0; i < sensors.getNumSettings() && dp - (char *)&out_frame[1] < 140; i++) {
-      if (i > 0) {
-        *dp++ = ',';
-      }
-      strcpy(dp, sensors.getSettingName(i));
+    const char* limit = (const char *) &out_frame[MAX_FRAME_SIZE];
+    for (int i = 0; i < sensors.getNumSettings(); i++) {
+      const char* nm = sensors.getSettingName(i);
+      const char* vl = sensors.getSettingValue(i);
+      if (nm == NULL || vl == NULL) continue;
+
+      // comma if not first, name, colon, value - and the terminator writeFrame
+      // does not send but strchr below relies on.
+      size_t need = (i > 0 ? 1u : 0u) + strlen(nm) + 1u + strlen(vl) + 1u;
+      if (dp + need > limit) break;   // stop cleanly rather than write past the end
+
+      if (i > 0) *dp++ = ',';
+      strcpy(dp, nm);
       dp = strchr(dp, 0);
       *dp++ = ':';
-      strcpy(dp, sensors.getSettingValue(i));
+      strcpy(dp, vl);
       dp = strchr(dp, 0);
     }
     _serial->writeFrame(out_frame, dp - (char *)out_frame);
@@ -2690,18 +2731,32 @@ void MyMesh::handleCmdFrame(size_t len) {
       writeErrFrame(ERR_CODE_FILE_IO_ERROR);
     }
   } else if (cmd_frame[0] == CMD_SET_FLOOD_SCOPE_KEY && len >= 2 && cmd_frame[1] == 0) {
-    if (len >= 2 + 16) {
-      memcpy(send_scope.key, &cmd_frame[2], sizeof(send_scope.key));  // set scope override TransportKey
+    // Exact shapes. Two bytes is an explicit reset and eighteen carries a key;
+    // everything between is a truncated set frame, and treating it as a reset
+    // meant a malformed frame silently cleared the scope override rather than
+    // being refused.
+    if (len == 2) {
+      memset(send_scope.key, 0, sizeof(send_scope.key));  // explicit reset
+      send_unscoped = false;
+      writeOKFrame();
+    } else if (len == 2 + 16) {
+      memcpy(send_scope.key, &cmd_frame[2], sizeof(send_scope.key));
+      send_unscoped = false;
+      writeOKFrame();
     } else {
-      memset(send_scope.key, 0, sizeof(send_scope.key));  // reset scope override
+      writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     }
-    send_unscoped = false;
-    writeOKFrame();
   } else if (cmd_frame[0] == CMD_SET_FLOOD_SCOPE_KEY && len >= 2 && cmd_frame[1] == 1) {  // ver 12+
     send_unscoped = true;
     writeOKFrame();
   } else if (cmd_frame[0] == CMD_SET_DEFAULT_FLOOD_SCOPE && len >= 1) {
-    if (len >= 1+31+16) {
+    // One byte clears, 48 sets, nothing else is either. This mattered more here
+    // than for the transient scope: anything short fell into the clear path and
+    // wrote a null default scope to flash, so a truncated frame permanently
+    // changed how this node floods.
+    if (len != 1 && len != 1 + 31 + 16) {
+      writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+    } else if (len >= 1+31+16) {
       // strnlen, bounded to the field. The name is 31 bytes with no guarantee of a
       // terminator, so strlen ran on into the 16-byte key and past it - the length
       // test below happens after the read, not before it.

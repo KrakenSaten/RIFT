@@ -2001,37 +2001,95 @@ TEST(Tropo, UsableHopsMasksTheHashSizeBits) {
   EXPECT_FALSE(riftTropoUsableHops(0xFF, &hops));
 }
 
-// ---- flood scope names ----------------------------------------------------
+// ---- canonical region names -----------------------------------------------
+//
+// These replace tests that asserted RIFT's own rule and, in one case, asserted
+// the opposite of what MeshCore accepts: "North West" was declared a valid region
+// name, which upstream's RegionMap::is_name_char refuses because of the space. A
+// green test protecting an incompatible assumption is worse than no test, and it
+// is the reason these are written against upstream's behaviour rather than ours.
 
-TEST(ScopeName, AcceptsAnOrdinaryRegionName) {
+TEST(CanonicalRegion, AddsTheHashUpstreamWouldAdd) {
+  // RegionMap::getTransportKeysFor prepends '#' to a bare name before hashing, so
+  // hashing what the user typed produced a different key from the repeater's.
+  char out[RIFT_SCOPE_NAME_MAX];
+  ASSERT_TRUE(riftCanonicalRegion("oslo", out, sizeof(out)));
+  EXPECT_STREQ("#oslo", out);
+}
+
+TEST(CanonicalRegion, LeavesAnAlreadyCanonicalNameAlone) {
+  char out[RIFT_SCOPE_NAME_MAX];
+  ASSERT_TRUE(riftCanonicalRegion("#oslo", out, sizeof(out)));
+  EXPECT_STREQ("#oslo", out);
+}
+
+TEST(CanonicalRegion, BothFormsOfTheSameRegionAgree) {
+  // The case that matters in the field: a name read off a repeater arrives
+  // without its hash, because MeshCore strips it when exporting names.
+  char a[RIFT_SCOPE_NAME_MAX], b[RIFT_SCOPE_NAME_MAX];
+  ASSERT_TRUE(riftCanonicalRegion("norway1", a, sizeof(a)));
+  ASSERT_TRUE(riftCanonicalRegion("#norway1", b, sizeof(b)));
+  EXPECT_STREQ(a, b);
+}
+
+TEST(CanonicalRegion, RefusesASpaceBecauseUpstreamDoes) {
+  // This is the assertion that used to say the opposite.
+  char out[RIFT_SCOPE_NAME_MAX];
+  EXPECT_FALSE(riftCanonicalRegion("North West", out, sizeof(out)));
+  EXPECT_TRUE(riftCanonicalRegion("North-West", out, sizeof(out)));
+  EXPECT_STREQ("#North-West", out);
+}
+
+TEST(CanonicalRegion, RefusesAPrivateRegion) {
+  // A $ region's key is imported into the key store, not derived from the name.
+  // Accepting one would store a scope that reaches nobody.
+  char out[RIFT_SCOPE_NAME_MAX];
+  EXPECT_FALSE(riftCanonicalRegion("$secret", out, sizeof(out)));
+  EXPECT_FALSE(riftCanonicalRegion("#$secret", out, sizeof(out)));
+}
+
+TEST(CanonicalRegion, RefusesWhatIsNotAName) {
+  char out[RIFT_SCOPE_NAME_MAX];
+  EXPECT_FALSE(riftCanonicalRegion("", out, sizeof(out)));
+  EXPECT_FALSE(riftCanonicalRegion("#", out, sizeof(out)));
+  EXPECT_FALSE(riftCanonicalRegion(NULL, out, sizeof(out)));
+  EXPECT_FALSE(riftCanonicalRegion("*", out, sizeof(out)));       // the wildcard, not a name
+  EXPECT_FALSE(riftCanonicalRegion("a.b", out, sizeof(out)));     // punctuation
+  EXPECT_FALSE(riftCanonicalRegion("os#lo", out, sizeof(out)));   // hash inside the body
+}
+
+TEST(CanonicalRegion, MatchesUpstreamsCharacterRuleExactly) {
+  // RegionMap::is_name_char reimplemented independently here, so a drift in
+  // riftRegionCharValid shows up as a disagreement rather than as both being
+  // wrong in the same way.
+  for (int c = 0; c < 256; c++) {
+    bool upstream = (c == '-' || c == '$' || c == '#'
+                     || (c >= '0' && c <= '9') || c >= 'A');
+    EXPECT_EQ(upstream, riftRegionCharValid((unsigned char) c)) << "char " << c;
+  }
+}
+
+TEST(CanonicalRegion, RefusesANameThatWouldNotFitWithItsHash) {
+  // The stored form is one byte longer than what was typed, and that byte has to
+  // come from somewhere.
+  char body[RIFT_SCOPE_NAME_MAX];
+  memset(body, 'x', sizeof(body) - 1);
+  body[sizeof(body) - 1] = 0;          // exactly fills the field without a '#'
+  char out[RIFT_SCOPE_NAME_MAX];
+  EXPECT_FALSE(riftCanonicalRegion(body, out, sizeof(out)));
+
+  body[sizeof(body) - 2] = 0;          // one shorter: now the hash fits
+  EXPECT_TRUE(riftCanonicalRegion(body, out, sizeof(out)));
+  EXPECT_EQ('#', out[0]);
+}
+
+TEST(ScopeName, IsDefinedByTheCanonicalFormSucceeding) {
+  EXPECT_TRUE(riftScopeNameValid("oslo"));
   EXPECT_TRUE(riftScopeNameValid("#oslo"));
-  EXPECT_TRUE(riftScopeNameValid("North West"));
-  EXPECT_TRUE(riftScopeNameValid("a"));
-}
-
-TEST(ScopeName, RefusesWhatWouldMeanNoScope) {
-  // Empty means "use the node default" everywhere this is stored, so an empty or
-  // blank name must never become a scope in its own right - the two send
-  // differently and nothing on screen would distinguish them.
+  EXPECT_FALSE(riftScopeNameValid("North West"));
+  EXPECT_FALSE(riftScopeNameValid("$secret"));
   EXPECT_FALSE(riftScopeNameValid(""));
-  EXPECT_FALSE(riftScopeNameValid("   "));
   EXPECT_FALSE(riftScopeNameValid(NULL));
-}
-
-TEST(ScopeName, RefusesControlCharactersAndOverlongNames) {
-  const char ctrl[] = { 'a', (char) 9, 'b', 0 };
-  EXPECT_FALSE(riftScopeNameValid(ctrl));
-
-  char longname[RIFT_SCOPE_NAME_MAX + 8];
-  memset(longname, 'x', sizeof(longname) - 1);
-  longname[sizeof(longname) - 1] = 0;
-  EXPECT_FALSE(riftScopeNameValid(longname));
-
-  // The longest that still fits with its terminator is accepted.
-  char fits[RIFT_SCOPE_NAME_MAX];
-  memset(fits, 'x', sizeof(fits) - 1);
-  fits[sizeof(fits) - 1] = 0;
-  EXPECT_TRUE(riftScopeNameValid(fits));
 }
 
 // ---- drag to steps --------------------------------------------------------

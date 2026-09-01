@@ -1013,10 +1013,17 @@ void riftLoadSettings() {
           // Dropped whole rather than half-read, like a watch record: a file cut
           // short by a failed write must not produce a channel scoped to rubbish,
           // which would send its traffic somewhere nobody is listening.
+          uint32_t fp = 0;
           if (f.read(&idx, 1) != 1) break;
+          if (f.read((uint8_t*) &fp, 4) != 4) break;
           if (f.read((uint8_t*) nm, sizeof(nm)) != (int) sizeof(nm)) break;
           nm[sizeof(nm) - 1] = 0;
-          if (riftScopeNameValid(nm)) sc.append(idx, nm);
+          // Through set() rather than a raw append: it validates the slot,
+          // canonicalises the name and replaces rather than duplicating. A
+          // hand-edited or truncated file could otherwise produce slot 250, or two
+          // entries for slot 2 where the lookup found one and clear removed the
+          // other.
+          sc.set(idx, fp, nm);
         }
       }
     }
@@ -1094,7 +1101,9 @@ void riftSaveSettings() {
     ok = ok && (f.write(&ns, 1) == 1);
     for (int i = 0; i < sc.count() && ok; i++) {
       uint8_t idx = sc.at(i).channel_idx;
+      uint32_t fp = sc.at(i).channel_fp;
       ok = ok && (f.write(&idx, 1) == 1);
+      ok = ok && (f.write((const uint8_t*) &fp, 4) == 4);
       ok = ok && (f.write((const uint8_t*) sc.at(i).name, RIFT_SCOPE_NAME_MAX)
                     == RIFT_SCOPE_NAME_MAX);
     }
@@ -1975,7 +1984,7 @@ private:
       char nm[sizeof(ch.name)];
       riftTranslateUTF8(nm, ch.name, sizeof(nm));
 
-      const char* sc = riftScopes().nameFor(_del_idx[i]);
+      const char* sc = riftScopes().nameFor(_del_idx[i], riftChannelConv(_del_idx[i]).channel_fp);
       snprintf(tmp, sizeof(tmp), "%-16s %s", nm, sc ? sc : "(node default)");
 
       if (i == _del_sel) {
@@ -2074,9 +2083,16 @@ private:
     display.drawTextLeftAlign(4, 44, tmp);
 
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(4, 70, "Messages already received stay in the");
-    display.drawTextLeftAlign(4, 82, "history. The key is gone from this");
-    display.drawTextLeftAlign(4, 94, "device - rejoining needs it again.");
+    // Said as the code behaves. This promised the messages would stay while the
+    // handler purged them, which is the one kind of wrong a confirmation screen
+    // must never be - the user agreed to something else than what happens.
+    //
+    // The purge is kept rather than the promise: entries written before channel
+    // identity existed cannot prove which channel they belong to, and leaving
+    // them would let them attach to whatever occupies the slot next.
+    display.drawTextLeftAlign(4, 70, "This channel's messages are deleted");
+    display.drawTextLeftAlign(4, 82, "too. The key is gone from this device");
+    display.drawTextLeftAlign(4, 94, "- rejoining needs it again.");
 
     display.setColor(rift_pal.accent);
     display.drawTextLeftAlign(4, 124, "ENTER deletes");
@@ -2988,7 +3004,8 @@ public:
       if (c == KEY_UP)   { _del_sel = (_del_sel + _del_count - 1) % _del_count; return true; }
       if (c == KEY_DOWN) { _del_sel = (_del_sel + 1) % _del_count; return true; }
       if (c == KEY_ENTER) {
-        const char* cur = riftScopes().nameFor(_del_idx[_del_sel]);
+        const char* cur = riftScopes().nameFor(_del_idx[_del_sel],
+                                              riftChannelConv(_del_idx[_del_sel]).channel_fp);
         _edit.begin(cur ? cur : "", RIFT_SCOPE_NAME_MAX - 1);
         _mode = SCOPE_ENTRY;
         return true;
@@ -2999,6 +3016,7 @@ public:
     if (_mode == SCOPE_ENTRY) {
       if (c == KEY_ENTER) {
         uint8_t idx = _del_idx[_del_sel];
+        uint32_t fp = riftChannelConv(idx).channel_fp;
         if (_edit.len == 0) {
           // Empty is how a channel goes back to the node default, which is why
           // the entry screen says so rather than refusing an empty field.
@@ -3006,13 +3024,22 @@ public:
           riftLogf("scope cleared on channel %d", (int) idx);
           _task->showAlert("Scope cleared", 1200);
         } else if (!riftScopeNameValid(_edit.buf)) {
-          _task->showAlert("Not a valid region name", 1600);
+          // Says which rule was broken, because "invalid" for a name that looks
+          // fine is the least helpful thing a field can say. A space is the one
+          // people will try: upstream's RegionMap does not accept it.
+          _task->showAlert(strchr(_edit.buf, ' ') != NULL
+                             ? "No spaces in a region name"
+                             : (_edit.buf[0] == '$' ? "Private regions not supported"
+                                                    : "Not a valid region name"), 1900);
           return true;
-        } else if (!riftScopes().set(idx, _edit.buf)) {
-          _task->showAlert("No scope slots left", 1600);
+        } else if (!riftScopes().set(idx, fp, _edit.buf)) {
+          _task->showAlert(fp == 0 ? "Channel has no key yet" : "No scope slots left", 1600);
           return true;
         } else {
-          riftLogf("scope on channel %d: %s", (int) idx, _edit.buf);
+          // Logged canonical, which is what will be hashed - logging what was
+          // typed would hide the one transformation that matters.
+          const char* saved = riftScopes().nameFor(idx, fp);
+          riftLogf("scope on channel %d: %s", (int) idx, saved ? saved : "?");
           _task->showAlert("Scope saved", 1200);
         }
         riftSaveSettings();

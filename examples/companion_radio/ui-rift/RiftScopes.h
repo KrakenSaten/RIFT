@@ -27,9 +27,22 @@
 
 #define RIFT_SCOPE_SLOTS 8
 
+// Slot and fingerprint, because a slot is a storage location and not an identity -
+// the rule the message history and the unread counts already follow.
+//
+// Without the fingerprint: slot 2 holds #Emergency scoped to oslo, the channel is
+// deleted, slot 2 later holds #Friends, and #Friends inherits a regional routing
+// limit nobody set. That failure is close to undiagnosable in the field - the
+// message says sent, LoRa works, the key is right, other channels work, and this
+// one silently does not leave the region. And clearing it in RIFT's delete
+// handler would not be enough, because CMD_SET_CHANNEL can replace a slot from
+// the companion app without passing through this UI at all.
+//
+// The name is stored canonical, so what is persisted is what gets hashed.
 struct RiftChannelScope {
-  uint8_t channel_idx;
-  char    name[RIFT_SCOPE_NAME_MAX];
+  uint8_t  channel_idx;
+  uint32_t channel_fp;
+  char     name[RIFT_SCOPE_NAME_MAX];
 };
 
 class RiftScopeTable {
@@ -45,27 +58,43 @@ public:
   // The scope name for a channel, or NULL when it has none and the node default
   // applies. NULL rather than an empty string so a caller cannot mistake "no
   // scope" for "a scope whose name is blank" - those send differently.
-  const char* nameFor(uint8_t channel_idx) const {
+  const char* nameFor(uint8_t channel_idx, uint32_t channel_fp) const {
     for (int i = 0; i < _n; i++) {
-      if (_s[i].channel_idx == channel_idx) return _s[i].name;
+      if (_s[i].channel_idx != channel_idx) continue;
+      // A fingerprint of 0 is "not recorded" and must not act as a wildcard: it
+      // would match whatever channel later occupies the slot, which is the whole
+      // failure this field exists to prevent.
+      if (_s[i].channel_fp == 0 || channel_fp == 0) return NULL;
+      if (_s[i].channel_fp != channel_fp) return NULL;   // stale: a different channel
+      return _s[i].name;
     }
     return NULL;
   }
 
   // An empty or invalid name clears the entry, which is how a channel is put
   // back on the node default.
-  bool set(uint8_t channel_idx, const char* name) {
-    if (name == NULL || !riftScopeNameValid(name)) return clear(channel_idx);
+  // Stores the canonical form, so nothing downstream has to remember to convert.
+  // A slot may hold only one scope, so this replaces rather than appends - which
+  // is also what makes the loader safe to route through here.
+  bool set(uint8_t channel_idx, uint32_t channel_fp, const char* name) {
+    if (channel_idx >= MAX_GROUP_CHANNELS) return false;
+    char canon[RIFT_SCOPE_NAME_MAX];
+    if (name == NULL || !riftCanonicalRegion(name, canon, sizeof(canon))) {
+      return clear(channel_idx);
+    }
+    if (channel_fp == 0) return false;   // no identity to bind to
 
     for (int i = 0; i < _n; i++) {
       if (_s[i].channel_idx == channel_idx) {
-        snprintf(_s[i].name, sizeof(_s[i].name), "%s", name);
+        _s[i].channel_fp = channel_fp;
+        snprintf(_s[i].name, sizeof(_s[i].name), "%s", canon);
         return true;
       }
     }
     if (_n >= RIFT_SCOPE_SLOTS) return false;   // full; the caller says so
     _s[_n].channel_idx = channel_idx;
-    snprintf(_s[_n].name, sizeof(_s[_n].name), "%s", name);
+    _s[_n].channel_fp = channel_fp;
+    snprintf(_s[_n].name, sizeof(_s[_n].name), "%s", canon);
     _n++;
     return true;
   }
@@ -85,14 +114,10 @@ public:
 
   void reset() { _n = 0; memset(_s, 0, sizeof(_s)); }
 
-  // Used by the loader, which has already validated the name.
-  bool append(uint8_t channel_idx, const char* name) {
-    if (_n >= RIFT_SCOPE_SLOTS) return false;
-    _s[_n].channel_idx = channel_idx;
-    snprintf(_s[_n].name, sizeof(_s[_n].name), "%s", name);
-    _n++;
-    return true;
-  }
+  // No append(). The loader goes through set(), which validates the slot,
+  // canonicalises the name and replaces rather than duplicating - a raw append
+  // let a hand-edited or truncated settings file produce slot 250, or two entries
+  // for slot 2 where nameFor found one and clear removed the other.
 };
 
 inline RiftScopeTable& riftScopes() {
@@ -107,10 +132,12 @@ inline RiftScopeTable& riftScopes() {
 // Returns false when the channel has no scope, leaving dest untouched: the caller
 // then falls back to the node default rather than sending under a key of zeroes,
 // which is a different thing on the air.
-inline bool riftScopeKeyFor(uint8_t channel_idx, uint8_t dest[16]) {
-  const char* name = riftScopes().nameFor(channel_idx);
+inline bool riftScopeKeyFor(uint8_t channel_idx, uint32_t channel_fp, uint8_t dest[16]) {
+  const char* name = riftScopes().nameFor(channel_idx, channel_fp);
   if (name == NULL || name[0] == 0 || dest == NULL) return false;
 
+  // The stored name is already canonical - '#' included - which is what upstream
+  // hashes. Hashing the user's text instead was the bug.
   SHA256 sha;
   sha.update(name, strlen(name));
   sha.finalize(dest, 16);

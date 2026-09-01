@@ -1718,21 +1718,63 @@ static inline bool riftTropoTick(RiftTropo* t, uint32_t now) {
 // asked rather than overheard. See MyMesh::riftRegionsReq.
 #define RIFT_SCOPE_NAME_MAX 32
 
-// A scope name is a hashtag region label. Rejecting the empty string matters
-// because empty means "use the node default" everywhere this is stored, and a
-// name of spaces would be a different scope from the one the user thinks they
-// typed.
-static inline bool riftScopeNameValid(const char* name) {
-  if (name == NULL) return false;
+// Canonical region name, and the reason this function exists rather than the
+// name being hashed as typed.
+//
+// RegionMap::getTransportKeysFor decides the key from the first character:
+//
+//   $name  private region  - keys come from the key store and CANNOT be derived
+//   #name  hashtag region  - key is SHA256("#name")
+//   name   implicit        - upstream prepends '#' and hashes SHA256("#name")
+//
+// So the canonical form always carries the hash. RIFT hashed whatever the user
+// typed, which meant "oslo" produced SHA256("oslo") while the repeater used
+// SHA256("#oslo") - a different key, with a UI that looked correctly configured.
+// The way to hit it was the obvious one: MeshCore's region export strips the '#'
+// before sending names back, so the name a user reads off a repeater is exactly
+// the one that produced the wrong key.
+//
+// Character rule copied from RegionMap::is_name_char rather than invented. A
+// local rule that disagreed is how a test came to assert that "North West" was a
+// valid region name: internally consistent, and refused by every repeater,
+// because upstream does not accept a space. That test protected the wrong
+// behaviour against regression, which is worse than having no test.
+//
+// $private is refused. Its key is imported, not derived, and RIFT has no way to
+// obtain one - offering it would mean a scope that silently reaches nobody.
+static inline bool riftRegionCharValid(unsigned char c) {
+  // RegionMap::is_name_char, verbatim.
+  return c == '-' || c == '$' || c == '#' || (c >= '0' && c <= '9') || c >= 'A';
+}
+
+static inline bool riftCanonicalRegion(const char* name, char* out, int out_sz) {
+  if (out != NULL && out_sz > 0) out[0] = 0;
+  if (name == NULL || out == NULL || out_sz < 2) return false;
+
+  const char* p = name;
+  if (*p == '$') return false;      // private region: key is imported, not derived
+  if (*p == '#') p++;               // already canonical; the body is what follows
+
   int n = 0;
-  bool has_visible = false;
-  for (const char* p = name; *p; p++) {
-    unsigned char c = (unsigned char) *p;
-    if (c < 32) return false;
-    if (c != ' ') has_visible = true;
-    if (++n >= RIFT_SCOPE_NAME_MAX) return false;   // must fit with a terminator
+  for (const char* q = p; *q; q++) {
+    if (!riftRegionCharValid((unsigned char) *q)) return false;
+    if (*q == '#' || *q == '$') return false;   // legal chars, but not inside a name
+    n++;
   }
-  return n > 0 && has_visible;
+  if (n == 0) return false;                     // "" and "#" are not regions
+  if (n + 2 > out_sz) return false;             // '#' + body + terminator
+
+  out[0] = '#';
+  memcpy(out + 1, p, (size_t) n);
+  out[n + 1] = 0;
+  return true;
+}
+
+// Kept as the name-level check the UI asks, now defined by the canonical form
+// succeeding rather than by a second rule that could drift from it.
+static inline bool riftScopeNameValid(const char* name) {
+  char tmp[RIFT_SCOPE_NAME_MAX];
+  return riftCanonicalRegion(name, tmp, sizeof(tmp));
 }
 
 // ---- dragging a list ------------------------------------------------------
