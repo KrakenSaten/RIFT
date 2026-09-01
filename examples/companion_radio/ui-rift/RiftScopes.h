@@ -20,10 +20,10 @@
 // entries covers having a few regional channels alongside the ordinary ones, and
 // costs a tenth of that.
 //
-// The key is not stored, only the name: for a publicly-known hashtag region the
-// key is SHA256 of the name, which is upstream's own rule in
-// TransportKeyStore::getAutoKeyFor. Deriving it on use means the name is the only
-// thing to persist, and the only thing to get right.
+// The key is not stored, only the name - in its canonical form, with the leading
+// '#'. That form is what upstream hashes, and getting it wrong was this feature's
+// first real bug: see riftCanonicalRegion. Deriving the key on use means the name
+// is the only thing to persist, and the only thing to get right.
 
 #define RIFT_SCOPE_SLOTS 8
 
@@ -71,9 +71,9 @@ public:
     return NULL;
   }
 
-  // An empty or invalid name clears the entry, which is how a channel is put
-  // back on the node default.
-  // Stores the canonical form, so nothing downstream has to remember to convert.
+  // An empty or invalid name clears the entry, which is how a channel is put back
+  // on the node default. Stores the canonical form, so nothing downstream has to
+  // remember to convert.
   // A slot may hold only one scope, so this replaces rather than appends - which
   // is also what makes the loader safe to route through here.
   bool set(uint8_t channel_idx, uint32_t channel_fp, const char* name) {

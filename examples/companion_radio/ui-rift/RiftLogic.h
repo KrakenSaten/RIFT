@@ -1673,6 +1673,11 @@ static inline bool riftTropoStep(RiftTropo* t, uint32_t now, uint8_t path_len) {
   if (t->window_start == 0 || riftDue(now, t->window_start + RIFT_TROPO_WINDOW_MS)) {
     t->window_start = now;
     t->deep_count = 0;
+    // The peak belongs to the window too. Left standing it described a stretch of
+    // time the count no longer covered, so the readout could say "0 deep, peak 40"
+    // with the 40 an hour old - a number that means something other than what it
+    // sits next to.
+    if (!t->active) t->peak_hops = 0;
   }
 
   t->last_deep = now;

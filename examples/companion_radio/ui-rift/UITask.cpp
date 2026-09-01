@@ -699,8 +699,10 @@ struct RiftTextInput {
 // right edge, so the spec nudges the outer two inward.
 static const int NAV_CENTRE_X[RIFT_NAV_COUNT] = { 20, 81, 145, 209, 270 };
 
+#define NAV_RULE_Y 226
+
 static void renderNavBar(DisplayDriver& display, int curr_idx) {
-  const int y_rule = 226;
+  const int y_rule = NAV_RULE_Y;
 
   display.setColor(rift_pal.rule);
   display.fillRect(0, y_rule, display.width(), 1);
@@ -754,15 +756,19 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   //
   // mid rather than fg: this is chrome, and fg would make it compete with the
   // active nav label. accent when low, which is the one case worth interrupting.
+  // snprintf, and not because the values can overflow it today - the percentage
+  // is clamped to 0..100 where it is set. The compiler cannot see that clamp, and
+  // said so; a bound that depends on a clamp somewhere else is one edit away from
+  // being wrong.
   char batt[8];
   if (curr_idx == RIFT_NAV_SYSTEM) {
     // SYSTEM has two pages and nowhere else to say which one you are on. The
     // battery is on the other four screens, so nothing is lost by borrowing the
     // slack here for the page number.
-    sprintf(batt, "%d/2", rift_system_page + 1);
+    snprintf(batt, sizeof(batt), "%d/2", rift_system_page + 1);
     display.setColor(rift_pal.mid);
   } else {
-    sprintf(batt, "%d%%", rift_nav_batt_pct);
+    snprintf(batt, sizeof(batt), "%d%%", rift_nav_batt_pct);
     display.setColor(rift_nav_batt_pct <= 15 ? rift_pal.accent : rift_pal.mid);
   }
   display.drawTextRightAlign(display.width() - 2, 228, batt);
@@ -1640,6 +1646,7 @@ class RiftSystemScreen : public RiftScreen {
               IT_COUNT };
 
   int _log_scroll = 0;   // 0 = pinned to the newest line
+  int _drag_residual = 0;   // finger travel not yet worth a row
 
   // 0 = actions, 1 = readings. Two pages rather than two columns with scrollbars:
   // neither column got more room that way, and the right one is the one that grows
@@ -2928,6 +2935,45 @@ public:
 
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
+  }
+
+  // Dragging, which this screen did not have while NODES, RADAR and COMMS all got
+  // it. That is the recurring shape of a mistake in this codebase - a fix applied
+  // to one screen and not its siblings - and it landed on the longest lists in the
+  // firmware: 128 event-log lines and 96 packet rows, reachable only by trackball.
+  //
+  // Each mode moves the thing it already moves with up and down, so nothing here
+  // invents a second idea of scrolling.
+  bool handleDrag(int dy) override {
+    int steps = riftDragSteps(&_drag_residual, dy, RIFT_DRAG_PITCH);
+    if (steps == 0) return false;
+
+    // The log views scroll a window; dragging down goes back through history,
+    // which is the same direction the arrow keys take. Clamped by the renderers
+    // themselves, as they already do for the trackball.
+    if (_mode == LOG)   { _log_scroll -= steps; if (_log_scroll < 0) _log_scroll = 0; return true; }
+    if (_mode == RXLOG) { _rx_scroll  -= steps; if (_rx_scroll < 0) _rx_scroll = 0; return true; }
+
+    // The pickers move a cursor.
+    if (_mode == CH_DELETE || _mode == SCOPE_PICK) {
+      if (_del_count == 0) return false;
+      int n = _del_sel + steps;
+      if (n < 0) n = 0;
+      if (n >= _del_count) n = _del_count - 1;
+      if (n == _del_sel) return false;
+      _del_sel = n;
+      return true;
+    }
+
+    if (_mode == MENU && _page == 0) {
+      int n = _sel + steps;
+      if (n < 0) n = 0;
+      if (n >= IT_COUNT) n = IT_COUNT - 1;
+      if (n == _sel) return false;
+      _sel = n;
+      return true;
+    }
+    return false;
   }
 
   bool handleTouch(int x, int y) override {
@@ -5894,7 +5940,14 @@ public:
     // clipping on a driver that has none.
     display.setColor(rift_pal.bg);
     display.fillRect(0, 0, display.width(), _hist_top);
-    display.fillRect(0, BODY_BOTTOM + 1, display.width(), INPUT_Y - 4 - (BODY_BOTTOM + 1));
+    // Down to the nav bar, not just to the compose rule.
+    //
+    // A five-pixel mask was not enough: the first block drawn has its top at or
+    // above BODY_BOTTOM, so its body can reach BODY_BOTTOM plus a full block
+    // height - sixty pixels for a six-line message - and that lands on the compose
+    // line and the nav bar. Both are drawn after this, so masking the whole strip
+    // costs nothing and is the only width that is actually correct.
+    display.fillRect(0, BODY_BOTTOM + 1, display.width(), NAV_RULE_Y - (BODY_BOTTOM + 1));
     if (heading != NULL) renderHeading(display, heading);
     renderTabs(display);
     display.setTextSize(1);
