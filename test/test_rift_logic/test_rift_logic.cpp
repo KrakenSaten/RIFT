@@ -2034,6 +2034,46 @@ TEST(ScopeName, RefusesControlCharactersAndOverlongNames) {
   EXPECT_TRUE(riftScopeNameValid(fits));
 }
 
+// ---- drag to steps --------------------------------------------------------
+
+TEST(DragSteps, CarriesTheRemainderSoASlowDragStillMoves) {
+  // A finger moving a pixel per report would never reach a step if the remainder
+  // were dropped, which is what "touch does nothing" would look like.
+  int r = 0, total = 0;
+  for (int i = 0; i < 16; i++) total += riftDragSteps(&r, 1, 16);
+  EXPECT_EQ(-1, total);
+}
+
+TEST(DragSteps, HandlesAFastDragInOneReport) {
+  int r = 0;
+  EXPECT_EQ(-3, riftDragSteps(&r, 48, 16));
+  EXPECT_EQ(0, r);
+}
+
+TEST(DragSteps, DraggingUpGoesForward) {
+  int r = 0;
+  EXPECT_EQ(2, riftDragSteps(&r, -32, 16));
+}
+
+TEST(DragSteps, KeepsTheSignOfAPartialMoveInBothDirections) {
+  // Truncation toward zero matters: a -15 remainder followed by -1 must step,
+  // and must not be rounded away by an integer division that floors.
+  int r = 0;
+  EXPECT_EQ(0, riftDragSteps(&r, -15, 16));
+  EXPECT_EQ(1, riftDragSteps(&r, -1, 16));
+
+  r = 0;
+  EXPECT_EQ(0, riftDragSteps(&r, 15, 16));
+  EXPECT_EQ(-1, riftDragSteps(&r, 1, 16));
+}
+
+TEST(DragSteps, RefusesNullAndANonsensePitch) {
+  int r = 0;
+  EXPECT_EQ(0, riftDragSteps(NULL, 100, 16));
+  EXPECT_EQ(0, riftDragSteps(&r, 100, 0));
+  EXPECT_EQ(0, riftDragSteps(&r, 100, -4));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

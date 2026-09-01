@@ -3189,6 +3189,7 @@ class RiftConstellationScreen : public RiftScreen {
   // wrong one. The identical fix went into RADAR first and this screen did not get it.
   uint8_t _sel_key[7];
   bool _have_sel;
+  int _drag_residual = 0;   // finger travel not yet worth a row
   // Where each row was actually drawn, so touch hits what the eye sees rather than
   // what the layout intended - the selected row is 36px tall, so a fixed pitch
   // would put every tap below it on the wrong node.
@@ -3553,6 +3554,23 @@ class RiftConstellationScreen : public RiftScreen {
     return false;
   }
 
+  // Dragging moves the cursor, which is what up and down already do here - so a
+  // finger and the trackball mean the same thing rather than two kinds of scroll
+  // on one list. Rows vary in height, so the pitch is finger travel rather than a
+  // row: the alternative is a gesture that moves a different distance depending
+  // on which node happens to be under it.
+  bool handleDrag(int dy) override {
+    int steps = riftDragSteps(&_drag_residual, dy, RIFT_DRAG_PITCH);
+    if (steps == 0) return false;
+    int n = _sel + steps;
+    if (n < 0) n = 0;
+    if (n >= _count) n = _count > 0 ? _count - 1 : 0;
+    if (n == _sel) return false;
+    _sel = n;
+    captureSelection();
+    return true;
+  }
+
   bool handleInput(char c) override {
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
     if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
@@ -3903,6 +3921,7 @@ class RiftRadarScreen : public RiftScreen {
   int _scroll;
   int _last_n;
   int _watch_sel;      // cursor in the watch list
+  int _drag_residual = 0;   // finger travel not yet worth a row
 
   // The selection is an identity, not a row. The list is sorted by signal strength
   // and re-sorts every sweep, so a cursor held as an index would slide onto a
@@ -4569,6 +4588,35 @@ public:
     return 1000;
   }
 
+
+  // Both lists here move a cursor, so a finger does the same thing the trackball
+  // does - and the waterfall has nothing to scroll, so it is left alone rather
+  // than given a gesture that does nothing.
+  bool handleDrag(int dy) override {
+    int steps = riftDragSteps(&_drag_residual, dy, RIFT_DRAG_PITCH);
+    if (steps == 0) return false;
+
+    if (_view == VIEW_WATCHES) {
+      if (rf_watch_count == 0) return false;
+      int n = _watch_sel + steps;
+      if (n < 0) n = 0;
+      if (n >= rf_watch_count) n = rf_watch_count - 1;
+      if (n == _watch_sel) return false;
+      _watch_sel = n;
+      return true;
+    }
+    if (_view == VIEW_BANDS) {
+      if (_last_n <= 0) return false;
+      int n = _sel_idx + steps;
+      if (n < 0) n = 0;
+      if (n >= _last_n) n = _last_n - 1;
+      if (n == _sel_idx) return false;
+      _sel_idx = n;
+      _resel = true;    // the window follows the cursor in render()
+      return true;
+    }
+    return false;
+  }
 
   bool handleInput(char c) override {
     if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
@@ -5615,21 +5663,28 @@ public:
     // navigation event to hang it on - and the frame is what actually knows.
     msg_unread.clear(currentConv());
 
+    // Decided here, drawn after the history.
+    //
+    // The history is laid out with a pixel offset and this driver has no
+    // clipping, so a block that is partly outside the view has to be drawn and
+    // then covered. Drawing the chrome first and the history over it would put
+    // half a message across the tab strip; drawing the history first, masking the
+    // margins and putting the chrome back on top is what makes a partly-visible
+    // block possible at all - and a block that appears whole or not at all is
+    // exactly the jerk that pixel scrolling was meant to remove.
     ChannelDetails ch;
     bool headed = true;
+    const char* heading = NULL;
     if (!_target_is_channel) {
-      renderHeading(display, _target_name);
+      heading = _target_name;
     } else if (!getTargetChannel(ch)) {
-      // nothing in the strip is filled in this state, so say why
-      renderHeading(display, "NO CHANNEL");
+      heading = "NO CHANNEL";   // nothing in the strip is filled in this state
     } else {
       headed = false;
     }
 
     _tabs_y = headed ? TABS_Y_HEADED : TABS_Y_BARE;
     _hist_top = _tabs_y + 16;
-
-    renderTabs(display);
 
     display.setTextSize(1);
 
@@ -5718,9 +5773,10 @@ public:
       int block_h = (body_lines + 1) * RIFT_LINE_H;
 
       y -= block_h;
-      if (y + block_h <= _hist_top) break;          // wholly above the view
-      if (y < _hist_top) break;                     // only partly in, and no clipping
-      if (y + block_h > BODY_BOTTOM) continue;      // still below it
+      if (y + block_h <= _hist_top) break;   // wholly above: nothing left to show
+      if (y > BODY_BOTTOM) continue;         // wholly below: scrolled past it
+      // Anything overlapping the view is drawn in full, including the part that
+      // falls outside. The mask below takes that part away.
 
       // Own messages carry a 2px accent bar down the left edge rather than being
       // right-aligned: on a 320px screen right alignment costs half the width for
@@ -5806,6 +5862,15 @@ public:
       display.setColor(rift_pal.fg);
       wrapText(body, avail_px, y + RIFT_LINE_H, &display, 6);
     }
+
+    // Mask, then chrome. Two fills and the strip redrawn is the whole cost of
+    // clipping on a driver that has none.
+    display.setColor(rift_pal.bg);
+    display.fillRect(0, 0, display.width(), _hist_top);
+    display.fillRect(0, BODY_BOTTOM + 1, display.width(), INPUT_Y - 4 - (BODY_BOTTOM + 1));
+    if (heading != NULL) renderHeading(display, heading);
+    renderTabs(display);
+    display.setTextSize(1);
 
     // An empty conversation now exists, where it could not before: the history used
     // to show every message from everywhere, so it was blank only on a device that

@@ -1734,3 +1734,28 @@ static inline bool riftScopeNameValid(const char* name) {
   }
   return n > 0 && has_visible;
 }
+
+// ---- dragging a list ------------------------------------------------------
+//
+// COMMS scrolls by pixel because its blocks vary from one line to six, so a step
+// per message moved the view by wildly different amounts for the same gesture. A
+// list of rows has no such problem: stepping is what it already does for the
+// arrow keys, and matching that keeps one idea of what a step is.
+//
+// What a drag needs is the conversion. The touch driver reports every 25ms, so a
+// slow finger delivers a pixel at a time and a fast one delivers thirty; the
+// remainder has to be carried or a slow drag never moves at all.
+//
+// Returns whole steps and leaves the rest in residual. Sign follows the finger:
+// dragging down moves earlier into view, which is a negative step.
+#ifndef RIFT_DRAG_PITCH
+  #define RIFT_DRAG_PITCH 16      // pixels of finger travel per row
+#endif
+
+static inline int riftDragSteps(int* residual, int dy, int pitch) {
+  if (residual == NULL || pitch <= 0) return 0;
+  *residual += dy;
+  int steps = *residual / pitch;
+  *residual -= steps * pitch;     // truncation toward zero, so the sign is kept
+  return -steps;                  // finger down, list goes back
+}
