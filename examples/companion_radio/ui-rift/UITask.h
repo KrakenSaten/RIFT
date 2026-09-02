@@ -209,6 +209,7 @@ private:
   bool _dragging = false;
   bool _drag_moved = false;
   int  _drag_last_y = 0;
+  int  _drag_applied = 0;   // dy actually handed to a screen this drag
 
   // The popup currently drawn over curr, or NULL. One deep, and no allocation:
   // static RAM is already around half used and the design spec is explicit that

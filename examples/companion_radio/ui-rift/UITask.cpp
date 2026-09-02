@@ -7568,11 +7568,14 @@ void UITask::loop() {
         _dragging = true;
         _drag_moved = false;
         _drag_last_y = rift_touch.lastY();
+        rift_touch.dragReset();
+        _drag_applied = 0;
       } else {
         int dy = rift_touch.lastY() - _drag_last_y;
         if (dy != 0) {
           RiftScreen* t = (_overlay != NULL) ? _overlay : curr;
           if (t != NULL && t->handleDrag(dy)) {
+            _drag_applied += dy;
             _drag_moved = true;
             _auto_off = millis() + AUTO_OFF_MILLIS;
             refreshNow();
@@ -7581,6 +7584,21 @@ void UITask::loop() {
         }
       }
     } else {
+      if (_dragging) {
+        // One line per drag, on release, because the four things that could be
+        // wrong here look identical from the outside and need different fixes:
+        //
+        //   travel much larger than applied  -> the UI is dropping movement
+        //   max step far above the rest      -> the panel reported another contact
+        //   few samples over a long drag     -> the frame is starving the sampler
+        //   applied not matching the view    -> a clamp is moving it afterwards
+        //
+        // Reasoning could not separate them; this can.
+        if (rift_touch.dragSamples() > 1) {
+          riftLogf("drag %us %dtr %dmax %dap", (unsigned) rift_touch.dragSamples(),
+                   rift_touch.dragTravel(), rift_touch.dragMaxStep(), _drag_applied);
+        }
+      }
       _dragging = false;
     }
 

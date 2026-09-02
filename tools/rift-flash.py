@@ -306,7 +306,16 @@ def settle_boot_slot(base, workdir):
         print("  app1 was booting, so the write above would have had no effect")
 
     if subprocess.call(base + ["erase_region", hex(OTADATA_OFFSET), hex(OTADATA_SIZE)]) != 0:
-        print("  FAILED to clear otadata - the device may still boot the other slot")
+        # The read above already said which slot is selected, so say what that
+        # means rather than a generic warning. "may still boot the other slot"
+        # when the selection was just read as app0 is alarming and wrong, and
+        # this tool has cost hours by being alarming and wrong before.
+        if slot == 0:
+            print("  could not clear otadata, but it already selects app0 - "
+                  "which is where this image was written")
+        else:
+            print("  FAILED to clear otadata, and it selects app%d - the device "
+                  "will boot the other slot, so this image will not run" % slot)
         return
     print("  otadata cleared: the bootloader now takes app0, which is what was written")
     os.remove(dump)

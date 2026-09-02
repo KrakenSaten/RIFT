@@ -65,6 +65,18 @@ bool TDeckTouch::poll(int& x, int& y) {
       // only a successful read counts as a touch. Setting this regardless meant
       // a failed point read still produced a release event, carrying whatever
       // coordinates the previous touch had left behind.
+      // Per-sample movement, measured before anything above the driver sees it.
+      // A step far larger than a finger can travel in one interval is the panel
+      // reporting a different contact, not a fast drag.
+      if (_prev_y >= 0) {
+        int step = _y - _prev_y;
+        if (step < 0) step = -step;
+        _drag_travel += step;
+        if (step > _drag_max_step) _drag_max_step = step;
+      }
+      _prev_y = _y;
+      _drag_samples++;
+
       _down = true;
     }
   }
@@ -74,6 +86,7 @@ bool TDeckTouch::poll(int& x, int& y) {
 
   if (points == 0 && _down) {   // finger lifted - this completes a tap
     _down = false;
+    _prev_y = -1;   // the next contact starts its own measurement
     x = _x;
     y = _y;
     return true;

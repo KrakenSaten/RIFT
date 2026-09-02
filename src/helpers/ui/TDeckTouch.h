@@ -6,8 +6,15 @@
 #ifndef TOUCH_I2C_ADDR
   #define TOUCH_I2C_ADDR 0x14   // GT911; the alternate address is 0x5D
 #endif
+// 25 ms was chosen when touch only had to notice a tap. Following a finger is a
+// different job: at 40 samples a second a moderate drag advances ten pixels
+// between samples, and the scroll can only move in those steps.
+//
+// One I2C transaction of a few bytes at 100 kHz is well under a millisecond, so
+// the cost of the faster rate is negligible against a frame that spends tens of
+// milliseconds pushing 153 KB over HSPI.
 #ifndef TOUCH_POLL_MILLIS
-  #define TOUCH_POLL_MILLIS 25
+  #define TOUCH_POLL_MILLIS 8
 #endif
 // GT911 reports in the panel's native portrait orientation. The display runs
 // rotated to landscape, so raw coordinates are remapped - see poll().
@@ -52,4 +59,21 @@ public:
   // off the device instead of guessed at
   const uint8_t* rawBytes() const { return _raw; }
   uint8_t _raw[8];
+
+  // Drag diagnostics, for the one question the code cannot answer by inspection:
+  // is a jump on release panel noise, a clamp firing, or a sample rate too coarse
+  // to follow the finger. Each has a different fix and they look identical from
+  // the outside.
+  //
+  // Recorded here rather than in the UI because this is where the samples are.
+  uint16_t dragSamples() const { return _drag_samples; }
+  int      dragTravel() const { return _drag_travel; }   // sum of |dy| seen
+  int      dragMaxStep() const { return _drag_max_step; }
+  void     dragReset() { _drag_samples = 0; _drag_travel = 0; _drag_max_step = 0; }
+
+private:
+  uint16_t _drag_samples = 0;
+  int _drag_travel = 0;
+  int _drag_max_step = 0;
+  int _prev_y = -1;
 };
