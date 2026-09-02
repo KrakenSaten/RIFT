@@ -5042,6 +5042,7 @@ private:
   bool _picking;
   int _pick_idx;
   int _pick_scroll;   // index of the first visible row
+  int _pick_drag_residual = 0;   // finger travel not yet worth a row
   struct PickEntry {
     char name[32];
     bool is_channel;
@@ -5053,6 +5054,22 @@ private:
   PickEntry _picks[RIFT_PICKER_MAX];
   int _pick_count;
   bool _pick_truncated;
+
+  // Where each visible row actually landed, and which entry it holds.
+  //
+  // Hit-tested against recorded positions rather than a fixed pitch, because the
+  // two section headings take a line each and move every row below them - a
+  // computed row number would select the wrong conversation, and on this screen
+  // that means opening someone else's. The same mistake has been made twice in
+  // this file before, on NODES and on SYSTEM.
+  //
+  // Visible rows only. Ninety-six entries fit the list but only about fourteen
+  // fit the screen, and a table for all of them would be 768 bytes to answer a
+  // question about fourteen.
+  static const int PICK_ROWS_MAX = 24;
+  int _pick_row_y[PICK_ROWS_MAX];
+  int _pick_row_of[PICK_ROWS_MAX];
+  int _pick_rows_drawn = 0;
 
   static const int BODY_TOP = 12;      // picker list starts here
   static const int BODY_BOTTOM = 194;
@@ -5272,6 +5289,10 @@ private:
   void openPicker() {
     _pick_count = 0;
     _pick_truncated = false;
+    // Left over travel from the last drag would move the cursor the instant this
+    // opened, which reads as the list picking a row on its own.
+    _pick_drag_residual = 0;
+    _pick_rows_drawn = 0;   // nothing has been laid out yet, so nothing is hittable
 
     // configured channels first. There is no getNumChannels() - num_channels is
     // protected and only tracks addChannel() - so probe the slots and skip the
@@ -5521,6 +5542,7 @@ private:
     int total = _pick_count;
     int y = BODY_TOP + 4;
     bool drew_channels = false, drew_direct = false;
+    _pick_rows_drawn = 0;
 
     // Bounded by the space left rather than by a row count: the two section headings
     // take a line each, so a fixed count would have run off the bottom of one list
@@ -5543,6 +5565,11 @@ private:
       if (y + RIFT_LINE_H > BODY_BOTTOM) break;
 
       bool sel = (_pick_idx == i);
+      if (_pick_rows_drawn < PICK_ROWS_MAX) {
+        _pick_row_y[_pick_rows_drawn] = y;
+        _pick_row_of[_pick_rows_drawn] = i;
+        _pick_rows_drawn++;
+      }
       if (_picks[i].unread > 0) renderUnreadDot(display, 1, y + 2);
 
       // The channel's colour, as the 2px chip the strip borders already use. Only
@@ -5602,10 +5629,29 @@ private:
     }
 
     display.setColor(UIColor::secondary_txt);
-    display.drawTextLeftAlign(4, INPUT_Y, "trackball up/down  ENTER open  click back");
+    display.drawTextLeftAlign(4, INPUT_Y, "drag or trackball  tap or ENTER opens");
 
     renderNavBar(display, RIFT_NAV_COMMS);
     return 1000;
+  }
+
+  // Opening a conversation, from Enter or from a tap. One function because two
+  // copies of this drifted apart once already in this file - the tap path would
+  // have been the copy that forgot to reset _scroll, and the symptom is landing
+  // mid-history in a conversation you just opened.
+  void openPick(int i) {
+    if (i < 0 || i >= _pick_count) return;
+    PickEntry* e = &_picks[i];
+    _pick_idx = i;
+    _target_is_channel = e->is_channel;
+    if (e->is_channel) {
+      _target_channel_idx = e->channel_idx;
+    } else {
+      memcpy(_target_key, e->key, 6);
+    }
+    StrHelper::strncpy(_target_name, e->name, sizeof(_target_name));
+    _picking = false;
+    _scroll = 0;   // a different conversation: land on its newest
   }
 
   // keep the selected row inside the visible window
@@ -5639,19 +5685,7 @@ private:
       ensurePickVisible();
       return true;
     }
-    if (c == KEY_ENTER) {
-      PickEntry* e = &_picks[_pick_idx];
-      _target_is_channel = e->is_channel;
-      if (e->is_channel) {
-        _target_channel_idx = e->channel_idx;
-      } else {
-        memcpy(_target_key, e->key, 6);
-      }
-      StrHelper::strncpy(_target_name, e->name, sizeof(_target_name));
-      _picking = false;
-      _scroll = 0;   // a different conversation: land on its newest
-      return true;
-    }
+    if (c == KEY_ENTER) { openPick(_pick_idx); return true; }
     // no dedicated ESC key on this keyboard - backspace and trackball click both back out
     if (c == KEY_CANCEL || c == KEY_NEXT || c == KEY_PREV || c == RIFT_KEY_BACK) {
       _picking = false;
@@ -6011,7 +6045,18 @@ public:
   // tapping the channel strip switches target; contacts still go via the picker,
   // since there can be many of them and they don't fit a strip
   bool handleTouch(int x, int y) override {
-    if (_picking) return false;
+    // A tap on a row opens it, which is the whole reason this screen exists and
+    // was the one gesture it refused. Safe now that a drag suppresses its own
+    // release tap - before that fix this would have opened a conversation every
+    // time you scrolled the list.
+    if (_picking) {
+      for (int r = 0; r < _pick_rows_drawn; r++) {
+        if (y < _pick_row_y[r] - 2 || y > _pick_row_y[r] + RIFT_LINE_H - 2) continue;
+        openPick(_pick_row_of[r]);
+        return true;
+      }
+      return false;   // a heading, or the margin: not a row
+    }
     if (_tabs_y <= 0) return false;   // strip hasn't been drawn yet
 
     // Scrolling by tap rather than by swipe: the touch driver reports once per
@@ -6078,7 +6123,24 @@ public:
   }
 
   bool handleDrag(int dy) override {
-    if (_picking) return false;
+    // The picker moves its cursor and lets ensurePickVisible follow, which is what
+    // the arrow keys already do - so a finger and the trackball mean the same
+    // thing here rather than two kinds of scrolling on one list.
+    //
+    // Not wrapped, unlike the keys: wrapping under a finger reads as the list
+    // having jumped rather than as the cursor reaching the end.
+    if (_picking) {
+      if (_pick_count == 0) return false;
+      int steps = riftDragSteps(&_pick_drag_residual, dy, RIFT_DRAG_PITCH);
+      if (steps == 0) return false;
+      int n = _pick_idx + steps;
+      if (n < 0) n = 0;
+      if (n >= _pick_count) n = _pick_count - 1;
+      if (n == _pick_idx) return false;
+      _pick_idx = n;
+      ensurePickVisible();
+      return true;
+    }
     _scroll += dy;
     if (_scroll < 0) _scroll = 0;
     return true;
