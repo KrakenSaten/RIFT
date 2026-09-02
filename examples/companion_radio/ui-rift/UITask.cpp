@@ -6017,16 +6017,14 @@ public:
     // This exists because the trackball is the only other way to scroll here and
     // its left and right change screen, so a slightly off flick leaves the
     // conversation entirely.
-    // The history runs from _hist_top down to BODY_BOTTOM, below the tab strip.
-    // A tap still pages, for when the panel is easier to poke than to drag; the
-    // finger drag in handleDrag is the smooth one.
-    if (y >= _hist_top && y <= BODY_BOTTOM) {
-      const int page = (BODY_BOTTOM - _hist_top) / 2;
-      int mid = (_hist_top + BODY_BOTTOM) / 2;
-      if (y < mid) _scroll += page;                                // older
-      else         _scroll = _scroll > page ? _scroll - page : 0;  // newer
-      return true;
-    }
+    // A tap in the history deliberately does nothing.
+    //
+    // It used to page half a screen, which was a second way to scroll competing
+    // with the drag - and it is what made dragging to the bottom spring backwards,
+    // because a release in the upper half paged away from it. With the drag
+    // working and the wheel and arrow keys covering discrete steps, a tap here has
+    // no unambiguous meaning: there is no way to tell "I meant to page" from "I
+    // touched the screen and did not move".
 
     if (y < _tabs_y - 2 || y > _tabs_y + 13) return false;
 
@@ -7604,8 +7602,19 @@ void UITask::loop() {
 
     int tx, ty;
     if (rift_touch.poll(tx, ty)) {
-      if (_drag_moved) { _drag_moved = false; }
-      else
+      // A drag that moved something must not also arrive as a tap.
+      //
+      // This was an `else` in front of an unbraced if-chain, so it guarded the
+      // single assignment on the next line and nothing else - the tap handling
+      // below ran on every release. In COMMS that meant every drag ended with a
+      // tap-to-page, and a release in the upper half of the history did
+      // `_scroll += page`, which is the jump backwards away from the bottom.
+      // The scroll wheel had no such problem because it raises no tap.
+      //
+      // Braced now. The suppression had never worked.
+      if (_drag_moved) {
+        _drag_moved = false;
+      } else {
       _touch_x = tx;   // kept for the SYSTEM readout while calibrating
       _touch_y = ty;
 
@@ -7631,6 +7640,7 @@ void UITask::loop() {
         _auto_off = millis() + AUTO_OFF_MILLIS;
         refreshNow();
       }
+      }   // closes the "not a drag" branch above
     }
   }
 #endif
