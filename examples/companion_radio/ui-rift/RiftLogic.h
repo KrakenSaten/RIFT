@@ -1635,7 +1635,17 @@ struct RiftTropo {
   uint32_t window_start;
   uint32_t last_deep;      // millis of the most recent deep packet
   uint16_t deep_count;     // deep packets in the current window
-  uint8_t  peak_hops;      // deepest seen while active, for the readout
+  uint8_t  peak_hops;      // deepest seen, deep packets only
+  // The deepest path among packets BELOW the threshold - the ordinary depth of
+  // this mesh.
+  //
+  // Without it the detector only recorded what it had already decided was
+  // interesting, so there was nothing to judge the threshold against: a first
+  // real reading of "1 deep, peak 21" says nothing about whether 21 hops is
+  // remarkable here or a Tuesday. Twenty was a guess, and adjusting it from one
+  // deep packet would have been a second guess.
+  uint8_t  base_hops;
+  uint16_t seen_count;     // packets with a usable path in this window
   bool     active;
   uint32_t opened_at;
 };
@@ -1646,6 +1656,8 @@ static inline void riftTropoReset(RiftTropo* t) {
   t->last_deep = 0;
   t->deep_count = 0;
   t->peak_hops = 0;
+  t->base_hops = 0;
+  t->seen_count = 0;
   t->active = false;
   t->opened_at = 0;
 }
@@ -1665,19 +1677,33 @@ static inline bool riftTropoStep(RiftTropo* t, uint32_t now, uint8_t path_len) {
 
   uint8_t hops = 0;
   if (!riftTropoUsableHops(path_len, &hops)) return false;
-  if (hops < RIFT_TROPO_HOPS) return false;
 
   // A window that has run its length starts again from this packet rather than
   // being cleared on a timer nobody calls: the only thing that has to be true is
   // that the count describes a bounded stretch of time.
+  //
+  // Rolled here rather than inside the deep-packet branch, so the baseline
+  // covers the same stretch of time the count does. It did not, when only deep
+  // packets could roll the window.
   if (t->window_start == 0 || riftDue(now, t->window_start + RIFT_TROPO_WINDOW_MS)) {
     t->window_start = now;
     t->deep_count = 0;
+    t->seen_count = 0;
+    t->base_hops = 0;
     // The peak belongs to the window too. Left standing it described a stretch of
     // time the count no longer covered, so the readout could say "0 deep, peak 40"
     // with the 40 an hour old - a number that means something other than what it
     // sits next to.
     if (!t->active) t->peak_hops = 0;
+  }
+
+  if (t->seen_count < 0xFFFF) t->seen_count++;
+
+  // Below the threshold this is all that happens: the packet contributes to the
+  // baseline and nothing else.
+  if (hops < RIFT_TROPO_HOPS) {
+    if (hops > t->base_hops) t->base_hops = hops;
+    return false;
   }
 
   t->last_deep = now;

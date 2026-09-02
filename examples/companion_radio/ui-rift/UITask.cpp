@@ -2777,8 +2777,13 @@ public:
     {
       RiftTropo& tr = riftTropoState();
       display.setColor(tr.active ? rift_pal.accent : rift_pal.fg);
-      snprintf(tmp, sizeof(tmp), "%s %u deep, peak %u",
-               tr.active ? "OPEN" : "quiet", (unsigned) tr.deep_count, (unsigned) tr.peak_hops);
+      // base is the deepest ordinary path in this window, which is what makes the
+      // peak mean anything: "peak 21, base 6" is an opening, "peak 21, base 19"
+      // is a mesh where 20 was simply the wrong threshold.
+      snprintf(tmp, sizeof(tmp), "%s %ud p%u b%u/%u",
+               tr.active ? "OPEN" : "ok", (unsigned) tr.deep_count,
+               (unsigned) tr.peak_hops, (unsigned) tr.base_hops,
+               (unsigned) tr.seen_count);
       display.drawTextRightAlign(CR, y, tmp);
     }
     y += RIFT_LINE_H;

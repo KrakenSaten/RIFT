@@ -1984,6 +1984,47 @@ TEST(Tropo, SurvivesTheMillisWrap) {
   EXPECT_FALSE(t.active);
 }
 
+TEST(Tropo, RecordsTheOrdinaryDepthAsWellAsTheDeepOne) {
+  // The reading that prompted this: "1 deep, peak 21" said nothing about whether
+  // 21 hops is remarkable on this mesh, because only deep packets were recorded.
+  RiftTropo t; riftTropoReset(&t);
+  uint32_t now = 100000;
+  for (int i = 0; i < 20; i++) riftTropoStep(&t, now + i, pathByte(4));
+  riftTropoStep(&t, now + 30, pathByte(6));
+  EXPECT_EQ(6, t.base_hops);      // the mesh is six hops deep
+  EXPECT_EQ(0, t.peak_hops);      // nothing deep has been seen
+  EXPECT_EQ(0, t.deep_count);
+  EXPECT_EQ(21, t.seen_count);
+
+  riftTropoStep(&t, now + 40, pathByte(21));
+  EXPECT_EQ(21, t.peak_hops);
+  EXPECT_EQ(6, t.base_hops);      // a deep packet does not move the baseline
+  EXPECT_EQ(1, t.deep_count);
+}
+
+TEST(Tropo, TheBaselineNeverCountsTheNoPathSentinel) {
+  // Same trap as the deep count: 0xFF masks to 63, and as a baseline that would
+  // read as a mesh 63 hops deep and make every threshold look reasonable.
+  RiftTropo t; riftTropoReset(&t);
+  for (int i = 0; i < 50; i++) riftTropoStep(&t, 1000u + i, 0xFF);
+  EXPECT_EQ(0, t.base_hops);
+  EXPECT_EQ(0, t.seen_count);
+}
+
+TEST(Tropo, AShallowPacketRollsTheWindowToo) {
+  // The baseline has to describe the same stretch of time as the count. It did
+  // not while only deep packets could roll the window.
+  RiftTropo t; riftTropoReset(&t);
+  uint32_t now = 100000;
+  riftTropoStep(&t, now, pathByte(9));
+  EXPECT_EQ(9, t.base_hops);
+
+  now += RIFT_TROPO_WINDOW_MS + 1000;
+  riftTropoStep(&t, now, pathByte(3));
+  EXPECT_EQ(3, t.base_hops);      // the old window's 9 is gone with it
+  EXPECT_EQ(1, t.seen_count);
+}
+
 TEST(Tropo, HandlesNullWithoutCrashing) {
   EXPECT_FALSE(riftTropoStep(NULL, 1, 0x20));
   EXPECT_FALSE(riftTropoTick(NULL, 1));
