@@ -33,6 +33,68 @@ has been reasoning from at least one colour that is not on the device.
 
 ---
 
+## 0a. State of play after the September review round
+
+**A review of this brief was returned and acted on.** Read this section before the
+rest: several sections below describe the device as it was when the brief was
+written, and this says which.
+
+**Shipped, all verified in the source before acting:**
+
+- **The accent rule was arithmetically empty and has been fixed.** "On white the
+  accent may only be a fill with white reversed out of it" describes the same pair
+  of colours in the other order — contrast is symmetric, and white on `#FF4100` is
+  the same 3.50:1 that forbids the accent as text on white. **Thirteen** surfaces
+  drew it, not the five the review found, and two code comments argued for it. New
+  palette role `on_accent`, black, 6.01:1, the same value in both modes. §2.3's
+  third clause: **never the ground under white text either.**
+- **The nav marker is sized to its label.** It ran on the 64px grid the labels were
+  nudged off, 12–18px right of the word it marked. §3's centres are unchanged.
+- **COMMS drew the hop count twice on every incoming row**, the first copy two
+  pixels from the clock. Prefix gone, gutter widened to a full cell.
+- **All five conversation-list improvements shipped**, because the 53-character
+  budget in §7.7 was wrong: the row is **43** cells and a maximum-length name leaves
+  twelve unclaimed. Nothing had to lose. The type column has two states, not three —
+  `riftCanDirectMessage` keeps repeaters and sensors out of that list entirely.
+- **NODES §7.1 is answered by Form A**, the reach scale: ten filled/hollow cells in
+  the 23 character cells the row was spending on nothing. Forms B and C remain open
+  and C is A plus a column, so nothing is thrown away.
+- The repeater panel's read rows moved from 11px to the 12px grid; its CLI
+  transcript stays at 10 and now says why. The NODES bucket band gained a fifth
+  `NO ROUTE` column — it was the one place on the screen that hid an unknown. The
+  splash strapline's `$` is an `&`, per `design/handoff.md:314`. Plus the scope
+  column's truncation and the home screen's button outlines.
+
+**Rejected, with arithmetic:** `tools/palette-check.py` reproduces every figure.
+
+- **No colour value changed.** The review's "name colour 1 fails the rule its own
+  table prints" is wrong: it is 4.51 on black, not 4.45, and it is the *name* table
+  that was inaccurate — not the channel table. The qualifying-value count is **1091**
+  exactly as first stated, not 1101.
+- **The hue guard is stated in the wrong unit.** Two entries violate it in degrees
+  and both are fine: in OKLab every entry sits further from every reserved colour
+  than the set's own worst internal pair.
+- **Entry 6's near-greyness is the price of covering the hue wheel, not a defect.**
+  It is the only entry across a 94° arc, and the luminance band holds nothing
+  saturated there — every well-separated value in that region has chroma 0.017–0.048.
+- **Respacing measures better and reads worse.** The review is right that a restarted
+  pick beats an extended one, and it reproduces at 1.9×. But nine of those twelve
+  land between 276° and 337°. Maximising separation drives the set into the one
+  corner of the band with room, and a name colour is identified by hue at 6px.
+
+**The one new question, and it is now the most important thing in this document.**
+Day mode's `ok` green is OKLab **0.053** from channel colour 2 and **0.061** from
+channel colour 1 — the closest pair anywhere in the palette, closer than any two
+name colours. It arrived when the day green moved to `#428610` to clear 4.5:1 on
+white, which was checked against the field it sits on and not against these four.
+**In day mode a channel name and the "delivered" mark are nearly the same colour.**
+Untouched, because `ok` is a status colour and moving it is a decision rather than a
+correction — but it is measured now, and in the source.
+
+**Still stale:** every screenshot, and now more so.
+
+---
+
 ## 0. What changed since the August brief
 
 Eleven days of work, forty-three commits. In rough order of design significance:
