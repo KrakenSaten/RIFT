@@ -726,7 +726,7 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
       if (rift_day_mode) {
         display.setColor(rift_pal.accent);
         display.fillRect(0, y_rule + 2, 64, 12);
-        display.setColor(0xFFFF);
+        display.setColor(rift_pal.on_accent);
       } else {
         display.setColor(rift_pal.accent);
       }
@@ -809,7 +809,12 @@ static void renderHeading(DisplayDriver& display, const char* text) {
 // black survives 6x8 with no antialiasing, and de-emphasis inverts with the field
 // - on white, dim has to be *darker*, not lighter. The accent is one value in
 // both modes but changes role: on black it is legible as text at 6.0:1, on white
-// it is 3.5:1 and may only be a fill with white reversed out of it.
+// it is 3.5:1 and may only be a fill - never text, and never the ground under
+// white text either, which is the half of this rule that was missing until
+// September. Contrast is symmetric, so white on the accent is the same 3.5:1 that
+// forbids the accent on white, and thirteen surfaces drew the row the user is
+// acting on as the least readable row on the screen. The ink for an accent fill
+// is on_accent, which is 6.01:1 and the same value in both palettes.
 static const RiftPalette RIFT_NIGHT = {
   /* bg     */ 0x0000,   // #000000
   /* bar    */ 0x18C3,   // #1A1A1A
@@ -819,11 +824,17 @@ static const RiftPalette RIFT_NIGHT = {
   /* rule   */ 0x738E,   // #707070
   /* accent */ 0xFA00,   // #FF4100
   /* acc_tx */ 0xFA00,   // legible as text on black
+  /* on_acc */ 0x0000,   // ink inside an accent fill: 6.01:1, and mode-independent
   /* ok     */ 0x3E40    // #39C800
 };
 static const RiftPalette RIFT_DAY = {
   0xFFFF, 0xEF5D, 0x0000, 0x5ACB, 0x6B4D, 0x8C51, 0xFA00,
   /* acc_tx */ 0x2104,   // #202020 - the accent itself is unreadable as text here
+  // Same value as night's. The accent does not change between modes, so its ink
+  // must not either: bg would have been the obvious choice and it is the wrong
+  // one, because bg follows the field and turns white here. That is the bug this
+  // role exists to close, and the repeater menu had exactly it.
+  /* on_acc */ 0x0000,
   // #428610, not the night green. #39CB00 is 2.16:1 on white - below even the 3:1
   // non-text floor - and COMMS draws "ACK 1.2s" in it, so in day mode the one label
   // that says a message arrived was the least readable thing on the screen. Found by
@@ -1546,7 +1557,7 @@ public:
         display.setColor(rift_pal.accent);
         if (sel) display.fillRect(bx, DISCOVER_BTN_Y, w[i], 14);
         else     display.drawRect(bx, DISCOVER_BTN_Y, w[i], 14);
-        display.setColor(sel ? rift_pal.bg : (busy ? rift_pal.accent : rift_pal.fg));
+        display.setColor(sel ? rift_pal.on_accent : (busy ? rift_pal.accent : rift_pal.fg));
         display.drawTextCentered(bx + w[i] / 2, DISCOVER_BTN_Y + 3, labels[i]);
         _btn_x0[i] = bx;
         _btn_x1[i] = bx + w[i];
@@ -1997,7 +2008,7 @@ private:
       if (i == _del_sel) {
         display.setColor(rift_pal.accent);
         display.fillRect(0, y - 2, display.width(), 12);
-        display.setColor(0xFFFF);
+        display.setColor(rift_pal.on_accent);
       } else {
         display.setColor(rift_pal.fg);
       }
@@ -2061,7 +2072,7 @@ private:
       if (i == _del_sel) {
         display.setColor(rift_pal.accent);
         display.fillRect(0, y - 2, display.width(), 12);
-        display.setColor(0xFFFF);
+        display.setColor(rift_pal.on_accent);
       } else {
         display.setColor(rift_pal.fg);
       }
@@ -2495,7 +2506,7 @@ public:
       if (sel) {
         display.setColor(rift_pal.accent);
         display.fillRect(0, y - 2, display.width(), 12);
-        display.setColor(0xFFFF);
+        display.setColor(rift_pal.on_accent);
       } else {
         display.setColor(rift_pal.fg);
       }
@@ -3511,7 +3522,7 @@ class RiftConstellationScreen : public RiftScreen {
         display.setColor(rift_pal.accent);
         display.fillRect(0, y, display.width(), 12);
       }
-      uint16_t ink = sel ? 0xFFFF : rift_pal.fg;
+      uint16_t ink = sel ? rift_pal.on_accent : rift_pal.fg;
 
       // Freshness is shape, not brightness: four grey levels collapse into each
       // other in sunlight, a filled versus hollow square does not.
@@ -3530,7 +3541,7 @@ class RiftConstellationScreen : public RiftScreen {
         display.setColor(ink);
       } else {
         StrHelper::strncpy(tmp, "?", sizeof(tmp));
-        display.setColor(sel ? 0xFFFF : rift_pal.mid);
+        display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
       }
       display.drawTextRightAlign(278, y + 2, tmp);
 
@@ -3594,7 +3605,7 @@ class RiftConstellationScreen : public RiftScreen {
           if (rift_day_mode) {
             display.setColor(rift_pal.accent);
             display.fillRect(240, dy + 12, 78, 12);
-            display.setColor(0xFFFF);
+            display.setColor(rift_pal.on_accent);
           } else {
             display.setColor(rift_pal.accent);
           }
@@ -4381,7 +4392,7 @@ public:
       if (rift_day_mode) {
         display.setColor(rift_pal.accent);
         display.fillRect(280, 23, 40, 10);
-        display.setColor(0xFFFF);
+        display.setColor(rift_pal.on_accent);
       } else {
         display.setColor(rift_pal.accent);
       }
@@ -4573,10 +4584,11 @@ public:
     if (near > 0) {
       display.setColor(rift_pal.accent);
       display.fillRect(0, 2, display.width(), 14);
-      // Reversed out of the fill. On white the accent is 3.5:1 - a legal fill and an
-      // illegal text colour - so it is never the text here; on black the reverse
-      // would work but one treatment for both keeps the lamp reading identically.
-      display.setColor(0xFFFF);
+      // Ink from the palette, not white. This comment used to argue that a 3.5:1
+      // accent makes a legal fill and an illegal text colour - true - and then
+      // reversed white out of the fill, which is the same measurement read in the
+      // other direction, on the one row the screen is shouting about.
+      display.setColor(rift_pal.on_accent);
       display.drawTextLeftAlign(4, 6, label);
       // the block sits at the right so the name can be read left to right without
       // the eye stepping over a marker first
@@ -4625,7 +4637,7 @@ public:
         display.setColor(rift_pal.accent);
         display.fillRect(0, y - 2, display.width(), 13);
       }
-      uint16_t ink = sel ? 0xFFFF : rift_pal.fg;
+      uint16_t ink = sel ? rift_pal.on_accent : rift_pal.fg;
 
       // present is a fill, absent an outline - the shape-not-brightness rule the
       // lamp uses, so the two say the same thing the same way
@@ -4643,7 +4655,7 @@ public:
       if (off)                      StrHelper::strncpy(tag, "radio off", sizeof(tag));
       else if (rf_watch[i].present) StrHelper::strncpy(tag, "near", sizeof(tag));
       else                          StrHelper::strncpy(tag, "not heard", sizeof(tag));
-      display.setColor(sel ? 0xFFFF : rift_pal.mid);
+      display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
       display.drawTextRightAlign(display.width() - 2, y, tag);
 
       // The address, because a BLE name is often absent or shared and the key is what
@@ -5147,12 +5159,12 @@ private:
       bool active = _target_is_channel && _tabs[i].idx == _target_channel_idx;
 
       if (active) {
-        // accent fill with the label reversed out of it - the active channel has
-        // to survive being read in sunlight, where a fill one shade off the
-        // background does not
+        // accent fill with the label in on_accent - the active channel has to
+        // survive being read in sunlight, where a fill one shade off the
+        // background does not. The ink is 6.01:1; white here was 3.5:1.
         display.setColor(rift_pal.accent);
         display.fillRect(x, _tabs_y - 2, tw - 2, 13);
-        display.setColor(0xFFFF);
+        display.setColor(rift_pal.on_accent);
       } else {
         // The border carries the channel colour; the label stays mid. The active
         // tab keeps its accent fill untouched - being the selected channel is the
@@ -6592,7 +6604,7 @@ public:
         if (sel) {
           display.setColor(rift_pal.accent);
           display.fillRect(lx - 2, ly - 1, w - 6, 11);
-          display.setColor(rift_pal.bg);
+          display.setColor(rift_pal.on_accent);
         } else {
           display.setColor(UIColor::primary_txt);
         }
@@ -6940,11 +6952,12 @@ public:
     for (int i = 0; i < _count; i++) {
       int cx = x + 6 + i * cell;
       if (i == _sel) {
-        // accent fill with the glyph reversed out - legal in both palettes, where
-        // accent as text is not
+        // accent fill with the glyph in on_accent. Legal in both palettes for the
+        // reason accent-as-text is not, which is contrast - and white was not
+        // legal either, which is that same reason read the other way round.
         display.setColor(rift_pal.accent);
         display.fillRect(cx - 2, y + 14, cell - 2, 22);
-        display.setColor(0xFFFF);
+        display.setColor(rift_pal.on_accent);
       } else {
         display.setColor(rift_pal.fg);
       }

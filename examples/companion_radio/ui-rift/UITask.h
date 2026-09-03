@@ -28,8 +28,19 @@
 // on a light field - so RIFT carries its own table. riftApplyPalette() also
 // assigns the UIColor statics, so screens not yet migrated stay coherent in both
 // modes instead of half-changing.
+// on_accent is the ink for text drawn inside an accent fill, and it is the same
+// value in both palettes because the accent is.
+//
+// It exists because the rule it replaces was arithmetically empty. "On white the
+// accent may only be a fill with white reversed out of it" was written three times
+// in the design notes and twice in these comments, and contrast is symmetric:
+// white on #FF4100 is 3.50:1, which is the identical figure the accent was
+// forbidden as text on white for. Eleven sites drew the row the user is acting on
+// as the least readable row on the screen. Black is 6.01:1 - see
+// tools/palette-check.py, which prints all three so the claim can be rechecked
+// rather than believed.
 struct RiftPalette {
-  ColorVal bg, bar, fg, mid, dim, rule, accent, accent_txt, ok;
+  ColorVal bg, bar, fg, mid, dim, rule, accent, accent_txt, on_accent, ok;
 };
 extern RiftPalette rift_pal;
 extern bool rift_day_mode;
