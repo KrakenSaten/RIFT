@@ -240,12 +240,30 @@ static inline uint16_t riftChannelColour(int channel_idx) {
   // Keyed on the slot, which is stable - MyMesh::removeChannel blanks a slot in
   // place rather than compacting, so deleting one channel does not recolour the
   // others.
-  //                            hue  on black  on white  from accent  from green
+  // Generated: tools/palette-check.py --channels. Hue is OKLab, and the separation
+  // columns are OKLab dE, because the numbers that used to be here were neither -
+  // the hue was HSV where the name table's was OKLab, so one constant was 65
+  // degrees in this comment and 115 in that one, and the two "from accent" columns
+  // disagreed by 90 for the same pair of colours.
+  //
+  // The dE columns say one thing worth acting on. Channel 1 and channel 2 are 0.061
+  // and 0.053 from day mode's ok green, which is the closest pair anywhere in this
+  // palette - closer than any two of the twelve name colours, whose worst pair is
+  // 0.047 and is considered the usable floor. In day mode a channel name and the
+  // "delivered" mark are nearly the same colour. The day green was moved to
+  // #428610 to clear 4.5:1 on white and checked against the field it sits on, not
+  // against these four.
+  //
+//     RGB565  rgb              blk   wht   hue  chroma  dE accent  dE night grn  dE day grn
+//  1  0x73E0  rgb(115,125,  0)  4.66  4.50  115  0.128      0.263         0.221        0.061
+//  2  0x0429  rgb(  0,134, 74)  4.51  4.66  154  0.136      0.341         0.222        0.053
+//  3  0x631E  rgb( 99, 97,247)  4.58  4.58  278  0.218      0.391         0.453        0.357
+//  4  0xD170  rgb(214, 44,132)  4.55  4.61  355  0.215      0.167         0.458        0.355
   switch (channel_idx) {
-    case 1: return 0x73E0;   //  65     4.66      4.50         49          38
-    case 2: return 0x0429;   // 153     4.51      4.66        138          50
-    case 3: return 0x631E;   // 241     4.58      4.58        135         138
-    case 4: return 0xD170;   // 329     4.55      4.61         47         134
+    case 1: return 0x73E0;
+    case 2: return 0x0429;
+    case 3: return 0x631E;
+    case 4: return 0xD170;
     default: return RIFT_CHAN_COL_NONE;
   }
 }
@@ -1453,48 +1471,86 @@ static inline bool riftClockPlausible(uint32_t epoch) {
 // restarts, which is worse than no colour at all.
 //
 // Drawn from riftChannelColour's palette rather than a new one. Those four were
-// measured after RGB565 quantisation for 4.5:1 against both black and white and
-// for separation from the accent and the ok green - the work that makes them
-// legal as text - and inventing more without repeating that sweep would be
-// guessing at the only property that matters here.
-// Twelve, and twelve is where this stops being worth widening.
+// measured after RGB565 quantisation for 4.5:1 against both black and white, which
+// is the work that makes them legal as text, and inventing more without repeating
+// that sweep would be guessing at the only property that matters here.
 //
 // Four meant two names collided one time in four, which in a channel with a
 // handful of people is most of the time, and a shared colour is not an identity.
-// But the ceiling is not the palette, it is whether two colours can be told apart
-// at a glance on a 6px font in daylight. Measured as the worst separation between
-// any two entries, the greedy pick degrades: 50 at six colours, 33 at eight, 25 at
-// twelve, 21 at sixteen, 16 at twenty. Below about 20 they need to be compared
-// side by side, which is no use for reading a conversation, so twelve is the last
-// count that still buys anything.
+// Twelve, and twelve is where this stops being worth widening: the ceiling is not
+// the palette, it is whether two colours can be told apart at a glance in a 6px
+// font in daylight.
 //
 // Colour is an aid here, not the identity - the name is written next to it - so
 // the right answer to a very busy channel is not more hues.
 //
 // The first four are the channel colours untouched: they are in the tab strip and
-// in every outgoing row. The rest come from the same sweep repeated - every
-// RGB565 value scored after quantisation, keeping 4.5:1 or better against black
-// AND white, then held away from the accent and the ok green, because a name in
-// alert red or delivery green reads as a status rather than as a person - and
-// chosen greedily for maximum separation.
+// in every outgoing row. The rest come from the same sweep repeated - every RGB565
+// value scored after quantisation, keeping 4.5:1 or better against black AND
+// white, held away from the accent and the two ok greens because a name in alert
+// red or delivery green reads as a status rather than as a person, and chosen
+// greedily for maximum separation.
 //
-//                                 on black  on white  from accent  from green  nearest
-//   0  0x73E0  rgb(115,125,  0)   4.66      4.50        49           70         50
-//   1  0x0429  rgb(  0,133, 74)   4.45      4.71       111           19         48
-//   2  0x631E  rgb( 98, 97,246)   4.56      4.61       110           84         29
-//   3  0xD170  rgb(213, 44,131)   4.52      4.65        63          104         31
-//   4  0x039C  rgb(  0,113,230)   4.50      4.66       137           61         31
-//   5  0xB81F  rgb(189,  0,255)   4.61      4.56       109          130         30
-//   6  0x63EC  rgb( 98,125, 98)   4.63      4.54        74           56         29
-//   7  0xE00B  rgb(230,  0, 90)   4.51      4.65        60          123         25
-//   8  0xB1BC  rgb(180, 52,230)   4.57      4.59        95          106         29
-//   9  0x9334  rgb(148,101,164)   4.66      4.51        80           81         29
-//  10  0x2BD7  rgb( 41,121,189)   4.56      4.60       109           56         29
-//  11  0xD814  rgb(222,  0,164)   4.64      4.52        82          126         25
+// ---- what a September review pass changed here, which is nothing but the table
 //
-// Entry 1 is the established channel green and sits 19 from the ok green, well
-// inside what every new entry was rejected for. It is on screen already, so it
-// stays - but it is not a precedent.
+// The numbers below are generated: tools/palette-check.py --tables prints exactly
+// these lines. The two tables that used to be here disagreed with each other about
+// the same constant and carried separation columns that no standard metric
+// reproduces - entry 0 was given as 49 from the accent where the sRGB Euclidean
+// distance is 153 and the hue gap is 81 degrees. A number that cannot be
+// recomputed cannot defend or attack an entry, which is the only thing a table
+// like this is for.
+//
+// Three findings from re-deriving it, and the useful one is the third.
+//
+// One figure was wrong. This table said 4.45 on black for entry 1 and the channel
+// table said 4.51 for the same constant. 4.51 is right, so the entry clears the
+// rule it was admitted under after all, and it is the channel table that was
+// accurate. It sits on the line either way - a truncating rather than rounding
+// 5-to-8-bit expansion returns 4.45 - so if margin is ever wanted here, re-sweep;
+// do not nudge a shipping identity on a rounding convention.
+//
+// The hue guard is stated in the wrong unit. Entries 6 and 7 violate it - 4
+// degrees from the night green and 24 from the accent - and both are fine, because
+// hue angle at a fixed luminance says nothing about whether two colours can be
+// told apart. Measured in OKLab, every entry is further from every reserved colour
+// than the set's own worst internal pair (0.047), entry 7 included at 0.116. The
+// guard is a cheap filter for the sweep and not a test of anything; the ordering
+// it produced is fine and the degrees are not evidence.
+//
+// Entry 6 is nearly colourless - chroma 0.050 against 0.109 for the next lowest -
+// and that is the price of covering the hue wheel rather than a mistake. It is the
+// only entry between 154 and 248 degrees, a 94-degree hole, and the luminance band
+// contains nothing saturated there: every value in that region that is well
+// separated from the other eleven has chroma between 0.017 and 0.048. Saturated
+// colours at L 0.18 exist only in blue-purple-magenta, where five entries already
+// sit, and in olive-green, where the greens are. Dropping entry 6 for a chroma
+// floor buys a twelfth purple or a grey. Widening the set has the same problem:
+// picking twelve for maximum separation from the whole pool reaches 0.091 against
+// 0.047, and nine of the twelve land between 276 and 337 degrees. It measures
+// better and reads worse.
+//
+// The one thing here worth a second look is not in this table at all. Day mode's
+// ok green is OKLab 0.053 from channel colour 2 and 0.061 from channel colour 1,
+// which is the closest pair anywhere in the palette - closer than any two names.
+// It arrived when the day green was moved to #428610 to clear 4.5:1 on white, and
+// that change was checked against the field and not against these. In day mode a
+// channel name and "delivered" are nearly the same colour.
+//
+//     RGB565  rgb              blk   wht   hue  chroma  accent  green  nearest
+//   0 0x73E0  rgb(115,125,  0)  4.66  4.50  115  0.128      81     21    6 0.088
+//   1 0x0429  rgb(  0,134, 74)  4.51  4.66  154  0.136     120     14    6 0.089
+//   2 0x631E  rgb( 99, 97,247)  4.58  4.58  278  0.218     117    137    4 0.080
+//   3 0xD170  rgb(214, 44,132)  4.55  4.61  355  0.215      40    141   11 0.062
+//   4 0x039C  rgb(  0,113,231)  4.52  4.65  257  0.198     138    116   10 0.072
+//   5 0xB81F  rgb(189,  0,255)  4.61  4.56  312  0.303      82    172    8 0.047
+//   6 0x63EC  rgb( 99,125, 99)  4.64  4.52  145  0.050     110      4    0 0.088
+//   7 0xE00B  rgb(231,  0, 90)  4.55  4.62   11  0.237      24    125    3 0.067
+//   8 0xB1BC  rgb(181, 52,231)  4.61  4.56  314  0.257      81    174    5 0.047
+//   9 0x9334  rgb(148,101,165)  4.66  4.50  317  0.109      78    176   10 0.136
+//  10 0x2BD7  rgb( 41,121,189)  4.56  4.60  248  0.130     146    108    4 0.072
+//  11 0xD814  rgb(222,  0,165)  4.65  4.52  344  0.257      51    152    3 0.062
+
 #define RIFT_NAME_COLOURS 12
 
 static inline uint16_t riftNameColourAt(int i) {

@@ -112,5 +112,57 @@ def report():
     print("  glyph floor #6E6E6E = %d; weakest step green = %d"
           % (0x6E, expand(0x6B6D)[1]))
 
+CHANNELS = [0x73E0, 0x0429, 0x631E, 0xD170]
+
+def channel_table():
+    """The four channel identities, in the same columns as the name table.
+
+    The hue column used to be HSV where the name table's was OKLab, so the same
+    constant was described as 65 degrees in one comment and 115 in the other.
+    OKLab in both now, because it is the space the separation figures are in and
+    two hue conventions in one file is how that pair of numbers stopped being
+    comparable.
+    """
+    acc, gn, gd = expand(ACCENT), expand(OK_NIGHT), expand(OK_DAY)
+    print("//     RGB565  rgb              blk   wht   hue  chroma"
+          "  dE accent  dE night grn  dE day grn")
+    for i, v in enumerate(CHANNELS):
+        rgb = expand(v)
+        print("//  %d  0x%04X  rgb(%3d,%3d,%3d)  %.2f  %.2f  %3.0f  %.3f"
+              "      %.3f         %.3f        %.3f"
+              % (i + 1, v, rgb[0], rgb[1], rgb[2], contrast(rgb, BLACK),
+                 contrast(rgb, WHITE), hue(rgb), chroma(rgb), de(rgb, acc),
+                 de(rgb, gn), de(rgb, gd)))
+
+def tables():
+    """The two comment tables in RiftLogic.h, generated.
+
+    The columns are the ones the admission test is actually stated in - contrast
+    against both fields, hue distance from the three reserved colours, OKLab
+    chroma, and the nearest other entry. The old tables carried a "from accent"
+    and "from green" column that no standard metric reproduces: entry 0 was
+    listed as 49 from the accent where the sRGB Euclidean distance is 153 and the
+    hue gap is 81 degrees. Whatever produced those numbers, they could not be
+    used to defend or attack an entry, which is the only thing a table like this
+    is for.
+    """
+    acc, gn, gd = expand(ACCENT), expand(OK_NIGHT), expand(OK_DAY)
+    print("//     RGB565  rgb              blk   wht   hue  chroma"
+          "  accent  green  nearest")
+    for i, v in enumerate(NAMES):
+        rgb = expand(v)
+        near = min(((de(rgb, expand(o)), j) for j, o in enumerate(NAMES) if j != i))
+        print("//  %2d 0x%04X  rgb(%3d,%3d,%3d)  %.2f  %.2f  %3.0f  %.3f"
+              "     %3.0f    %3.0f   %2d %.3f"
+              % (i, v, rgb[0], rgb[1], rgb[2], contrast(rgb, BLACK),
+                 contrast(rgb, WHITE), hue(rgb), chroma(rgb), hue_gap(rgb, acc),
+                 min(hue_gap(rgb, gn), hue_gap(rgb, gd)), near[1], near[0]))
+
 if __name__ == "__main__":
-    report()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--tables":
+        tables()
+    elif len(sys.argv) > 1 and sys.argv[1] == "--channels":
+        channel_table()
+    else:
+        report()
