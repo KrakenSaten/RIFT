@@ -5112,6 +5112,11 @@ private:
     uint8_t key[6];        // contacts only
     uint32_t last_ts;      // newest message in this conversation, 0 if none
     uint8_t unread;
+    // A room server behaves nothing like a person - it holds a shared transcript
+    // and it is always listening - and the two were drawn identically. Only CHAT
+    // and ROOM reach this list at all, because riftCanDirectMessage refuses the
+    // rest, so this is the one distinction the column has to carry.
+    bool is_room;
   };
   PickEntry _picks[RIFT_PICKER_MAX];
   int _pick_count;
@@ -5418,6 +5423,11 @@ private:
                                            : riftConvDM(_picks[i].key);
       _picks[i].last_ts = newestIn(k, _picks[i].name);
       _picks[i].unread = msg_unread.count(k);
+      _picks[i].is_room = false;
+      if (!_picks[i].is_channel) {
+        ContactInfo* c = the_mesh.lookupContactByPubKey(_picks[i].key, 6);
+        if (c != NULL) _picks[i].is_room = (c->type == ADV_TYPE_ROOM);
+      }
     }
 
     // Direct rows sort by their newest message, most recent first, with contacts you
@@ -5592,8 +5602,14 @@ private:
   // room for. The count is deliberately not drawn - one glyph of digits in this
   // space would be unreadable, and the question the row answers is whether to open
   // it, not how far behind you are.
-  void renderUnreadDot(DisplayDriver& display, int x, int y) {
-    display.setColor(rift_pal.accent);
+  //
+  // ink is what to draw it in when it lands on an accent fill. The mark is accent
+  // and so is the selected row, so on that one row it was accent on accent and
+  // vanished - and "there is something unread here" disappearing on the row you
+  // have moved the cursor to is the wrong row to lose it on. Drawn in the fill's
+  // own ink instead: the shape survives, which is the property it was chosen for.
+  void renderUnreadDot(DisplayDriver& display, int x, int y, bool on_fill = false) {
+    display.setColor(on_fill ? rift_pal.on_accent : rift_pal.accent);
     display.fillRect(x, y, 3, 3);
   }
 
@@ -5632,7 +5648,15 @@ private:
         _pick_row_of[_pick_rows_drawn] = i;
         _pick_rows_drawn++;
       }
-      if (_picks[i].unread > 0) renderUnreadDot(display, 1, y + 2);
+      // A filled bar rather than a "> " prefix, matching the scope list and the
+      // NODES and RADAR rows - this was the last list still marking its selection
+      // with two characters of text, which is a shape only if you are looking for
+      // it and costs two cells on every row to say something about one.
+      if (sel) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y - 2, display.width(), 12);
+      }
+      if (_picks[i].unread > 0) renderUnreadDot(display, 1, y + 2, sel);
 
       // The channel's colour, as the 2px chip the strip borders already use. Only
       // four channels get one - see design/channel-colours.md - so a fifth draws
@@ -5645,25 +5669,57 @@ private:
         }
       }
 
-      display.setColor(sel ? UIColor::title_txt : UIColor::secondary_txt);
+      // The name in the sender's own colour, so a person is the same colour here
+      // as in the conversation - which is the whole point of having derived it
+      // from the name. Direct rows only: a channel row already carries the
+      // channel's 2px chip, and hashing the channel's name would put a second,
+      // unrelated colour on the same row, which is two colour claims about one
+      // thing. Channels keep chip plus fg.
+      uint16_t name_col;
+      if (sel)            name_col = rift_pal.on_accent;
+      else if (is_ch)     name_col = UIColor::secondary_txt;
+      else {
+        name_col = riftNameColour(_picks[i].name);
+        if (name_col == RIFT_CHAN_COL_NONE) name_col = UIColor::secondary_txt;
+      }
+      display.setColor(name_col);
       char filtered[32];
       riftTranslateUTF8(filtered, _picks[i].name, sizeof(filtered));
-      display.setCursor(11, y);
-      display.print(sel ? "> " : "  ");
-      display.print(filtered);
+      // x 11, where "> " used to push it to 23. The bar says which row is selected
+      // on every row rather than on one, and gives two cells back to every name.
+      // 240, which stops at 251. The widest right slot is "ROOM >99d" at 9 cells,
+      // right-aligned at 316, so it begins at 262 in the worst case.
+      display.drawTextEllipsized(11, y, 240, filtered);
 
-      // The time of the last message replaces the old "channel" / "direct" label,
-      // which the section headings now say once instead of on every row. A
-      // conversation with no history says so rather than showing a zero clock.
-      char right[16];
+      // The right slot: what kind of thing this is, and how long ago it spoke.
+      //
+      // Relative, not a clock. "05:47" asks the reader to know what time it is now
+      // and then subtract; "3m" and "4d" do not. NODES has printed relative ages in
+      // its HEARD column since the August round decided relative in lists and
+      // absolute in detail rows, and this list is the one that did not get the
+      // memo - so this is drift, not a new idea.
+      //
+      // The type sits here rather than in front of the name, because a type before
+      // the name pushes every name right by four cells and makes the left edge
+      // ragged between rows. Next to the age it is also the pairing that gets read
+      // together: a room server last heard four days ago and a person last heard
+      // four days ago mean different things.
+      char right[20];
+      char age[RIFT_AGE_BUF_LEN];
+      uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
       if (_picks[i].last_ts == 0) {
-        StrHelper::strncpy(right, "-", sizeof(right));
+        StrHelper::strncpy(age, "-", sizeof(age));
+      } else if (!riftClockPlausible(now) || now < _picks[i].last_ts) {
+        // An unset clock, or history stamped after it - the age cannot be computed
+        // and a wrong one would look exactly like a right one. `?` is the glyph
+        // this firmware uses for that everywhere else.
+        StrHelper::strncpy(age, "?", sizeof(age));
       } else {
-        snprintf(right, sizeof(right), "%02d:%02d",
-                 (int) ((_picks[i].last_ts / 3600) % 24),
-                 (int) ((_picks[i].last_ts / 60) % 60));
+        riftFormatAgeSecs(now - _picks[i].last_ts, age, sizeof(age));
       }
-      display.setColor(rift_pal.mid);
+      if (_picks[i].is_room) snprintf(right, sizeof(right), "ROOM %s", age);
+      else                   StrHelper::strncpy(right, age, sizeof(right));
+      display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
       display.drawTextRightAlign(display.width() - 4, y, right);
 
       y += RIFT_LINE_H;
@@ -5682,12 +5738,17 @@ private:
                                 "list full - contacts with no history not shown");
     }
 
-    // scroll position indicator when the list doesn't fit
-    if (total > pickerRows()) {
+    // How many conversations there are, always - and in words, because "4/17" in
+    // this corner was a scroll position and read as one. "How many is there" was
+    // one of the three questions this list could not answer, and the total was
+    // already on screen; it was hidden on exactly the short lists where it is
+    // cheapest to draw and shown as a fraction of a cursor position on the long
+    // ones. The position is what the list itself shows by scrolling.
+    if (total > 0) {
       display.setColor(UIColor::secondary_txt);
-      char pos[16];
-      snprintf(pos, sizeof(pos), "%d/%d", _pick_idx + 1, total);
-      display.drawTextRightAlign(display.width() - 4, BODY_TOP + 4, pos);
+      char cnt[24];
+      snprintf(cnt, sizeof(cnt), "%d conversation%s", total, total == 1 ? "" : "s");
+      display.drawTextRightAlign(display.width() - 4, BODY_TOP + 4, cnt);
     }
 
     display.setColor(UIColor::secondary_txt);

@@ -754,10 +754,13 @@ static inline int riftMeshActivity(bool ever_heard, uint32_t millis_since) {
 // read as a small age instead, which is not worth code to handle.
 #define RIFT_AGE_BUF_LEN  6
 
-static inline void riftFormatAge(uint32_t millis_since, char* buf, size_t len) {
+// Split from riftFormatAge because the conversation list has an age in seconds
+// already - the difference of two RTC timestamps - and multiplying it back up to
+// milliseconds would overflow a uint32 at 49.7 days, which is well inside the
+// range this field is meant to print.
+static inline void riftFormatAgeSecs(uint32_t secs, char* buf, size_t len) {
   if (buf == NULL || len == 0) return;
 
-  uint32_t secs = millis_since / 1000;
   if (secs < 60)          snprintf(buf, len, "%us", (unsigned) secs);
   else if (secs < 3600)   snprintf(buf, len, "%um", (unsigned) (secs / 60));
   else if (secs < 86400)  snprintf(buf, len, "%uh", (unsigned) (secs / 3600));
@@ -767,6 +770,10 @@ static inline void riftFormatAge(uint32_t millis_since, char* buf, size_t len) {
     if (days > 99) snprintf(buf, len, ">99d");
     else           snprintf(buf, len, "%ud", (unsigned) days);
   }
+}
+
+static inline void riftFormatAge(uint32_t millis_since, char* buf, size_t len) {
+  riftFormatAgeSecs(millis_since / 1000, buf, len);
 }
 
 // Who can actually receive a direct message.

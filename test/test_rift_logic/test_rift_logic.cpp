@@ -612,6 +612,33 @@ TEST(OriginHops, RefusesWhatCarriesNoCount) {
     EXPECT_EQ(99, h) << "a refusal must not write to the output";
 }
 
+TEST(FormatAgeSecs, TakesSecondsWithoutTheMillisRoundTrip) {
+    char b[RIFT_AGE_BUF_LEN];
+    riftFormatAgeSecs(0, b, sizeof(b));      EXPECT_STREQ("0s", b);
+    riftFormatAgeSecs(59, b, sizeof(b));     EXPECT_STREQ("59s", b);
+    riftFormatAgeSecs(60, b, sizeof(b));     EXPECT_STREQ("1m", b);
+    riftFormatAgeSecs(3599, b, sizeof(b));   EXPECT_STREQ("59m", b);
+    riftFormatAgeSecs(3600, b, sizeof(b));   EXPECT_STREQ("1h", b);
+    riftFormatAgeSecs(86399, b, sizeof(b));  EXPECT_STREQ("23h", b);
+    riftFormatAgeSecs(86400, b, sizeof(b));  EXPECT_STREQ("1d", b);
+    // The conversation list is the caller that needs this: a difference of two RTC
+    // timestamps past 49.7 days overflows a uint32 of milliseconds, so multiplying
+    // seconds back up to call the old entry point would have wrapped exactly where
+    // this field is meant to say ">99d".
+    riftFormatAgeSecs(99u * 86400u, b, sizeof(b));  EXPECT_STREQ("99d", b);
+    riftFormatAgeSecs(100u * 86400u, b, sizeof(b)); EXPECT_STREQ(">99d", b);
+    riftFormatAgeSecs(4000u * 86400u, b, sizeof(b)); EXPECT_STREQ(">99d", b);
+}
+
+TEST(FormatAgeSecs, TheMillisWrapperStillAgrees) {
+    char a[RIFT_AGE_BUF_LEN], b[RIFT_AGE_BUF_LEN];
+    for (uint32_t secs = 0; secs < 200000u; secs += 997u) {
+        riftFormatAgeSecs(secs, a, sizeof(a));
+        riftFormatAge(secs * 1000u, b, sizeof(b));
+        EXPECT_STREQ(a, b) << "at " << secs << "s";
+    }
+}
+
 TEST(OriginSkipHops, DropsTheMarkerAndNothingElse) {
     // What COMMS draws now: the marker goes, the name and its colon stay, because
     // the right-hand slot of the row prints the hop count in words instead.
