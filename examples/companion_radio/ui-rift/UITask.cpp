@@ -1273,7 +1273,13 @@ static void riftDrawWordmark(DisplayDriver& display, int x, int y, ColorVal txt,
 
 void riftDrawBootScreen(DisplayDriver& display, const char* status) {
   const int x = 32;                  // left margin, matching the design
-  const ColorVal white = 0xFFFF;     // RGB565; the shared palette has no white
+  // fg, not a hardcoded 0xFFFF. This screen paints on rift_pal.bg like every other,
+  // so in day mode the wordmark and the status line were the same colour as the
+  // field and the boot screen showed two straplines and no name. The RIFT tab has
+  // always passed rift_pal.fg for the same mark; this instance was the one that did
+  // not, behind a comment noting the shared palette has no white - true, and it has
+  // no need of one, because what this wants is the colour of text on the field.
+  const ColorVal ink = rift_pal.fg;
 
   // Wordmark 2c. The seam runs from the left edge to the middle and stops: edge to
   // edge read as a rule with the wordmark sitting on it, where stopping halfway makes
@@ -1282,7 +1288,7 @@ void riftDrawBootScreen(DisplayDriver& display, const char* status) {
   //
   // The RIFT tab makes the opposite choice, and for the same reason: there is nothing
   // to its right, so its seam leaves the screen instead of stopping in mid-air.
-  riftDrawWordmark(display, x, 78, white, 0, display.width() / 2 - 1);
+  riftDrawWordmark(display, x, 78, ink, 0, display.width() / 2 - 1);
 
   // wide tracking, as drawn - Adafruit GFX has no letter-spacing control
   display.setColor(UIColor::secondary_txt);
@@ -1296,7 +1302,7 @@ void riftDrawBootScreen(DisplayDriver& display, const char* status) {
   display.drawTextLeftAlign(x, 132, "&  F I E L D  T E R M I N A L");
 
   if (status != NULL) {
-    display.setColor(white);
+    display.setColor(ink);
     display.drawTextLeftAlign(x, 188, status);
     display.setColor(UIColor::secondary_txt);
     display.drawTextRightAlign(display.width() - x, 188, "1-2 min - not a hang");
@@ -3700,8 +3706,14 @@ class RiftConstellationScreen : public RiftScreen {
         }
         if (action != NULL) {
           if (rift_day_mode) {
+            // Sized to the label. The fill was a fixed 78px at x 240 while the label
+            // is right-aligned at 316, so "ENTER: control" at 84px begins at 232 and
+            // its first glyph and a half sat outside the fill. It could not be seen
+            // until now: the ink out there used to be white on a white field. Black
+            // ink is what made a geometry error legible.
+            int tw = (int) strlen(action) * RIFT_CHAR_W;
             display.setColor(rift_pal.accent);
-            display.fillRect(240, dy + 12, 78, 12);
+            display.fillRect(316 - tw - 4, dy + 12, tw + 6, 12);
             display.setColor(rift_pal.on_accent);
           } else {
             display.setColor(rift_pal.accent);
