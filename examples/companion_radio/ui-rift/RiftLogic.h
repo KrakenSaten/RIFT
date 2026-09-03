@@ -184,6 +184,24 @@ static inline bool riftOriginName(const char* origin, char* out, size_t out_size
   return true;
 }
 
+// The origin with its hop marker removed, and nothing else touched.
+//
+// The marker exists because newMsg writes "(2) name:" into the stored origin, and
+// COMMS now reports the hop count in the row's right-hand slot instead - so the
+// prefix was the same fact twice, six pixels from the clock. It cannot simply be
+// dropped at capture: the stored string is what arrived, riftOriginHops reads the
+// count back out of it, and the message preview has no right-hand slot to move it
+// to.
+//
+// "to name:" is returned unchanged. riftOriginName strips that too, because it
+// wants the bare name; here the "to" is the only thing marking a row as outgoing.
+static inline const char* riftOriginSkipHops(const char* origin) {
+  if (origin == NULL || origin[0] != '(') return origin;
+  const char* close = strchr(origin, ')');
+  if (close == NULL || close[1] != ' ') return origin;
+  return close + 2;
+}
+
 // The hop count out of the same decoration riftOriginName strips off. newMsg writes
 // "(2) name:" for a routed message and "(D) name:" for a direct one, and until now
 // that number was thrown away by every reader - so the sender line showed

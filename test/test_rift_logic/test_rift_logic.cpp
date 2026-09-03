@@ -612,6 +612,31 @@ TEST(OriginHops, RefusesWhatCarriesNoCount) {
     EXPECT_EQ(99, h) << "a refusal must not write to the output";
 }
 
+TEST(OriginSkipHops, DropsTheMarkerAndNothingElse) {
+    // What COMMS draws now: the marker goes, the name and its colon stay, because
+    // the right-hand slot of the row prints the hop count in words instead.
+    EXPECT_STREQ("#test:", riftOriginSkipHops("(0) #test:"));
+    EXPECT_STREQ("Bob:", riftOriginSkipHops("(D) Bob:"));
+    EXPECT_STREQ("lillemesh:", riftOriginSkipHops("(12) lillemesh:"));
+}
+
+TEST(OriginSkipHops, LeavesAnOutgoingRowAlone) {
+    // riftOriginName strips "to " because it wants the bare name. Here the "to" is
+    // the only thing that marks the row as one this node sent, so it stays.
+    EXPECT_STREQ("to #test:", riftOriginSkipHops("to #test:"));
+    EXPECT_STREQ("to Bob:", riftOriginSkipHops("to Bob:"));
+}
+
+TEST(OriginSkipHops, LeavesAnythingWithoutAMarkerAlone) {
+    EXPECT_STREQ("Public", riftOriginSkipHops("Public"));
+    EXPECT_STREQ("", riftOriginSkipHops(""));
+    // An unclosed or malformed bracket is a name, not a marker - it must not lose
+    // its first characters to a parse that did not finish.
+    EXPECT_STREQ("(oops", riftOriginSkipHops("(oops"));
+    EXPECT_STREQ("(2)nospace:", riftOriginSkipHops("(2)nospace:"));
+    EXPECT_EQ((const char*) NULL, riftOriginSkipHops(NULL));
+}
+
 TEST(OriginName, IncomingCarriesTheHopMarker) {
     char out[64];
     ASSERT_TRUE(riftOriginName("(0) #test:", out, sizeof(out)));

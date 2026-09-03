@@ -108,7 +108,6 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 // rather than beside that screen because SYSTEM's diagnostics read them too, and
 // SYSTEM is defined first.
 #define RIFT_CONST_MAX 96
-#define RIFT_HOP_COLS  4
 
 // AdvertPath::path_len is Packet's raw encoding, not a hop count: bits 6-7 carry
 // the hash size minus one and bits 0-5 the number of hops (Mesh.cpp:449). Reading
@@ -701,6 +700,25 @@ static const int NAV_CENTRE_X[RIFT_NAV_COUNT] = { 20, 81, 145, 209, 270 };
 
 #define NAV_RULE_Y 226
 
+// The marker under a nav label, sized to the label rather than to a 64px column.
+//
+// The labels were nudged off the even grid so SYSTEM would not clip against the
+// right edge. The marker was left on it, so every underline ran three quarters of
+// a label-width to the right of the word it marked - 12px under RIFT, 15 under the
+// middle three, 18 under SYSTEM, where it began four pixels right of the label's
+// first glyph and ran off the screen edge. Each one reached further under its
+// right-hand neighbour than under its own word, which is visible in a photograph
+// and not only in the arithmetic.
+//
+// A shorter marker is also better at the job it was given. It exists because the
+// grey step between active and inactive vanishes in sunlight, and a 64px bar under
+// a 30px word is ambiguous about which word it belongs to - which is exactly what
+// sunlight was going to add anyway.
+static void navMarkerSpan(int i, int* x, int* w) {
+  *w = (int) strlen(NAV_LABELS[i]) * RIFT_CHAR_W + 8;
+  *x = NAV_CENTRE_X[i] - *w / 2;
+}
+
 static void renderNavBar(DisplayDriver& display, int curr_idx) {
   const int y_rule = NAV_RULE_Y;
 
@@ -710,7 +728,9 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   // Active tab carried by colour alone before this; in sunlight the grey step
   // between active and inactive disappears. The underline is the second cue.
   display.setColor(rift_pal.accent);
-  display.fillRect(curr_idx * 64, y_rule, 64, 2);
+  int mark_x, mark_w;
+  navMarkerSpan(curr_idx, &mark_x, &mark_w);
+  display.fillRect(mark_x, y_rule, mark_w, 2);
 
   display.setTextSize(1);
   for (int i = 0; i < RIFT_NAV_COUNT; i++) {
@@ -724,8 +744,10 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
     // is dim like the other four.
     if (i == RIFT_NAV_MESH && i == curr_idx) {
       if (rift_day_mode) {
+        int chip_x, chip_w;
+        navMarkerSpan(i, &chip_x, &chip_w);
         display.setColor(rift_pal.accent);
-        display.fillRect(0, y_rule + 2, 64, 12);
+        display.fillRect(chip_x, y_rule + 2, chip_w, 12);
         display.setColor(rift_pal.on_accent);
       } else {
         display.setColor(rift_pal.accent);
@@ -746,13 +768,14 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   // dot stayed lit permanently for a message that had been read.
   if (msg_unread.any()) {
     display.setColor(rift_pal.accent);
-    display.fillRect(246, 227, 3, 3);
+    display.fillRect(240, 227, 3, 3);
   }
 
   // Battery, moved down from the title bar into space that was already here:
-  // SYSTEM is centred at 270 and ends at 288, leaving 32px to the right edge, and
-  // "100%" is 24px. The active-tab underline runs to 320 under it but sits at
-  // y 226..228 while this text occupies 228..236, so they do not touch.
+  // SYSTEM is centred at 270 and ends at 287, leaving 32px to the right edge, and
+  // "100%" is 24px. SYSTEM's marker now ends at 291 rather than running to the
+  // screen edge, and sits at y 226..227 while this text occupies 228..236, so they
+  // do not touch on either axis.
   //
   // mid rather than fg: this is chrome, and fg would make it compete with the
   // active nav label. accent when low, which is the one case worth interrupting.
@@ -1265,7 +1288,12 @@ void riftDrawBootScreen(DisplayDriver& display, const char* status) {
   display.setColor(UIColor::secondary_txt);
   display.setTextSize(1);
   display.drawTextLeftAlign(x, 118, "R A D I O  I N T E L L I G E N C E");
-  display.drawTextLeftAlign(x, 132, "$  F I E L D  T E R M I N A L");
+  // "&", not "$". design/handoff.md gives the two straplines as
+  // "RADIO INTELLIGENCE" and "& FIELD TERMINAL" - the ampersand is what joins
+  // them into what the name stands for. It arrived here as a dollar sign, which
+  // on a screen whose two lines are otherwise identically tracked reads as a
+  // shell prompt on one of them, and it is the first thing anyone sees at boot.
+  display.drawTextLeftAlign(x, 132, "&  F I E L D  T E R M I N A L");
 
   if (status != NULL) {
     display.setColor(white);
@@ -1554,9 +1582,18 @@ public:
         // The selected button is filled rather than only outlined: in sunlight the
         // difference between two accent outlines disappears, and which one Enter
         // will press has to survive that.
-        display.setColor(rift_pal.accent);
-        if (sel) display.fillRect(bx, DISCOVER_BTN_Y, w[i], 14);
-        else     display.drawRect(bx, DISCOVER_BTN_Y, w[i], 14);
+        // The accent fills the selected button and no longer outlines the other
+        // two. It used to outline all three, so it framed everything and filled
+        // one, and the fill was carrying the whole of "this is the one Enter will
+        // press" while the accent said "these are buttons" three times. rule draws
+        // a button; the accent says which.
+        if (sel) {
+          display.setColor(rift_pal.accent);
+          display.fillRect(bx, DISCOVER_BTN_Y, w[i], 14);
+        } else {
+          display.setColor(rift_pal.rule);
+          display.drawRect(bx, DISCOVER_BTN_Y, w[i], 14);
+        }
         display.setColor(sel ? rift_pal.on_accent : (busy ? rift_pal.accent : rift_pal.fg));
         display.drawTextCentered(bx + w[i] / 2, DISCOVER_BTN_Y + 3, labels[i]);
         _btn_x0[i] = bx;
@@ -2003,7 +2040,13 @@ private:
       riftTranslateUTF8(nm, ch.name, sizeof(nm));
 
       const char* sc = riftScopes().nameFor(_del_idx[i], riftChannelConv(_del_idx[i]).channel_fp);
-      snprintf(tmp, sizeof(tmp), "%-16s %s", nm, sc ? sc : "(node default)");
+      // Truncated to the column, because "%-16s" only pads - a 20-character channel
+      // name pushed the scope four cells right and the second column stopped being
+      // one. A name that does not fit loses its tail; a column that does not hold
+      // loses every row below it.
+      char col[17];
+      StrHelper::strncpy(col, nm, sizeof(col));
+      snprintf(tmp, sizeof(tmp), "%-16s %s", col, sc ? sc : "(node default)");
 
       if (i == _del_sel) {
         display.setColor(rift_pal.accent);
@@ -3250,7 +3293,6 @@ public:
 // Note there is no per-node RSSI here: adverts are cached without signal
 // strength, so brightness encodes recency (how long since we last heard the
 // node) rather than link quality.
-#define RIFT_HOP_ROWS 3
 #define RIFT_NODE_NAME_MAX 10
 
 // NODES (1c) - buckets, a scrollable list, and the route expanding the selected row.
@@ -3286,19 +3328,25 @@ class RiftConstellationScreen : public RiftScreen {
   unsigned long _last_refresh;
   bool _refreshed_once;
 
-  static const int BUCKET_X[4];
-  static const char* BUCKET_LABEL[4];
+  static const int BUCKET_X[RIFT_HOPB_COUNT];
+  static const char* BUCKET_LABEL[RIFT_HOPB_COUNT];
+  // 58, not the 64 four columns could afford: five on a 63px pitch leaves 5px of
+  // gap, and two bars that touch read as one bar.
+  static const int BUCKET_BAR_W = 58;
 
-  // Which bucket a hop count belongs in, or -1 for none. A node whose route is not
-  // known is in no bucket, so the four counts can sum to less than the heard total -
-  // that difference is real and the `?` rows in the list are where it lives.
+  // Which bucket a hop count belongs in. Five, including the one for a node whose
+  // route is not known.
+  //
+  // That fifth column is new. The band used to have four and put an unknown route
+  // in none of them, on the reasoning that the four counts summing to less than the
+  // heard total was itself the signal. It is not a signal anybody reads: the list
+  // below draws `?` for those rows, correctly, and the band above it was the one
+  // place on the screen that made a node with no route look like a node that was
+  // not there. Rule 5 says an unknown has to look like what it is, and the band was
+  // the exception nobody had noticed.
   static int bucketOf(uint8_t path_len) {
-    if (path_len == 0xFF) return -1;            // flood, route unknown
-    int h = (int) riftHopCount(path_len);
-    if (h == 0) return 0;
-    if (h <= 2) return 1;
-    if (h <= 5) return 2;
-    return 3;
+    if (path_len == RIFT_PATH_UNKNOWN) return RIFT_HOPB_UNKNOWN;
+    return riftHopBucket((int) riftHopCount(path_len));
   }
 
   // Relative, and four characters wide. "14:32" says nothing about how long ago that
@@ -3433,12 +3481,12 @@ class RiftConstellationScreen : public RiftScreen {
     display.setTextSize(1);
 
     char tmp[64];
-    int counts[4] = { 0, 0, 0, 0 };
+    int counts[RIFT_HOPB_COUNT];
+    for (int b = 0; b < RIFT_HOPB_COUNT; b++) counts[b] = 0;
     int maxhop = -1;
     for (int i = 0; i < _count; i++) {
-      int b = bucketOf(_paths[i].path_len);
-      if (b >= 0) counts[b]++;
-      if (_paths[i].path_len != 0xFF) {
+      counts[bucketOf(_paths[i].path_len)]++;
+      if (_paths[i].path_len != RIFT_PATH_UNKNOWN) {
         int h = (int) riftHopCount(_paths[i].path_len);
         if (h > maxhop) maxhop = h;
       }
@@ -3465,15 +3513,15 @@ class RiftConstellationScreen : public RiftScreen {
       display.drawTextRightAlign(318, 2, tmp);
     }
 
-    // ---- bucket band. The bars compare the four with each other, not against an
-    // absolute scale: on a mesh of six nodes an absolute scale draws four stubs.
+    // ---- bucket band. The bars compare the five with each other, not against an
+    // absolute scale: on a mesh of six nodes an absolute scale draws five stubs.
     int maxc = 0;
-    for (int b = 0; b < 4; b++) if (counts[b] > maxc) maxc = counts[b];
-    for (int b = 0; b < 4; b++) {
+    for (int b = 0; b < RIFT_HOPB_COUNT; b++) if (counts[b] > maxc) maxc = counts[b];
+    for (int b = 0; b < RIFT_HOPB_COUNT; b++) {
       display.setColor(rift_pal.mid);
       display.drawTextLeftAlign(BUCKET_X[b], 14, BUCKET_LABEL[b]);
       if (counts[b] > 0 && maxc > 0) {
-        int w = (counts[b] * 64 + maxc / 2) / maxc;
+        int w = (counts[b] * BUCKET_BAR_W + maxc / 2) / maxc;
         if (w < 2) w = 2;
         display.setColor(rift_pal.fg);
         display.fillRect(BUCKET_X[b], 26, w, 6);
@@ -3693,8 +3741,10 @@ class RiftConstellationScreen : public RiftScreen {
   }
 };
 
-const int RiftConstellationScreen::BUCKET_X[4] = { 2, 81, 160, 239 };
-const char* RiftConstellationScreen::BUCKET_LABEL[4] = { "DIRECT", "1-2", "3-5", "6+" };
+const int RiftConstellationScreen::BUCKET_X[RIFT_HOPB_COUNT] =
+  { 2, 65, 128, 191, 254 };
+const char* RiftConstellationScreen::BUCKET_LABEL[RIFT_HOPB_COUNT] =
+  { "DIRECT", "1-2", "3-5", "6+", "NO ROUTE" };
 
 // Placeholder nav screen - visual only, real functionality lands in a later milestone.
 class RiftPlaceholderScreen : public RiftScreen {
@@ -5867,8 +5917,12 @@ public:
       char filtered[sizeof(p->msg)];
       riftTranslateUTF8(filtered, p->msg, sizeof(filtered));
 
+      // Skipping the hop marker, for the same reason as above: on a direct message
+      // there is no sender prefix to reparse, so the "(5) " sat in the stored
+      // origin string and reached the row unchanged.
       char filtered_origin[sizeof(p->origin)];
-      riftTranslateUTF8(filtered_origin, p->origin, sizeof(filtered_origin));
+      riftTranslateUTF8(filtered_origin, riftOriginSkipHops(p->origin),
+                        sizeof(filtered_origin));
       int hh = (p->timestamp / 3600) % 24;
       int mm = (p->timestamp / 60) % 60;
 
@@ -5913,7 +5967,7 @@ public:
       char tbuf[8];
       sprintf(tbuf, "%02d:%02d", hh, mm);
       display.setColor(rift_pal.dim);
-      display.drawTextLeftAlign(6, y, tbuf);
+      display.drawTextLeftAlign(4, y, tbuf);
       // The channel name is drawn in the channel's colour, so the row and the tab
       // above it carry the same identity. This started as a 4x6 block beside the
       // name, on the argument that the row already had three roles and a fourth
@@ -5937,16 +5991,13 @@ public:
       const char* shown_name;
       char decorated[80];
       if (have_sender) {
-        // Keep the hop count the header carried, so a channel row still says how
-        // far the message travelled.
-        int hops = 0; bool direct = false;
-        if (!riftOriginHops(p->origin, &hops, &direct)) {
-          snprintf(decorated, sizeof(decorated), "%s:", sender);
-        } else if (direct) {
-          snprintf(decorated, sizeof(decorated), "(D) %s:", sender);
-        } else {
-          snprintf(decorated, sizeof(decorated), "(%d) %s:", hops, sender);
-        }
+        // The name alone. The hop count used to be rebuilt in front of it here, to
+        // keep what the channel header had carried - but the right-hand slot below
+        // already prints "5 hops" in words, so the row said it twice, and the copy
+        // in front of the name landed two pixels from the clock. "19:38" and "(5)"
+        // with two pixels between them read as one token, which is precisely the
+        // misreading that moved the count to the right in the first place.
+        snprintf(decorated, sizeof(decorated), "%s:", sender);
         shown_name = decorated;
         name_col = riftNameColour(sender);
       } else {
@@ -5958,7 +6009,7 @@ public:
         }
       }
       display.setColor(name_col != RIFT_CHAN_COL_NONE ? name_col : rift_pal.mid);
-      display.drawTextEllipsized(38, y, 232, shown_name);
+      display.drawTextEllipsized(40, y, 230, shown_name);
 
       // The right end of this row answers "what happened to this packet", and the
       // hop count is the same kind of answer as the delivery state - so it goes
@@ -6603,13 +6654,13 @@ public:
         bool sel = (i == _menu_sel);
         if (sel) {
           display.setColor(rift_pal.accent);
-          display.fillRect(lx - 2, ly - 1, w - 6, 11);
+          display.fillRect(lx - 2, ly - 1, w - 6, 12);
           display.setColor(rift_pal.on_accent);
         } else {
           display.setColor(UIColor::primary_txt);
         }
         display.drawTextLeftAlign(lx + 2, ly + 1, RIFT_REP_CMDS[i].label);
-        ly += 11;
+        ly += 12;
       }
       const int mfy = y + h - 24;
       display.setColor(rift_pal.dim);
@@ -6651,7 +6702,7 @@ public:
       display.setColor(UIColor::primary_txt);
       snprintf(line, sizeof(line), "up %-8s  air %-8s", up, air);
       display.drawTextLeftAlign(lx, ly, line);
-      ly += 11;
+      ly += 12;
 
       if (duty >= 0) {
         snprintf(line, sizeof(line), "duty %d.%d%%   queue %u",
@@ -6660,14 +6711,14 @@ public:
         snprintf(line, sizeof(line), "duty -       queue %u", (unsigned) st.tx_queue_len);
       }
       display.drawTextLeftAlign(lx, ly, line);
-      ly += 11;
+      ly += 12;
 
       snprintf(line, sizeof(line), "batt %u.%02uV  noise %d",
                (unsigned) (st.batt_milli_volts / 1000),
                (unsigned) ((st.batt_milli_volts % 1000) / 10),
                (int) st.noise_floor);
       display.drawTextLeftAlign(lx, ly, line);
-      ly += 11;
+      ly += 12;
 
       // SNR arrives multiplied by four. Printed as one decimal rather than
       // divided into an int, which would report -6.5 dB as -6. The sign is
@@ -6678,13 +6729,13 @@ public:
       snprintf(line, sizeof(line), "rssi %d      snr %s%d.%d",
                (int) st.last_rssi, snr10 < 0 ? "-" : "", snr_abs / 10, snr_abs % 10);
       display.drawTextLeftAlign(lx, ly, line);
-      ly += 11;
+      ly += 12;
 
       snprintf(line, sizeof(line), "rx %u  tx %u  err %u",
                (unsigned) st.packets_recv, (unsigned) st.packets_sent,
                (unsigned) st.err_events);
       display.drawTextLeftAlign(lx, ly, line);
-      ly += 11;
+      ly += 12;
 
       // A dash where an older repeater sent nothing, never a zero we invented.
       if (st.have_dups) {
@@ -6695,7 +6746,7 @@ public:
       }
       display.setColor(st.have_dups ? UIColor::primary_txt : rift_pal.dim);
       display.drawTextLeftAlign(lx, ly, line);
-      ly += 11;
+      ly += 12;
 
       char age[12];
       riftFormatDuration((millis() - s.statsAt()) / 1000, age, sizeof(age));
@@ -6731,6 +6782,15 @@ public:
     }
 
     // ---- CLI transcript, newest first ----
+    //
+    // 10px, and the one pitch in this firmware that is deliberately not 12. The
+    // rule is about rows that get read at arm's length, and the stats and the
+    // command menu above are exactly that - they moved to 12 when it turned out
+    // this panel had quietly been running the whole body at 11, which is 3px of
+    // air against a rule that names 4 as the floor. This block is different: it is
+    // raw command output, scrollback rather than layout, and how much of it fits
+    // is the only thing it is for. The loop below is bounded by the footer, so the
+    // 6px the rows above gained comes out of here - one line in the fullest case.
     if (s.cliCount() > 0) {
       display.setColor(rift_pal.rule);
       display.fillRect(lx, ly, w - 10, 1);
