@@ -3334,6 +3334,49 @@ class RiftConstellationScreen : public RiftScreen {
   // gap, and two bars that touch read as one bar.
   static const int BUCKET_BAR_W = 58;
 
+  // ---- the reach scale
+  //
+  // The row spent 23 character cells - x 134 to 271, on every row, in the middle
+  // where the eye already is - on nothing, and answered "how far away" with a
+  // single right-aligned digit in the last 46 pixels. On a screen whose one
+  // question is distance. The list was never the wrong form; it was a form that
+  // had been given no room to answer, next to a large amount of room nobody had
+  // claimed.
+  //
+  // Ten cells, filled up to the node's hop count and hollow beyond, so distance
+  // is a length you compare down the column without reading a digit. This is
+  // RADAR's filled-versus-hollow cell, which is the encoding already proven on
+  // this panel - used here as a scale per row rather than as a heap, because these
+  // items have names that have to stay readable and a per-row scale leaves the
+  // name column untouched.
+  //
+  // Absolute, matching the rule the bucket band above already follows: cell 1 is
+  // always direct, so a mark means the same thing between refreshes. Filled count
+  // is hops + 1, which is what makes a known route always draw at least one cell -
+  // a zero-length bar for a node heard directly would have looked exactly like no
+  // bar at all, which is the state reserved for a route nobody knows. Ten cells
+  // saturate at nine hops or more and the exact count stays in the HOPS column,
+  // because past nine the digit is the only thing that can still say the
+  // difference and the length has stopped being comparable anyway.
+  //
+  // An unknown route draws all ten hollow and keeps its `?`. Nine hollow cells
+  // cannot be misread as near, which a short bar could be.
+  static const int REACH_X = 140;      // first cell
+  static const int REACH_PITCH = 12;   // 6 of cell, 6 of gap - a count, not a bar
+  static const int REACH_CELLS = 10;
+  static const int REACH_W = 6;
+  static const int REACH_H = 7;
+
+  // hops < 0 means no route known: every cell hollow.
+  void renderReach(DisplayDriver& display, int y, int hops, uint16_t ink) {
+    for (int c = 0; c < REACH_CELLS; c++) {
+      int cx = REACH_X + c * REACH_PITCH;
+      display.setColor(ink);
+      if (hops >= 0 && c <= hops) display.fillRect(cx, y, REACH_W, REACH_H);
+      else                        display.drawRect(cx, y, REACH_W, REACH_H);
+    }
+  }
+
   // Which bucket a hop count belongs in. Five, including the one for a node whose
   // route is not known.
   //
@@ -3536,6 +3579,7 @@ class RiftConstellationScreen : public RiftScreen {
 
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(14, 56, "NODE");
+    display.drawTextLeftAlign(REACH_X, 56, "REACH");
     display.drawTextRightAlign(278, 56, "HOPS");
     display.drawTextRightAlign(318, 56, "HEARD");
 
@@ -3583,6 +3627,11 @@ class RiftConstellationScreen : public RiftScreen {
       riftTranslateUTF8(shown_name, p->name, sizeof(shown_name));
       display.setColor(ink);
       display.drawTextEllipsized(14, y + 2, 120, shown_name);
+
+      // Saturating at the last cell rather than clamping the printed value: the
+      // digit still says 21 where the bar has run out of room to.
+      int reach = known ? (hops > REACH_CELLS - 1 ? REACH_CELLS - 1 : hops) : -1;
+      renderReach(display, y + 2, reach, sel ? rift_pal.on_accent : rift_pal.fg);
 
       if (known) {
         snprintf(tmp, sizeof(tmp), "%d", hops);
