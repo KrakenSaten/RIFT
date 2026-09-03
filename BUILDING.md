@@ -145,6 +145,29 @@ before reaching for either - they look nothing alike.
 transfer-length problem above. The retry usually clears it; a smaller `--chunk-kb`
 if it does not.
 
+**Black screen and dead touch after a flash that reported success?** Fixed, but
+worth knowing the shape of it. esptool resets the chip into the ROM download
+loader to work and hard-resets out of it when it finishes — *when it finishes*. An
+invocation that fails never reaches its reset, and the last thing the tool did was
+`erase_region` on otadata, which fails under `--no-stub`. So a flash that verified
+perfectly left the chip parked in the loader: screen black, touch dead, USB still
+enumerated, nothing in the output saying so. It looks exactly like a firmware that
+will not boot.
+
+Power-cycling fixes it, which is why it took two rounds to notice. The tool now
+ends with `run` in a `finally`, so it happens after a failed write and a failed
+verify too.
+
+To tell the two apart: talk to the chip *without* a reset.
+
+```bash
+.venv/Scripts/python.exe $PLATFORMIO_CORE_DIR/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port COM5 --before no_reset chip_id
+```
+
+If it answers, the chip is in the loader and the image is probably fine — only a
+chip already sitting there responds with no reset handshake. If it cannot connect,
+something is running and the black screen is the firmware's problem.
+
 *At the stub, on the very first chunk, every retry*: esptool connects, prints the
 chip revision and MAC, uploads and runs the stub, and then says
 `Unable to verify flash chip connection (No serial data received)`. The reset

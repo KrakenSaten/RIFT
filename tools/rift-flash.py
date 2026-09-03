@@ -237,6 +237,13 @@ def main():
     # moves: it was fine at 400 KB, then at 200 KB, and today 188 KB failed and 64
     # KB worked on the same board. Anything a human has to remember to pass here
     # is something that will be forgotten on the day the device is half-written.
+    try:
+        flash_and_settle(base, args, paths)
+    finally:
+        boot_app(base)
+
+
+def flash_and_settle(base, args, paths):
     kb = args.chunk_kb
     while True:
         if write_all(base, paths):
@@ -274,6 +281,26 @@ def main():
 
     if not args.keep_otadata:
         settle_boot_slot(base, os.path.dirname(args.firmware) or ".")
+
+
+# However this run ends, leave the device running its image rather than parked in
+# the ROM download loader.
+#
+# esptool resets the chip into the loader to work and hard-resets out of it when it
+# finishes - but only when it finishes. Any invocation that fails never reaches its
+# reset, and the last thing this tool did was erase_region on otadata, which fails
+# under --no-stub. So a flash that verified perfectly ended with the chip in the
+# loader: screen black, touch dead, USB still enumerated, and nothing in the output
+# saying so. It looked exactly like a firmware that would not boot, twice, and the
+# second time it was diagnosed by talking to the chip with --before no_reset and
+# having it answer - which only a chip already sitting in the loader does.
+#
+# In a finally, so it also runs after a failed write or a failed verify. A device
+# that will not take an image should still be a device you can switch on.
+def boot_app(base):
+    print("starting the app")
+    if subprocess.call(base + ["run"]) != 0:
+        print("  could not start it - power-cycle the device, which does the same job")
 
 
 # The partition table has two app slots - app0 at 0x10000 and app1 at 0x650000 -
