@@ -14,7 +14,9 @@ contributors.
 
 RIFT turns the T-Deck into a standalone mesh terminal: read and write MeshCore
 messages using the physical keyboard, with no phone or companion app involved,
-plus passive Wi-Fi/BLE situational awareness and a view of the mesh topology.
+plus passive Wi-Fi/BLE situational awareness, a view of the mesh topology, and
+enough repeater administration to log in, read a repeater's stats and telemetry
+and run a command on it from the device itself.
 
 **Free, and it will never cost anything.** No licence fee, no paid tier, no
 unlocked features, now or later. That is not only an intention: RIFT is MIT
@@ -37,7 +39,7 @@ on-device UI with one built around the keyboard the T-Deck already has, so no
 second device is needed.
 
 <p align="center">
-<img src="logo/bootscreen.png" alt="RIFT boot screen: the RIFT wordmark, RADIO INTELLIGENCE / FIELD TERMINAL, and a progress bar reading Formatting SPIFFS — 1-2 min, not a hang" width="520">
+<img src="logo/bootscreen.png" alt="RIFT boot screen: the RIFT wordmark, RADIO INTELLIGENCE / &amp; FIELD TERMINAL, and a progress bar reading Formatting SPIFFS — 1-2 min, not a hang" width="520">
 </p>
 <p align="center">
 <sub>The boot screen. The status line appears only when SPIFFS actually needs
@@ -55,7 +57,8 @@ GitHub renders an outline for this page; the other documents are:
 | [`BUILDING.md`](BUILDING.md) | Toolchain, environment traps, commands, CI |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | How it fits together, and why each awkward part is that way |
 | [`HANDOFF.md`](HANDOFF.md) | What the code does not say: measurements, protocol facts, open items |
-| [`design/DESIGN-HANDOFF.md`](design/DESIGN-HANDOFF.md) | Design reference — measured palette, the RGB565 constraint, the NODES problem |
+| [`design/DESIGN-REVIEW-2026-09.md`](design/DESIGN-REVIEW-2026-09.md) | Current design reference — measured palette, the RGB565 constraint, what is still open |
+| [`design/DESIGN-HANDOFF.md`](design/DESIGN-HANDOFF.md) | The original handoff it grew out of |
 
 ---
 
@@ -177,8 +180,11 @@ Five screens, reached from a nav bar along the bottom. The first is labelled
 
 
 Night and day are the same geometry with a swapped colour table, toggled from
-SYSTEM. The accent keeps its value in both, but on white it becomes a fill with the
-text reversed out of it rather than text in its own right.
+SYSTEM. The accent keeps its value in both, but on white it may only be a fill and
+never text — 3.5:1 either way round, which is why the ink inside an accent fill is
+a fixed dark value in both modes rather than white. Reversing white out of the
+accent measures exactly as badly as accent text on white; that was a real bug on
+thirteen surfaces until 0.9.2.
 
 
 **Trackball click is Enter** — it selects, activates and sends, the same as the
@@ -188,11 +194,11 @@ left/right**, **double-click** (previous screen), or **tapping a nav-bar tab**.
 
 | Screen | What it shows | Screen-specific controls |
 |---|---|---|
-| **RIFT** | Whether the mesh is alive: `ACTIVE` / `IDLE` / `QUIET` / `NO SIGNAL` set large, with how long ago the radio last decoded anything and how many packets it has heard. Plus node count, link RSSI/SNR, radio config, and the USB/BLE companion link, labelled for what it actually measures | — |
-| **NODES** | Who you can reach and how far away, as four hop columns. Filled marker = heard in the last 30 minutes, hollow = older. The selected node's route is drawn through the repeaters it actually travelled | trackball up/down selects a node, or tap one; **Enter** starts a DM to it |
+| **RIFT** | Whether the mesh is alive: `ACTIVE` / `IDLE` / `QUIET` / `NO SIGNAL` set large, with how long ago the radio last decoded anything and how many packets it has heard. Plus node count, link RSSI/SNR, radio config, and the USB/BLE companion link, labelled for what it actually measures. A tropo opening replaces the radio line while one is running | three buttons — `DISCOVER 0-HOP`, `ADVERT NEAR`, `ADVERT MESH` — with a line explaining the selected one. Trackball left/right chooses, **Enter** runs it |
+| **NODES** | Who you can reach and how far away. Each row carries a ten-cell reach scale, filled up to the node's hop count and hollow beyond, so distance is a length compared down the column rather than a digit read per row; the exact count stays in the `HOPS` column and a route nobody knows draws ten hollow cells. Above the list, five bands — `DIRECT` `1-2` `3-5` `6+` `NO ROUTE`. Filled freshness marker = heard in the last 30 minutes, hollow = older. The selected node's route is drawn through the repeaters it actually travelled | trackball up/down or drag selects a node, or tap one; **Enter** opens what that node can do — a DM for a chat node or room, the control panel for a repeater, a reading for a sensor |
 | **RADAR** | Passive Wi-Fi + BLE. Device count, how many are new in the last 60s, three signal-strength bands with one cell per device, and the strongest-first list | **Enter** toggles the waterfall; up/down scrolls the list |
-| **COMMS** | MeshCore text terminal — channel strip, message history, compose line with a character count | **tap a channel** to switch to it; **Enter** sends, or opens the target picker when the line is empty; **backspace** deletes; up/down scrolls history |
-| **SYSTEM** | Actions left of the divider, read-only diagnostics right of it: node name, keyboard, last key, I²C bus, touch, GPS, free heap, external power, last reset, boot timings | up/down or tap selects; **Enter** activates. Actions: send advert (two kinds), edit node name, add channel, path hash size, day/night |
+| **COMMS** | MeshCore text terminal — channel strip, message history, compose line with a character count. Each row is a time, the sender's name in a colour derived from that name, and either the delivery state or the hop count. Own messages carry a 2px accent bar rather than being right-aligned, which on 320px costs two pixels instead of half the width of every line | **tap a channel** to switch to it; **Enter** sends, or opens the conversation list when the line is empty; **backspace** deletes; up/down or drag scrolls history by pixel. Each row of the list carries an unread mark, the channel's colour chip or the sender's colour, `ROOM` where it is a room server, and how long ago it last spoke |
+| **SYSTEM** | Actions left of the divider, read-only diagnostics right of it: node name, keyboard, last key, I²C bus, touch, GPS, free heap, external power, last reset, boot timings, tropo baseline | up/down, drag or tap selects; **Enter** activates. Actions: edit node name, add or remove a channel, set a channel's flood scope, path hash size, day/night. The two adverts moved to the home screen in 0.9.0, where the list they affect is the screen next door |
 
 **An incoming message raises a panel** over whatever you are doing, listing the six
 newest with sender and time. **Enter** opens COMMS for the full history;
@@ -300,10 +306,13 @@ and ASCII emoticons for the unambiguous faces. Everything else stays a block on
 purpose: CP437 has no emoji, and putting a smile where someone sent a sobbing face
 would be worse than admitting the glyph is missing.
 
-**The COMMS target picker holds 48 entries.** Configured channels are listed first
-so they are never crowded out, then contacts most-recently-heard first. If contacts
-had to be cut the picker says so rather than hiding them silently — but a node that
-has heard from more than ~40 chat contacts cannot reach all of them from that list.
+**The COMMS conversation list holds 96 entries.** Configured channels are listed
+first so they are never crowded out, then every conversation that actually has
+history, then the remaining contacts most-recently-heard first. That order matters:
+being heard recently is not the same as being someone you are talking to, and
+sorting only by the former once pushed an active conversation off the end of the
+list entirely. If contacts have to be cut the list says so rather than hiding them
+silently — and what is missing is only people you have never written to.
 
 **RADAR data is cleared when you leave the screen.** Stale channel occupancy
 presented as current would be actively misleading.
@@ -336,7 +345,7 @@ Boot is now 5.1 seconds. Why the probe does that is still not established — se
 
 ## Status
 
-**Current release: 0.8.1** — set by the `RIFT_VERSION` build flag and shown on the
+**Current release: 0.9.2** — set by the `RIFT_VERSION` build flag and shown on the
 boot screen and SYSTEM, alongside the MeshCore version it is built on. Deliberately
 0.x: it works and is verified on hardware, but it has had no external users and the
 limitations above are real.
@@ -346,13 +355,39 @@ over the companion protocol next to `FIRMWARE_VER_CODE`.
 
 Every screen from the original design concept is implemented and verified on
 physical hardware. Resource use: ~57 % of internal static RAM, ~25 % of the 6.5 MB
-app partition. 174 native tests across eight suites.
+app partition. 256 native tests across eight suites.
 
 Worth knowing where that RAM goes: MeshCore's contact table is `MAX_CONTACTS` 350
 plus 8 anonymous slots at 184 bytes each — 65.7 KB, or a fifth of the chip's 320 KB,
 statically allocated whether it holds one contact or all of them. It is the single
 largest
 item in the firmware.
+
+**0.9.2** acts on a design review. The central finding was a rule that forbade
+nothing: "on white the accent may only be a fill with white reversed out of it"
+describes the same pair of colours in the other order, and contrast is symmetric —
+so thirteen surfaces drew the selected row as the least readable row on the screen.
+Also a reach scale on NODES in the 23 character cells each row was spending on
+nothing, all five held-back conversation-list improvements, a nav marker that had
+never sat under its own label, and a hop count COMMS was drawing twice per row. No
+colour value changed: the palette was re-derived, the tables were wrong in four
+ways, and `tools/palette-check.py` now generates them.
+
+**0.9.1** rebuilds the alert audio after four faults that hid each other — the last
+being that this board has no amplifier enable pin, so stopping the I²S clock sleeps
+the amp — colours COMMS by sender rather than by channel, and makes the touchscreen
+scroll every list.
+
+**0.9.0** adds repeater control: log in, read the stats, ask for telemetry, run a
+command from a menu rather than typing it on this keyboard. Plus a flood scope per
+channel, a regions request so scopes can be discovered rather than guessed, and a
+tropo detector that notices when a run of unusually deep paths says the mesh has
+stretched.
+
+**0.8.2** hardens the companion parser against six handlers that acted on bytes the
+host may not have sent, and makes `rift-flash` compare the whole image against
+flash before claiming success — because per-chunk hashes had reported success on a
+flash the device was not running.
 
 **0.8.1** closes all ten findings from an external code review, adds transmit rows
 and a duty-cycle budget to the air log, and fixes a release pipeline that stamped the
