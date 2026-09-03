@@ -47,7 +47,14 @@ def find(pattern, what):
 
 
 def esptool_cmd():
-    core = os.environ.get("PLATFORMIO_CORE_DIR", os.path.expanduser("~/.platformio"))
+    # Falling back to ~/.platformio is the documented default, but on this machine
+    # the home path is not ASCII and the toolchain needs one that is - see
+    # BUILDING.md - so the fallback silently finds a different esptool than every
+    # build in this project uses. Worth one line saying which one was picked.
+    core = os.environ.get("PLATFORMIO_CORE_DIR")
+    if core is None:
+        core = os.path.expanduser("~/.platformio")
+        print("PLATFORMIO_CORE_DIR is unset; using %s" % core)
     tool = find(os.path.join(core, "packages", "tool-esptoolpy*", "esptool.py"), "esptool")
     return [sys.executable, tool]
 
@@ -180,14 +187,30 @@ def main():
     # Fail before writing anything if the board is not there.
     # Without this the first chunk burns four attempts and twelve seconds on a
     # port that does not exist, and reports a partly-written image.
+    #
+    # A missing pySerial used to fall through to esptool, on the reasoning that
+    # esptool would report it. It does report it - once per attempt, as a six-frame
+    # traceback, twelve times, above a summary that says "write failed and no chunk
+    # was written by this run". Which reads as a board that will not take an image.
+    # An hour went into a device that was working.
+    #
+    # esptool imports pySerial from THIS interpreter, so the check belongs here and
+    # the answer is never to retry: no chunk size fixes a missing module. Say which
+    # interpreter is short of it, because the usual cause is running this with a
+    # bare `python` that is not the project venv.
     try:
         from serial.tools import list_ports
-        ports = [p.device for p in list_ports.comports()]
-        if ports and args.port not in ports:
-            sys.exit("%s is not connected - available: %s"
-                     % (args.port, ", ".join(ports)))
     except ImportError:
-        pass  # no pySerial: let esptool report it instead
+        sys.exit("pySerial is not installed for %s, and esptool needs it from "
+                 "this same interpreter.\nRun this with the project venv:\n"
+                 "  PLATFORMIO_CORE_DIR=C:/dev/.platformio "
+                 ".venv/Scripts/python.exe tools/rift-flash.py --port %s"
+                 % (sys.executable, args.port))
+
+    ports = [p.device for p in list_ports.comports()]
+    if ports and args.port not in ports:
+        sys.exit("%s is not connected - available: %s"
+                 % (args.port, ", ".join(ports)))
 
     # --before default_reset on both halves: leaving the first in the bootloader
     # and reconnecting with --before no_reset was tried, and the reconnect timed

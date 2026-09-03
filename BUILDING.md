@@ -83,10 +83,18 @@ listed?** Something is holding it. Usually a `pio device monitor`, or the browse
 tab with the web flasher — WebSerial keeps the port until the tab closes.
 
 **Upload dies partway through, with the USB device dropping off the bus?** Use the
-tool, not `pio run -t upload`:
+tool, not `pio run -t upload`.
+
+The venv interpreter is not optional here, and neither is exporting
+`PLATFORMIO_CORE_DIR` from step 2: esptool imports pySerial from whichever
+interpreter runs the tool, and the core dir decides *which* esptool is found. A
+bare `python` on a machine with more than one costs an hour, because the failure
+arrives as twelve tracebacks above a summary that says no chunk was written -
+which reads as a board that will not take an image. The tool now refuses that case
+up front instead of retrying it at three chunk sizes.
 
 ```bash
-python tools/rift-flash.py --port COM5
+.venv/Scripts/python.exe tools/rift-flash.py --port COM5
 ```
 
 `pio run -t upload` cannot write the whole app partition in one operation on this
@@ -143,7 +151,7 @@ chip revision and MAC, uploads and runs the stub, and then says
 handshake is fine and the stub is what goes quiet. Pass `--no-stub`:
 
 ```bash
-python tools/rift-flash.py --port COM5 --no-stub
+.venv/Scripts/python.exe tools/rift-flash.py --port COM5 --no-stub
 ```
 
 That drives the ROM bootloader directly. Slower, which is why it is not the default.
@@ -152,7 +160,7 @@ Isolate it with one command rather than guessing, since it says whether the devi
 can be talked to at all:
 
 ```bash
-python $PLATFORMIO_CORE_DIR/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port COM5 chip_id
+.venv/Scripts/python.exe $PLATFORMIO_CORE_DIR/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port COM5 chip_id
 ```
 
 If that reports the MAC and then fails, it is the stub. If it never connects,
