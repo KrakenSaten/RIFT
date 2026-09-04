@@ -21,3 +21,10 @@ platformio.local.ini
 # Python bytecode from tools/
 __pycache__/
 *.py[cod]
+
+# Binaries staged for upload somewhere else. Built with
+#   pio run -e LilyGo_TDeck_rift -t mergebin
+# which is a manual target, not a post-build step - the release workflow calls it,
+# a local build does not. Nothing here belongs in the repo: the canonical copy of
+# each release is the GitHub Pages flasher's rift-merged.bin.
+dist/
