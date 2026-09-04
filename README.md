@@ -72,7 +72,10 @@ it uses [ESP Web Tools](https://esphome.github.io/esp-web-tools/) over WebSerial
 which Firefox and Safari do not implement.
 
 The page is built and published by `rift-release.yml` on every `v*` tag, from the
-same binary attached to the release, so it cannot drift out of step.
+same binary attached to the release, so it cannot drift out of step. A manual run
+of that workflow publishes an unreleased `dev-<sha>` build under
+[`/RIFT/dev/`](https://krakensaten.github.io/RIFT/dev/) instead, and never
+touches the root.
 
 ### Or by hand
 

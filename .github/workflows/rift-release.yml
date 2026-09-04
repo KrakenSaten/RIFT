@@ -201,12 +201,35 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: out/*
 
-      # deliberately not gated on tags: a manual run publishes a dev-<sha> build
-      # so the flasher can be tested on real hardware before a release is minted.
-      # The page reads its version from the manifest, so it always says which.
+      # A tag build is the release: it replaces the page root, which is what the
+      # README link points at.
+      #
+      # keep_files, because the dev/ directory below lives on the same branch and
+      # a root deploy must not delete it. The three files at the root have fixed
+      # names, so nothing stale accumulates there.
       - name: Deploy flasher to GitHub Pages
+        if: github.ref_type == 'tag'
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./site
           publish_branch: gh-pages
+          keep_files: true
+
+      # A manual run publishes a dev-<sha> build so the flasher can be tested on
+      # real hardware before a release is minted - under dev/, not at the root.
+      # This step used to be one unconditional deploy, and peaceiris replaces the
+      # branch contents, so one click on "Run workflow" from any branch replaced
+      # the released binary at krakensaten.github.io/RIFT with a dev build and the
+      # only tell was the version string on the page. The first three gh-pages
+      # deploys were exactly that. The page reads its version from the manifest,
+      # so the dev copy still says which build it is.
+      - name: Deploy a dev flasher under dev/
+        if: github.ref_type != 'tag'
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          destination_dir: dev
+          keep_files: true

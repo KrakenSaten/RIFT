@@ -21,6 +21,15 @@ on:
       - 'flasher/**'
       - '.github/workflows/rift-build-check.yml'
       - '.github/workflows/rift-release.yml'
+      # The test job is the point of this workflow, and a commit that touched only
+      # a test file ran nothing. The rest are inputs to the build that sat outside
+      # the filter: the composite action both workflows use, the build script and
+      # its merge step, and the board definition the T-Deck environments name.
+      - 'test/**'
+      - '.github/actions/**'
+      - 'build.sh'
+      - 'merge-bin.py'
+      - 'boards/**'
   pull_request:
     # feature work happens on rift-* branches and was getting no CI at all
     branches: [rift-tdeck, 'rift-*']
@@ -36,6 +45,15 @@ on:
       - 'flasher/**'
       - '.github/workflows/rift-build-check.yml'
       - '.github/workflows/rift-release.yml'
+      # The test job is the point of this workflow, and a commit that touched only
+      # a test file ran nothing. The rest are inputs to the build that sat outside
+      # the filter: the composite action both workflows use, the build script and
+      # its merge step, and the board definition the T-Deck environments name.
+      - 'test/**'
+      - '.github/actions/**'
+      - 'build.sh'
+      - 'merge-bin.py'
+      - 'boards/**'
   workflow_dispatch:
 
 # nothing here writes to the repository
