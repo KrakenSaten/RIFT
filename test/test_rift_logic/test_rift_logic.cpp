@@ -898,6 +898,56 @@ TEST(PacketNames, PathLenIndexIgnoresThePayloadTypeBits) {
     EXPECT_EQ(1, riftRawPathLenIndex(0xFD));   // every other bit set, route 0x01
 }
 
+TEST(TranslateUTF8, ALineBreakIsAWordBoundaryNotNothing) {
+    char out[32];
+    riftTranslateUTF8(out, "line1\nline2", sizeof(out));
+    EXPECT_STREQ("line1 line2", out);
+    riftTranslateUTF8(out, "a\tb", sizeof(out));
+    EXPECT_STREQ("a b", out);
+}
+
+TEST(TranslateUTF8, ARunOfBreaksIsOneSpaceAndNeverDoublesAnExistingOne) {
+    char out[32];
+    riftTranslateUTF8(out, "a\r\nb", sizeof(out));
+    EXPECT_STREQ("a b", out);
+    riftTranslateUTF8(out, "a\n\n\nb", sizeof(out));
+    EXPECT_STREQ("a b", out);
+    riftTranslateUTF8(out, "a \nb", sizeof(out));
+    EXPECT_STREQ("a b", out);
+    // leading breaks emit nothing: a space at column 0 is not a boundary
+    riftTranslateUTF8(out, "\n\nx", sizeof(out));
+    EXPECT_STREQ("x", out);
+}
+
+TEST(TranslateUTF8, OtherControlsStillVanish) {
+    char out[32];
+    riftTranslateUTF8(out, "a\x07" "b\x1f" "c\x7f" "d", sizeof(out));
+    EXPECT_STREQ("abcd", out);
+}
+
+// The sender has to be split off the raw UTF-8 text, before translation. The
+// translator emits 0x01/0x02 for ø/Ø and 0x03..0x1B for mapped emoji, and the
+// split refuses any byte below 32 in a name - so "Bjørn: hei" split after
+// translation found no sender at all: no colour, no name lift, and the contact
+// lookup compared a CP437 string against UTF-8 names it could never equal.
+TEST(ChannelSender, ANordicNameSplitsOnTheRawText) {
+    static const unsigned char raw[] = { 'B','j',0xC3,0xB8,'r','n',':',' ','h','e','i',0 };
+    char out[RIFT_SENDER_MAX];
+    EXPECT_EQ(8, riftChannelSender((const char*) raw, out, sizeof(out)));
+    EXPECT_EQ(0, memcmp(out, raw, 6));
+    EXPECT_EQ(0, out[6]);
+}
+
+TEST(ChannelSender, TheSameNameTranslatedFirstDoesNotSplit) {
+    // what the old order produced, kept so the reason for the order survives
+    char shown[32];
+    static const unsigned char raw[] = { 'B','j',0xC3,0xB8,'r','n',':',' ','h','e','i',0 };
+    riftTranslateUTF8(shown, (const char*) raw, sizeof(shown));
+    EXPECT_EQ(0x01, (unsigned char) shown[2]);   // the ø placeholder
+    char out[RIFT_SENDER_MAX];
+    EXPECT_EQ(0, riftChannelSender(shown, out, sizeof(out)));
+}
+
 TEST(ReversePath, OneByteHashesComeBackInReverseOrder) {
     // out_path A,B,C means A is the first repeater from here. From the far end the
     // way back is C,B,A. path_len 3 with hash-size bits 00 is one-byte hashes.

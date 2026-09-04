@@ -6108,15 +6108,17 @@ public:
       auto q = msg_log.peek(back);
       if (q == NULL) break;
       if (!inCurrentConv(q)) continue;
-      char m[sizeof(q->msg)];
-      riftTranslateUTF8(m, q->msg, sizeof(m));
       // Measured on the body the render will actually lay out, prefix removed.
       // Measuring the whole string and drawing less made the scroll stop short.
-      const char* mb = m;
+      // Split on the raw text and translate what is left, the same order as the
+      // render - see there for why the order matters.
+      const char* raw_body = q->msg;
       if (!q->outgoing && q->conv.kind == RIFT_CONV_CHANNEL) {
-        mb += senderSplit(m, NULL, 0);
+        raw_body += senderSplit(q->msg, NULL, 0);
       }
-      total_h += (wrapText(mb, avail_px, 0, NULL, 0) + 1) * RIFT_LINE_H;
+      char m[sizeof(q->msg)];
+      riftTranslateUTF8(m, raw_body, sizeof(m));
+      total_h += (wrapText(m, avail_px, 0, NULL, 0) + 1) * RIFT_LINE_H;
     }
     const int view_h = BODY_BOTTOM - _hist_top;
     const int max_scroll = total_h > view_h ? total_h - view_h : 0;
@@ -6132,8 +6134,31 @@ public:
       if (p == NULL) break;
       if (!inCurrentConv(p)) continue;   // a different conversation, not this one
 
+      // The sender is split off the RAW text, before translation. The translator
+      // emits 0x01/0x02 for ø/Ø and 0x03..0x1B for mapped emoji, and the split
+      // refuses any byte below 32 in a name, so "Bjørn: hei" split after
+      // translation found no sender at all - no colour, no name lift, the prefix
+      // left on the body - and the contact lookup inside senderSplit compared a
+      // CP437 string against UTF-8 contact names it could never equal.
+      //
+      // Channels only. A direct message carries no such prefix, so applying the
+      // split there would take the first word off "hei: noe" and call it a name.
+      // Only for incoming: an outgoing row records "to <channel>:", which says
+      // where it went, and the accent bar down its edge already says it was ours.
+      char raw_sender[RIFT_SENDER_MAX];
+      const char* raw_body = p->msg;
+      bool have_sender = false;
+      if (!p->outgoing && p->conv.kind == RIFT_CONV_CHANNEL) {
+        int skip = senderSplit(p->msg, raw_sender, sizeof(raw_sender));
+        if (skip > 0) { raw_body = p->msg + skip; have_sender = true; }
+      }
+
       char filtered[sizeof(p->msg)];
-      riftTranslateUTF8(filtered, p->msg, sizeof(filtered));
+      riftTranslateUTF8(filtered, raw_body, sizeof(filtered));
+      const char* body = filtered;
+      char sender[RIFT_SENDER_MAX * 2];
+      sender[0] = 0;
+      if (have_sender) riftTranslateUTF8(sender, raw_sender, sizeof(sender));
 
       // Skipping the hop marker, for the same reason as above: on a direct message
       // there is no sender prefix to reparse, so the "(5) " sat in the stored
@@ -6151,19 +6176,7 @@ public:
       // from the channel, so the header named the channel and the person who
       // spoke sat unnoticed at the head of the body. On a channel row the sender
       // is lifted out and becomes the name - which is what a conversation is read
-      // by - and the body is drawn without the prefix.
-      //
-      // Only for incoming: an outgoing row records "to <channel>:", which says
-      // where it went, and the accent bar down its edge already says it was ours.
-      char sender[RIFT_SENDER_MAX];
-      const char* body = filtered;
-      bool have_sender = false;
-      // Channels only. A direct message carries no such prefix, so applying the
-      // split there would take the first word off "hei: noe" and call it a name.
-      if (!p->outgoing && p->conv.kind == RIFT_CONV_CHANNEL) {
-        int skip = senderSplit(filtered, sender, sizeof(sender));
-        if (skip > 0) { body = filtered + skip; have_sender = true; }
-      }
+      // by - and the body is drawn without the prefix. The split itself is above.
 
       int body_lines = wrapText(body, avail_px, 0, NULL, 0);
       int block_h = (body_lines + 1) * RIFT_LINE_H;
@@ -6217,7 +6230,9 @@ public:
         // misreading that moved the count to the right in the first place.
         snprintf(decorated, sizeof(decorated), "%s:", sender);
         shown_name = decorated;
-        name_col = riftNameColour(sender);
+        // From the raw name, so a person is the same colour here as in the
+        // conversation list, which hashes the same bytes.
+        name_col = riftNameColour(raw_sender);
       } else {
         shown_name = filtered_origin;
         name_col = originColour(p->origin);

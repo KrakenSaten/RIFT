@@ -663,7 +663,19 @@ static inline void riftTranslateUTF8(char* dest, const char* src, size_t dest_si
     }
     i += used;
 
-    // control characters carry nothing drawable and are not worth a block
+    // A line break or a tab is a word boundary, and dropping it merged the words
+    // either side: "line1\nline2" drew as line1line2. One space, and a run of
+    // them - CR LF, or a blank line - is still one space.
+    if (cp == '\n' || cp == '\r' || cp == '\t') {
+      if (j > 0 && dest[j - 1] != ' ') {
+        if (!RIFT_XL_ROOM(1)) break;
+        dest[j++] = ' ';
+        last_was_block = false;
+      }
+      continue;
+    }
+
+    // other control characters carry nothing drawable and are not worth a block
     if (cp < 32 || cp == 127) continue;
 
     if (riftIsInvisibleCodePoint(cp)) continue;     // emits nothing, and does not
