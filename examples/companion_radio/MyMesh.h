@@ -491,7 +491,14 @@ private:
   AckTableEntry expected_ack_table[EXPECTED_ACK_TABLE_SIZE]; // circular table
   int next_ack_idx;
 
-  #define ADVERT_PATH_TABLE_SIZE   96
+  // Upstream's 16 unless the build says otherwise. RIFT sets 96 from its own
+  // environment, because NODES sorts and buckets this table and 16 was thrashing
+  // on a mesh of that size. It was set to 96 here for a while, which put +9.4 KB
+  // of .bss into every companion build on every board - including STM32WLE5
+  // targets with 64 KB of SRAM that nothing in RIFT's CI compiles.
+  #ifndef ADVERT_PATH_TABLE_SIZE
+    #define ADVERT_PATH_TABLE_SIZE   16
+  #endif
   AdvertPath advert_paths[ADVERT_PATH_TABLE_SIZE]; // circular table
   // How many times a live entry has been dropped to make room. Exposed because it
   // is the number that says whether the cache is big enough for the mesh in front of
