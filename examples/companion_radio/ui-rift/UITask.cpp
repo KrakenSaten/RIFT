@@ -7821,8 +7821,8 @@ void UITask::loop() {
   {
     // Drag first: the driver tracks the finger continuously and only reports a
     // tap on release, so movement has to be read from the live position. A tap
-    // that moved is a scroll and must not also fire as a tap, which is what
-    // _drag_moved suppresses below.
+    // that moved is a scroll and must not also fire as a tap; the release below
+    // decides that from the driver's travel count and from _drag_moved.
     if (rift_touch.isDown()) {
       if (!_dragging) {
         _dragging = true;
@@ -7864,7 +7864,7 @@ void UITask::loop() {
 
     int tx, ty;
     if (rift_touch.poll(tx, ty)) {
-      // A drag that moved something must not also arrive as a tap.
+      // A drag must not also arrive as a tap.
       //
       // This was an `else` in front of an unbraced if-chain, so it guarded the
       // single assignment on the next line and nothing else - the tap handling
@@ -7873,9 +7873,23 @@ void UITask::loop() {
       // `_scroll += page`, which is the jump backwards away from the bottom.
       // The scroll wheel had no such problem because it raises no tap.
       //
-      // Braced now. The suppression had never worked.
-      if (_drag_moved) {
-        _drag_moved = false;
+      // Braced, and then found to be the wrong test. _drag_moved says a screen
+      // consumed movement, and every cursor list declines movement that produces
+      // no step - the cursor already on the last row, a drag shorter than a pitch
+      // - so a long drag that changed nothing was still a tap on release, and
+      // SYSTEM activated the row the finger lifted from. Which was "Delete
+      // channel" once, and "Advert mesh" once.
+      //
+      // So the finger's own travel decides, from the driver's count for this
+      // contact, with a few pixels of slop for a finger that does not lift straight
+      // up. _drag_moved stays as the other half: COMMS scrolls by the pixel and
+      // consumes a jitter smaller than the slop, and that release must not page.
+      // The rule is riftDragIsMove() in RiftLogic.h, where it is tested.
+      bool was_drag = _drag_moved
+                   || riftDragIsMove(rift_touch.dragTravel(), RIFT_TAP_SLOP_PX);
+      _drag_moved = false;
+      if (was_drag) {
+        // nothing: the gesture was a drag, and the screen has already had it
       } else {
       _touch_x = tx;   // kept for the SYSTEM readout while calibrating
       _touch_y = ty;

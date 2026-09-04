@@ -2235,6 +2235,32 @@ TEST(DragSteps, DraggingUpGoesForward) {
   EXPECT_EQ(2, riftDragSteps(&r, -32, 16));
 }
 
+TEST(DragIsMove, AFingerThatBarelyMovedIsStillATap) {
+  // A tap reports a pixel or two of travel because a finger does not lift straight
+  // up. Suppressing those would make the screen deaf to careful taps.
+  EXPECT_FALSE(riftDragIsMove(0, RIFT_TAP_SLOP_PX));
+  EXPECT_FALSE(riftDragIsMove(1, RIFT_TAP_SLOP_PX));
+  EXPECT_FALSE(riftDragIsMove(RIFT_TAP_SLOP_PX, RIFT_TAP_SLOP_PX));
+}
+
+TEST(DragIsMove, PastTheSlopItIsADragWhateverTheScreenDidWithIt) {
+  // The case that activated "Delete channel": a long drag on a cursor list whose
+  // cursor was already on the last row. handleDrag() returned false for every
+  // sample, so nothing marked the gesture as a move, and the release was a tap.
+  EXPECT_TRUE(riftDragIsMove(RIFT_TAP_SLOP_PX + 1, RIFT_TAP_SLOP_PX));
+  EXPECT_TRUE(riftDragIsMove(100, RIFT_TAP_SLOP_PX));
+}
+
+TEST(DragIsMove, DirectionDoesNotMatter) {
+  EXPECT_TRUE(riftDragIsMove(-(RIFT_TAP_SLOP_PX + 1), RIFT_TAP_SLOP_PX));
+  EXPECT_FALSE(riftDragIsMove(-1, RIFT_TAP_SLOP_PX));
+}
+
+TEST(DragIsMove, AZeroSlopMakesAnyTravelAMoveButNotNone) {
+  EXPECT_FALSE(riftDragIsMove(0, 0));
+  EXPECT_TRUE(riftDragIsMove(1, 0));
+}
+
 TEST(DragSteps, KeepsTheSignOfAPartialMoveInBothDirections) {
   // Truncation toward zero matters: a -15 remainder followed by -1 must step,
   // and must not be rounded away by an integer division that floors.

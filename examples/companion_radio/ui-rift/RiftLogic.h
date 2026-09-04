@@ -1929,3 +1929,25 @@ static inline int riftDragSteps(int* residual, int dy, int pitch) {
   *residual -= steps * pitch;     // truncation toward zero, so the sign is kept
   return -steps;                  // finger down, list goes back
 }
+
+// Whether a release is a tap or the end of a drag, decided from how far the finger
+// travelled rather than from whether a screen did anything with it.
+//
+// It used to be the latter: the loop suppressed the tap only when handleDrag()
+// had returned true. Every cursor list returns false when the movement produced
+// no step - the cursor was already on the last row, or the drag was shorter than
+// a pitch - so a long drag that changed nothing arrived as a tap on release, and
+// SYSTEM's handleTouch() activated whatever row the finger lifted from. Two of
+// those rows are "Delete channel" and "Advert mesh".
+//
+// The slop is a few pixels, because a finger does not lift straight up: a real
+// tap reports a pixel or two of travel and must still be a tap. Anything past
+// that was a drag, whatever the screen made of it.
+#ifndef RIFT_TAP_SLOP_PX
+  #define RIFT_TAP_SLOP_PX 6      // up to this much travel is still a tap
+#endif
+
+static inline bool riftDragIsMove(int travel_px, int slop_px) {
+  if (travel_px < 0) travel_px = -travel_px;
+  return travel_px > slop_px;
+}
