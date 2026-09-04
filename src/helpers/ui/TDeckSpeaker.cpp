@@ -57,7 +57,18 @@ bool TDeckSpeaker::begin(int bclk, int lrclk, int dout, int sample_rate) {
 
   if (i2s_driver_install(SPK_PORT, &cfg, 0, NULL) != ESP_OK) return false;
 
+  // Every pin named, including the one this board does not use. `= {}` zeroes
+  // mck_io_num, and zero is GPIO0, not "none" - I2S_PIN_NO_CHANGE is -1. So the
+  // master clock was routed out on GPIO0, which is the trackball click and the
+  // boot strapping pin, and with the clock never stopped (below) the pin read as
+  // held down from the first loop: a long press inside eight seconds of boot,
+  // which is the CLI rescue gesture. Every boot since 0.9.1 landed in rescue mode
+  // with the USB companion protocol switched off and the trackball click dead,
+  // and nothing on screen said so.
+  //
+  // The MAX98357A has no MCLK input, so there is nothing to route anywhere.
   i2s_pin_config_t pins = {};
+  pins.mck_io_num = I2S_PIN_NO_CHANGE;
   pins.bck_io_num = bclk;
   pins.ws_io_num = lrclk;
   pins.data_out_num = dout;
