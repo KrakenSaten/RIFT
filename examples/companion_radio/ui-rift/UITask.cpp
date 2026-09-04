@@ -3948,7 +3948,13 @@ static void rfUpsert(const uint8_t* key, const char* name, int8_t rssi, uint8_t 
       // every slot is watched, which needs the watch list to be as large as the
       // table; impossible today, but it must not index -1 if that ever changes
       if (weakest < 0) { portEXIT_CRITICAL(&rf_mux); return; }
-      if (rssi <= rf_table[weakest].rssi) { portEXIT_CRITICAL(&rf_mux); return; }
+      // The guard above only protected a watched device already in the table. A
+      // watched one arriving weaker than everything present was turned away here,
+      // and the presence check then said "not heard" while the radio heard it -
+      // the exact failure the comment above says this code prevents. A watched
+      // arrival takes the weakest slot whatever its signal.
+      bool watched = rfWatchFind(key, is_wifi) >= 0;
+      if (!watched && rssi <= rf_table[weakest].rssi) { portEXIT_CRITICAL(&rf_mux); return; }
       slot = weakest;
     }
   }
@@ -3987,12 +3993,20 @@ static void rfClear() {
 }
 
 // drop entries not heard recently, so the picture reflects what's here now
+//
+// A watched device is kept for RIFT_WATCH_GONE_MILLIS rather than the table's
+// own age. rfWatchCheck judges presence by the entry's age against that longer
+// window, and this ran first with the shorter one, so an entry could never be
+// found aged between 45 and 90 seconds: the 90-second window was dead code and
+// a beacon quiet for a minute was reported gone, then alerted on again.
 static void rfAgeOut() {
   unsigned long now = millis();
   portENTER_CRITICAL(&rf_mux);
   int w = 0;
   for (int i = 0; i < rf_count; i++) {
-    if (now - rf_table[i].seen_at <= RIFT_RF_AGE_MILLIS) {
+    unsigned long keep = rfWatchFind(rf_table[i].key, rf_table[i].is_wifi) >= 0
+                         ? RIFT_WATCH_GONE_MILLIS : RIFT_RF_AGE_MILLIS;
+    if (now - rf_table[i].seen_at <= keep) {
       if (w != i) rf_table[w] = rf_table[i];
       w++;
     }
@@ -4148,6 +4162,7 @@ class RiftRadarScreen : public RiftScreen {
   // millis() wrap, and here it would leave the scan state machine spinning.
   unsigned long _wait_since;
   unsigned long _wait_ms;
+  unsigned long _ble_started;   // when the running BLE scan was started, for its deadline
   int _scroll;
   int _last_n;
   int _watch_sel;      // cursor in the watch list
@@ -4202,7 +4217,12 @@ class RiftRadarScreen : public RiftScreen {
     wfPushSlice(per_channel);
   }
 
-  void beginBle() {
+  // Returns whether a scan is actually running. start() fails when the previous
+  // scan's stop is still in flight, and the return value was ignored: the state
+  // machine then sat in BLE_RUNNING waiting for a completion that was never
+  // coming, with no Wi-Fi sweeps, no ageing and no watch checks, until the user
+  // left the screen. Nothing on screen said so.
+  bool beginBle() {
     if (!_ble_up) {
       BLEDevice::init("");
       _ble_up = true;
@@ -4213,16 +4233,21 @@ class RiftRadarScreen : public RiftScreen {
     scan->setWindow(99);
     scan->setAdvertisedDeviceCallbacks(&ble_callbacks, false, true);
     ble_scan_done = false;
+    _ble_started = millis();
     // the function-pointer overload returns immediately; start(duration, bool)
     // would block for the whole duration
-    scan->start(RIFT_BLE_DWELL_SECS, onBleScanComplete, false);
+    if (!scan->start(RIFT_BLE_DWELL_SECS, onBleScanComplete, false)) {
+      riftLogf("radar: BLE scan start refused");
+      return false;
+    }
+    return true;
   }
 
 public:
   RiftRadarScreen(UITask* task)
      : _task(task), _state(OFF), _view(VIEW_BANDS), _want_active(false),
        _wifi_up(false), _ble_up(false), _torn_down(true),
-       _wait_since(0), _wait_ms(0), _scroll(0), _last_n(0),
+       _wait_since(0), _wait_ms(0), _ble_started(0), _scroll(0), _last_n(0),
        _watch_sel(0), _sel_is_wifi(false), _have_sel(false), _sel_idx(0), _resel(false) {
     memset(_sel_key, 0, sizeof(_sel_key));
     _sel_name[0] = 0;
@@ -4319,10 +4344,12 @@ public:
       }
 
       case START_BLE:
-        if (!riftScanBle()) {
-          // BLE is off, so the cycle ends here instead of in BLE_RUNNING. Ageing,
-          // the presence check and the gap all have to happen exactly once per
-          // cycle, so they are duplicated here rather than being skipped.
+        // BLE off, or a scan that would not start: the cycle ends here instead
+        // of in BLE_RUNNING. Ageing, the presence check and the gap all have to
+        // happen exactly once per cycle, so they are duplicated here rather
+        // than being skipped. A refused start gets the gap too, which is also
+        // the time the previous stop needs to finish.
+        if (!riftScanBle() || !beginBle()) {
           rfAgeOut();
           rfWatchCheck(_task);
           _state = START_WIFI;
@@ -4330,12 +4357,21 @@ public:
           _wait_ms = RIFT_SCAN_GAP_MILLIS;
           break;
         }
-        beginBle();
         _state = BLE_RUNNING;
         break;
 
-      case BLE_RUNNING:
-        if (ble_scan_done) {
+      case BLE_RUNNING: {
+        // The completion callback is the normal exit. The deadline is the other
+        // one: a scan that started but never reports done would otherwise hold
+        // this state for ever, and the screen would freeze on stale entries with
+        // every watch silent. Dwell plus a margin; stop() is what makes the
+        // callback fire if the stack is merely late.
+        bool overdue = (millis() - _ble_started) >= (RIFT_BLE_DWELL_SECS * 1000UL + 1500UL);
+        if (overdue && !ble_scan_done) {
+          riftLogf("radar: BLE scan overdue, stopping it");
+          BLEDevice::getScan()->stop();
+        }
+        if (ble_scan_done || overdue) {
           BLEDevice::getScan()->clearResults();   // keep the internal map bounded
           rfAgeOut();
           // after ageing, so a device that has just dropped out of the table is
@@ -4346,6 +4382,7 @@ public:
           _wait_ms = RIFT_SCAN_GAP_MILLIS;
         }
         break;
+      }
 
       default:
         break;
