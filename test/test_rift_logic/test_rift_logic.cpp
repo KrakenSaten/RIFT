@@ -1211,16 +1211,53 @@ TEST(EvictIndex, NoDominantConversationFallsBackToOldest) {
     EXPECT_EQ(0, riftEvictIndex(keys, 4));
 }
 
-// A version 1 history still in the log must not become one giant bucket that the
-// rule then empties ahead of live traffic.
-TEST(EvictIndex, MigratedEntriesAreNotOneBucket) {
+// A migrated history in the log goes before live traffic, oldest first. The rule
+// used to protect it - "the migrated entries are left alone" - and the cost was
+// that they could never leave: with any real conversation at two entries the
+// eviction always took from that conversation, so after an upgrade a log full of
+// unknowns capped every live conversation at two messages, permanently.
+TEST(EvictIndex, MigratedEntriesGoBeforeLiveTraffic) {
     RiftConvKey keys[6] = {
         riftConvUnknown(), riftConvUnknown(), riftConvUnknown(),
         riftConvUnknown(), ch(0), ch(0)
     };
-    // channel 0 holds two, the unknowns hold one each, so the channel is the
-    // largest and its oldest goes - the migrated entries are left alone
-    EXPECT_EQ(4, riftEvictIndex(keys, 6));
+    EXPECT_EQ(0, riftEvictIndex(keys, 6));
+}
+
+TEST(EvictIndex, TheOldestUnknownGoesEvenWhenItIsNotAtTheFront) {
+    RiftConvKey keys[5] = { ch(0), ch(0), riftConvUnknown(), ch(1), riftConvUnknown() };
+    EXPECT_EQ(2, riftEvictIndex(keys, 5));
+}
+
+// The upgrade scenario, driven end to end: a log full of migrated entries and a
+// stream of live messages in one conversation. The live conversation must grow
+// with every message until the migrated history is gone, and only then start
+// trimming itself.
+TEST(EvictIndex, ALiveConversationGrowsThroughAMigratedLog) {
+    const int SIZE = 48;
+    RiftConvKey log[SIZE];
+    for (int i = 0; i < SIZE; i++) log[i] = riftConvUnknown();
+    int count = SIZE;
+
+    auto live = [&]() {
+        int c = 0;
+        for (int i = 0; i < count; i++) if (riftConvSame(log[i], ch(0))) c++;
+        return c;
+    };
+
+    for (int msg = 1; msg <= 60; msg++) {
+        if (count >= SIZE) {
+            int drop = riftEvictIndex(log, count);
+            memmove(&log[drop], &log[drop + 1], (size_t) (count - drop - 1) * sizeof(log[0]));
+            count--;
+        }
+        log[count++] = ch(0);
+        // 48 migrated entries take 48 messages to clear; until then every message
+        // must add one to the live conversation, not trade one for another
+        int expect = msg <= SIZE ? msg : SIZE;
+        EXPECT_EQ(expect, live()) << "after message " << msg;
+    }
+    EXPECT_EQ(SIZE, count);
 }
 
 TEST(EvictIndex, DegenerateInputs) {

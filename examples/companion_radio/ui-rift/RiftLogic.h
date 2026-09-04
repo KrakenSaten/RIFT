@@ -1209,8 +1209,27 @@ struct RiftUnread {
   }
 };
 
+// An entry with an unknown conversation goes before anything with a known one.
+//
+// Unknown is what a record restored from a pre-v3 log becomes: history that cannot
+// prove which conversation it belongs to. riftLargestConv never counts those as a
+// bucket, which was right - collecting them into one fake conversation would have
+// made it the largest and emptied it first. But it also meant they were never the
+// eviction target once any real conversation held two entries, so they could not
+// leave: after an upgrade, 46 migrated entries sat in the 48-slot log for ever and
+// every live conversation was trimmed back to two messages as soon as a third
+// arrived. The test that pinned this said the migrated entries were "left alone",
+// which they were, at the price of everything after them.
+//
+// Oldest unknown first, then the busiest conversation's oldest as before. Migrated
+// history still shows until live traffic needs the room, which is the most it was
+// ever going to do.
 static inline int riftEvictIndex(const RiftConvKey* keys, int n) {
   if (keys == NULL || n <= 0) return 0;
+
+  for (int i = 0; i < n; i++) {
+    if (keys[i].kind == RIFT_CONV_UNKNOWN) return i;
+  }
 
   RiftConvKey biggest = riftConvUnknown();
   if (riftLargestConv(keys, n, &biggest) <= 1) return 0;
