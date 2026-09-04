@@ -2620,6 +2620,10 @@ public:
     display.drawTextLeftAlign(x, y, label);
     display.setColor(rift_pal.rule);
     display.fillRect(x, y + 10, (x < 160) ? 154 : 152, 1);
+    // Back to the label colour, because the first row under a heading draws
+    // straight after this and three of them ("NODE", "TROPO", "FREE HEAP") were
+    // coming out in the rule grey.
+    display.setColor(rift_pal.mid);
   }
 
   // Page 2 - readings. Grouped rather than one long column: seventeen label/value
@@ -2936,6 +2940,9 @@ public:
       case ESP_RST_WDT:       rr = "wdt"; break;
       case ESP_RST_DEEPSLEEP: rr = "deep sleep"; break;
       case ESP_RST_EXT:       rr = "ext reset"; break;
+      // The colour test below already named it; the switch did not, so the one
+      // reset a battery device most needs to name read "unknown".
+      case ESP_RST_BROWNOUT:  rr = "BROWNOUT"; break;
       default:                rr = "unknown"; break;
     }
     display.setColor((reason == ESP_RST_PANIC || reason == ESP_RST_BROWNOUT)
@@ -3132,7 +3139,14 @@ public:
         }
         return true;
       }
-      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = CH_NAME; return true; }
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) {
+        // Back to the name with the name in it. Choosing "paste a key" re-seeds
+        // the editor for the key, so returning without this showed an empty
+        // field and "Name can't be empty" for a name that had been typed.
+        _edit.begin(_ch_name, sizeof(_ch_name) - 2);
+        _mode = CH_NAME;
+        return true;
+      }
       return true;
     }
 
@@ -3224,7 +3238,10 @@ public:
         _mode = MENU;
         return true;
       }
-      if (!_edit.handleKey(c)) _mode = MENU;   // backspace on an empty field backs out
+      if (_edit.handleKey(c)) return true;
+      // Only an explicit back leaves; the other editors swallow stray keys too. A
+      // trackball nudge mid-entry used to discard the half-typed time.
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) _mode = MENU;
       return true;
     }
 
@@ -3265,6 +3282,14 @@ public:
         RiftConvKey gone = (_del_sel < _del_count) ? riftChannelConv(_del_idx[_del_sel])
                                                    : riftConvUnknown();
         bool ok = (_del_sel < _del_count) && the_mesh.removeChannel(_del_idx[_del_sel]);
+        // The scope goes with the channel. It did not: the entry stayed in RAM and
+        // in /rift.cfg keyed on the slot, and with eight of them a fresh channel
+        // was told "No scope slots left" while no scope was live. The fingerprint
+        // check kept routing safe; the slot count was what leaked.
+        if (ok && riftScopes().clear(_del_idx[_del_sel])) {
+          riftSaveSettings();
+          riftLogf("scope dropped with channel slot %d", (int) _del_idx[_del_sel]);
+        }
         if (ok && gone.kind == RIFT_CONV_CHANNEL) {
           // Also takes any fingerprint-less entries in that slot, restored from a log
           // written before channel identity existed: they cannot prove they belong to
