@@ -112,6 +112,11 @@ public:
   void handleCmdFrame(size_t len);
   bool advert();
   void enterCLIRescue();
+  // Whether the node is in CLI rescue mode. In that mode the mesh, the display
+  // and the keyboard all run as usual and the USB companion protocol does not,
+  // which is invisible from the screen - and was, for every boot from 0.9.1 to
+  // 0.9.2, while the I2S master clock held the boot button down. SYSTEM shows it.
+  bool isCLIRescue() const { return _cli_rescue; }
 
   // advert() sends zero-hop, so only direct neighbours hear it. This floods the
   // advert through the mesh instead, which is what distant nodes need before

@@ -2939,6 +2939,36 @@ public:
     display.drawTextRightAlign(CR, y, rr);
     y += RIFT_LINE_H;
 
+    // Two rows that would have named the 0.9.1 fault on sight. The I2S master
+    // clock was routed to GPIO0, so the trackball button read as held from the
+    // first loop and every boot entered CLI rescue - a mode in which everything
+    // on screen works and the USB companion protocol does not. Neither fact was
+    // visible anywhere. The raw pin level is shown rather than the debounced
+    // state, because the raw level is the thing that was wrong.
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(CX, y, "USB SERIAL");
+    if (the_mesh.isCLIRescue()) {
+      display.setColor(rift_pal.accent);
+      display.drawTextRightAlign(CR, y, "RESCUE CLI");
+    } else {
+      display.setColor(rift_pal.fg);
+      display.drawTextRightAlign(CR, y, "companion");
+    }
+    y += RIFT_LINE_H;
+
+#ifdef PIN_USER_BTN
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(CX, y, "BOOT BTN");
+    {
+      int level = digitalRead(PIN_USER_BTN);
+      // active low: a held (or driven) pin reads 0
+      display.setColor(level == LOW ? rift_pal.accent : rift_pal.fg);
+      sprintf(tmp, "%s gpio%d=%d", level == LOW ? "DOWN" : "up", (int) PIN_USER_BTN, level);
+      display.drawTextRightAlign(CR, y, tmp);
+    }
+    y += RIFT_LINE_H;
+#endif
+
     if (rift_boot_mark_count > 0) {
       display.setColor(rift_pal.mid);
       display.drawTextLeftAlign(CX, y, "BOOT");
@@ -8169,6 +8199,11 @@ char UITask::checkDisplayOn(char c) {
 
 char UITask::handleLongPress(char c) {
   if (millis() - ui_started_at < 8000) {
+    // Logged, because this ran on every boot for three releases and nothing
+    // said so. The age says whether a finger did it or the pin was already down
+    // when the UI started - a real hold cannot complete inside the first second.
+    riftLogf("CLI rescue: long press %lums after UI start",
+             (unsigned long) (millis() - ui_started_at));
     the_mesh.enterCLIRescue();
     c = 0;
   }
