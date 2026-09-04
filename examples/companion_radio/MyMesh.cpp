@@ -356,16 +356,20 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
   // nothing formatted: this runs on the packet path, and there is no watchdog on the
   // main loop, so the string work waits until somebody opens the screen.
   //
-  // The header is raw[0] and the path length raw[1] - Packet's own layout - and both
-  // are read defensively because a runt frame would otherwise index past the buffer.
-  riftRxLog().add(snr, rssi,
-                  (len > 0) ? raw[0] : 0,
-                  (len > 1) ? raw[1] : 0,
-                  len);
+  // The header is raw[0]. The path length is raw[1] for plain flood and direct
+  // packets and raw[5] when the route type carries transport codes - Packet's own
+  // layout, and riftRawPathLenIndex is where that rule lives and is tested. This
+  // used to read raw[1] for every packet, so a transport-coded one fed a transport
+  // byte into the RX log and the tropo detector. Both are read defensively because
+  // a runt frame would otherwise index past the buffer.
+  uint8_t header = (len > 0) ? raw[0] : 0;
+  int pl_idx = riftRawPathLenIndex(header);
+  uint8_t path_len = (len > pl_idx) ? raw[pl_idx] : 0;
+  riftRxLog().add(snr, rssi, header, path_len, len);
 
   // Tropo: a mask, a compare and a counter. The transition is noticed by the UI
   // on its own timer, so nothing here formats a string or takes a decision.
-  riftTropoStep(&riftTropoState(), (uint32_t) millis(), (len > 1) ? raw[1] : 0);
+  riftTropoStep(&riftTropoState(), (uint32_t) millis(), path_len);
 #endif
 
   if (_serial->isConnected() && len + 3 <= MAX_FRAME_SIZE) {

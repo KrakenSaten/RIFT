@@ -410,6 +410,22 @@ static inline const char* riftRouteTypeName(uint8_t route_type) {
 static inline uint8_t riftHeaderPayloadType(uint8_t header) { return (header >> 2) & 0x0F; }
 static inline uint8_t riftHeaderRouteType(uint8_t header)   { return header & 0x03; }
 
+// Where path_len sits in a raw frame. Packet::readFrom puts four transport bytes
+// between the header and path_len when the route type carries transport codes -
+// TRANSPORT_FLOOD (0x00) and TRANSPORT_DIRECT (0x03) - so path_len is byte 5 for
+// those and byte 1 for the other two.
+//
+// logRxRaw read byte 1 unconditionally, which on a transport-coded packet is the
+// low byte of transport_codes[0]: the RX log showed random hop counts for TF/TD
+// rows, and riftTropoUsableHops accepted any byte whose low six bits fell in
+// 20..61 as a deep packet, which is two thirds of all values. Five scoped floods
+// inside the window were enough for a false TROPO alert, and scoped floods are
+// what RiftScopes exists to send.
+static inline int riftRawPathLenIndex(uint8_t header) {
+  uint8_t route = riftHeaderRouteType(header);
+  return (route == 0x00 || route == 0x03) ? 5 : 1;
+}
+
 // ------------------------------------------------------------ millis deadlines
 //
 // A plain millis() > deadline comparison is not wrap-safe. millis() wraps at

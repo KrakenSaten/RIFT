@@ -880,6 +880,35 @@ TEST(PacketNames, HeaderSplitsIntoRouteAndType) {
     EXPECT_EQ(0x01, riftHeaderRouteType(0xD1));
 }
 
+TEST(PacketNames, PathLenFollowsTheTransportCodesWhenThereAreAny) {
+    // Packet::readFrom: header, then four transport bytes for route 0x00 and 0x03,
+    // then path_len. Plain flood (0x01) and direct (0x02) have no transport bytes.
+    EXPECT_EQ(5, riftRawPathLenIndex(0x00));   // TRANSPORT_FLOOD
+    EXPECT_EQ(1, riftRawPathLenIndex(0x01));   // FLOOD
+    EXPECT_EQ(1, riftRawPathLenIndex(0x02));   // DIRECT
+    EXPECT_EQ(5, riftRawPathLenIndex(0x03));   // TRANSPORT_DIRECT
+}
+
+TEST(PacketNames, PathLenIndexIgnoresThePayloadTypeBits) {
+    // A TXT_MSG (0x02) as transport flood is 0x08; as plain flood 0x09. The payload
+    // type must not move the index - only the two route bits do.
+    EXPECT_EQ(5, riftRawPathLenIndex(0x08));
+    EXPECT_EQ(1, riftRawPathLenIndex(0x09));
+    EXPECT_EQ(5, riftRawPathLenIndex(0xFF));   // every other bit set, route 0x03
+    EXPECT_EQ(1, riftRawPathLenIndex(0xFD));   // every other bit set, route 0x01
+}
+
+TEST(PacketNames, ATransportFrameReadAtTheOldIndexGivesATransportByte) {
+    // The failure this guards against, written out: a scoped flood whose first
+    // transport byte happens to be 0x17 (23) read as "23 hops" at index 1, while
+    // the real path_len at index 5 says zero hops.
+    const uint8_t frame[] = { 0x08, 0x17, 0x00, 0x2A, 0x00, 0x00, 0xAA, 0xBB };
+    int idx = riftRawPathLenIndex(frame[0]);
+    EXPECT_EQ(5, idx);
+    EXPECT_EQ(0x00, frame[idx]);
+    EXPECT_NE(0x00, frame[1]);   // what the old code would have used
+}
+
 TEST(PacketNames, EveryDefinedTypeHasAName) {
     // The table is the kind of thing an off-by-one hides in, and a reading of the
     // screen would not catch a shifted row - every value would still show *a* name.
