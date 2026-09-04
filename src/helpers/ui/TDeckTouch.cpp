@@ -49,19 +49,32 @@ bool TDeckTouch::poll(int& x, int& y) {
     if (gt911_read(GT911_REG_POINT1, d, sizeof(d))) {
       memcpy(_raw, d, sizeof(_raw));
 
-      // Byte layout determined from the device rather than the datasheet: the
-      // buffer this read returns has X at offset 0-1 and Y at 2-3, not the
-      // documented track-id-first layout. Measured on hardware:
-      //   display top-left     -> raw (228, 8)
-      //   display bottom-right -> raw (6, 310)
+      // The read starts at 0x8150, which the datasheet defines as point 1's X low
+      // byte - the track id at 0x814F is simply not read. So X is at offset 0-1
+      // and Y at 2-3 here, as the datasheet says for this start address. (An
+      // earlier comment claimed the layout differed from the datasheet; it does
+      // not, and the claim invited a "correction" that would have broken it.)
       _raw_x = d[0] | (d[1] << 8);
       _raw_y = d[2] | (d[3] << 8);
 
-      // Portrait panel (240x320) to landscape display (320x240): raw Y becomes
-      // display X, and raw X is inverted to become display Y. Confirmed by the
-      // two calibration points above.
-      _x = _raw_y;
-      _y = (TOUCH_RAW_W - 1) - _raw_x;
+      // Portrait panel (240x320) to landscape display (320x240): raw Y runs along
+      // display X and raw X runs against display Y, each scaled between the raw
+      // values measured at the display's edges (TOUCH_RAW_* in the header) and
+      // clamped. The swap and invert alone put raw (228, 8) at (8, 11) rather than
+      // (0, 0), which is what the calibration points were recorded to prevent.
+      {
+        long rx = _raw_x, ry = _raw_y;
+        long x = (ry - TOUCH_RAW_Y_AT_LEFT) * (TOUCH_RAW_H - 1)
+                 / (TOUCH_RAW_Y_AT_RIGHT - TOUCH_RAW_Y_AT_LEFT);
+        long y = (TOUCH_RAW_X_AT_TOP - rx) * (TOUCH_RAW_W - 1)
+                 / (TOUCH_RAW_X_AT_TOP - TOUCH_RAW_X_AT_BOTTOM);
+        if (x < 0) x = 0;
+        if (x > TOUCH_RAW_H - 1) x = TOUCH_RAW_H - 1;
+        if (y < 0) y = 0;
+        if (y > TOUCH_RAW_W - 1) y = TOUCH_RAW_W - 1;
+        _x = (int) x;
+        _y = (int) y;
+      }
       // only a successful read counts as a touch. Setting this regardless meant
       // a failed point read still produced a release event, carrying whatever
       // coordinates the previous touch had left behind.

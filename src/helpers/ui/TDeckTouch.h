@@ -24,6 +24,28 @@
 #ifndef TOUCH_RAW_H
   #define TOUCH_RAW_H 320
 #endif
+// Calibration: the raw reading at each display edge, measured on hardware by
+// touching the corners and reading the raw pair off SYSTEM. Display top-left
+// gave raw (228, 8) and bottom-right raw (6, 310). Raw Y runs along display X
+// and raw X runs against display Y. Build flags, so a panel that reads
+// differently can be corrected without touching the driver.
+//
+// These were recorded in the driver's comment from the start and never applied:
+// the mapping did only the axis swap and the invert, so a tap in the true corner
+// arrived up to 11 pixels short of it, and the top rows of the nav bar could be
+// missed by a finger that was on them.
+#ifndef TOUCH_RAW_Y_AT_LEFT
+  #define TOUCH_RAW_Y_AT_LEFT    8
+#endif
+#ifndef TOUCH_RAW_Y_AT_RIGHT
+  #define TOUCH_RAW_Y_AT_RIGHT 310
+#endif
+#ifndef TOUCH_RAW_X_AT_TOP
+  #define TOUCH_RAW_X_AT_TOP   228
+#endif
+#ifndef TOUCH_RAW_X_AT_BOTTOM
+  #define TOUCH_RAW_X_AT_BOTTOM  6
+#endif
 
 // GT911 capacitive touch on the T-Deck.
 //

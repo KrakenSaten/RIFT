@@ -2736,7 +2736,11 @@ public:
     display.drawTextLeftAlign(CX, y, "TOUCH");
     if (rift_touch.isPresent()) {
       display.setColor(rift_pal.fg);
-      sprintf(tmp, "%d,%d", _task->lastTouchX(), _task->lastTouchY());
+      // mapped, then the raw pair it came from. The raw pair is how the
+      // calibration flags in TDeckTouch.h are set: touch each corner and read
+      // it here. A corner that maps to 0/319 and 0/239 is calibrated.
+      snprintf(tmp, sizeof(tmp), "%d,%d (%d,%d)", _task->lastTouchX(), _task->lastTouchY(),
+               rift_touch.rawX(), rift_touch.rawY());
     } else {
       display.setColor(rift_pal.accent);
       strcpy(tmp, "not found");
