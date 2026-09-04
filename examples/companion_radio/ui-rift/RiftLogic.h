@@ -426,6 +426,37 @@ static inline int riftRawPathLenIndex(uint8_t header) {
   return (route == 0x00 || route == 0x03) ? 5 : 1;
 }
 
+// A route, the other way round: the reply path to hand a node we hold a direct
+// route to, so its answer comes back through the same repeaters.
+//
+// Each hop in a path is a prefix of that repeater's public key, so the way back is
+// the same hashes in reverse order. Reversed in hash-size units, not bytes - at a
+// two-byte hash size a byte reversal would corrupt every hop. path_len is Packet's
+// encoding (size bits 6-7, count bits 0-5); OUT_PATH_UNKNOWN (0xFF) is not a
+// length and is refused. Returns the number of bytes written, or -1.
+//
+// riftRegionsReq used to send a reply path of length zero on the reading that
+// zero meant "back the way it came". The responder reads zero as a direct path
+// of no hops and answers zero-hop, so only adjacent repeaters ever answered.
+#ifndef MAX_PATH_SIZE
+  #define MAX_PATH_SIZE 64   // MeshCore.h's value; the native tests build without it
+#endif
+
+static inline int riftReversePath(const uint8_t* path, uint8_t path_len, uint8_t* out) {
+  if (path_len == 0xFF) return -1;
+  // Packet::pathHashSize / pathHashCount, spelled out because this header is
+  // also built for the native tests, where mesh::Packet does not exist.
+  int sz = (path_len >> 6) + 1;
+  int n = path_len & 63;
+  if (n == 0) return 0;
+  if (path == NULL || out == NULL) return -1;
+  if (n * sz > MAX_PATH_SIZE) return -1;
+  for (int i = 0; i < n; i++) {
+    memcpy(&out[i * sz], &path[(n - 1 - i) * sz], (size_t) sz);
+  }
+  return n * sz;
+}
+
 // ------------------------------------------------------------ millis deadlines
 //
 // A plain millis() > deadline comparison is not wrap-safe. millis() wraps at

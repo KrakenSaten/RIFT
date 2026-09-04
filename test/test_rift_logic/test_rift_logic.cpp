@@ -898,6 +898,42 @@ TEST(PacketNames, PathLenIndexIgnoresThePayloadTypeBits) {
     EXPECT_EQ(1, riftRawPathLenIndex(0xFD));   // every other bit set, route 0x01
 }
 
+TEST(ReversePath, OneByteHashesComeBackInReverseOrder) {
+    // out_path A,B,C means A is the first repeater from here. From the far end the
+    // way back is C,B,A. path_len 3 with hash-size bits 00 is one-byte hashes.
+    const uint8_t path[3] = { 0xA1, 0xB2, 0xC3 };
+    uint8_t out[MAX_PATH_SIZE];
+    EXPECT_EQ(3, riftReversePath(path, 3, out));
+    EXPECT_EQ(0xC3, out[0]);
+    EXPECT_EQ(0xB2, out[1]);
+    EXPECT_EQ(0xA1, out[2]);
+}
+
+TEST(ReversePath, WiderHashesAreReversedAsUnitsNotAsBytes) {
+    // hash size 2 (bits 6-7 = 01), two hops: bytes must stay paired
+    const uint8_t path[4] = { 0x11, 0x12, 0x21, 0x22 };
+    uint8_t out[MAX_PATH_SIZE];
+    EXPECT_EQ(4, riftReversePath(path, 0x40 | 2, out));
+    EXPECT_EQ(0x21, out[0]);
+    EXPECT_EQ(0x22, out[1]);
+    EXPECT_EQ(0x11, out[2]);
+    EXPECT_EQ(0x12, out[3]);
+}
+
+TEST(ReversePath, ZeroHopsIsZeroBytesAndNotAnError) {
+    uint8_t out[MAX_PATH_SIZE] = { 0xEE };
+    EXPECT_EQ(0, riftReversePath(NULL, 0, out));
+    EXPECT_EQ(0xEE, out[0]);   // nothing written
+}
+
+TEST(ReversePath, RefusesTheUnknownRouteSentinelAndNullOutput) {
+    const uint8_t path[1] = { 0x01 };
+    uint8_t out[MAX_PATH_SIZE];
+    EXPECT_EQ(-1, riftReversePath(path, 0xFF, out));   // OUT_PATH_UNKNOWN is not a length
+    EXPECT_EQ(-1, riftReversePath(path, 1, NULL));
+    EXPECT_EQ(-1, riftReversePath(NULL, 1, out));
+}
+
 TEST(PacketNames, ATransportFrameReadAtTheOldIndexGivesATransportByte) {
     // The failure this guards against, written out: a scoped flood whose first
     // transport byte happens to be 0x17 (23) read as "23 hops" at index 1, while

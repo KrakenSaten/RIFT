@@ -725,15 +725,22 @@ bool MyMesh::riftRegionsReq(const ContactInfo& contact, uint32_t& est_timeout) {
   // {req_type}{reply_path_len}{reply_path...}. sendAnonReq prefixes the tag, and
   // the repeater reads the type at data[4].
   //
-  // A zero-length reply path asks it to answer back the way the request came,
-  // which is the only sensible answer for a repeater we hold a direct path to -
-  // and the far side requires a directly routed request anyway.
-  uint8_t req[2];
+  // The reply path is our route to the repeater reversed, so its answer comes
+  // back through the same hops. This used to send a length of zero, on the
+  // reading that zero meant "back the way it came"; the responder reads zero as
+  // a direct path of no hops and answers zero-hop, so only repeaters in direct
+  // range ever answered and everything routed reported a timeout. The far side
+  // requires a directly routed request, so a contact with no route cannot be
+  // asked at all - riftReversePath refuses OUT_PATH_UNKNOWN and this returns
+  // false rather than sending something the repeater will not answer.
+  uint8_t req[2 + MAX_PATH_SIZE];
   req[0] = 0x01;   // ANON_REQ_TYPE_REGIONS, as simple_repeater defines it
-  req[1] = 0;      // reply path length
+  int path_bytes = riftReversePath(contact.out_path, contact.out_path_len, &req[2]);
+  if (path_bytes < 0) return false;
+  req[1] = contact.out_path_len;   // same encoding, same hash size and count
 
   uint32_t tag;
-  int result = sendAnonReq(contact, req, sizeof(req), tag, est_timeout);
+  int result = sendAnonReq(contact, req, (uint8_t) (2 + path_bytes), tag, est_timeout);
   if (result == MSG_SEND_FAILED) return false;
   rift_pending_kind = RIFT_REP_REGIONS;
   rift_pending_tag = tag;

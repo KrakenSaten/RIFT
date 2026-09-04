@@ -6988,8 +6988,12 @@ public:
           if (ct == NULL) { _task->showAlert("Contact is gone", 1400); _mode = RIFT_RP_VIEW; return true; }
           if (s.pending() != RIFT_REP_IDLE) { _task->showAlert("Still waiting", 1200); return true; }
           uint32_t est = 0;
-          // Needs a route: the far side answers a directly routed request only.
-          if (!the_mesh.riftRegionsReq(*ct, est)) {
+          // Needs a route: the far side answers a directly routed request only,
+          // and the reply path we hand it is that route reversed. Said here, in
+          // words, rather than letting the send fail with an alert about packets.
+          if (riftHopsUnknown(ct->out_path_len)) {
+            _task->showAlert("No route to repeater yet", 1400);
+          } else if (!the_mesh.riftRegionsReq(*ct, est)) {
             _task->showAlert("No packet free - try again", 1400);
           }
           _mode = RIFT_RP_VIEW;
