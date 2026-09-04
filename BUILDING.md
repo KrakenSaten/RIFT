@@ -70,6 +70,32 @@ build — so the four stock environments are the regression check:
 pio run -e LilyGo_TDeck_rift -e LilyGo_TDeck_companion_radio_usb -e LilyGo_TDeck_companion_radio_ble -e LilyGo_TDeck_repeater -e LilyGo_TDeck_kiss_modem
 ```
 
+### A single image for a web flasher
+
+`firmware.bin` is the app alone and belongs at `0x10000` — which is only correct on
+a device whose partition table already matches this one. RIFT's table is its own:
+app0 6.2 MB at `0x10000`, app1 at `0x650000`, spiffs 3.4 MB at `0xC90000`,
+coredump at `0xFF0000`, so it wants the 16 MB flash the original T-Deck has. Give
+anyone the app alone and it lands in whatever table is already on their device.
+
+What a flasher wants is the merged image, which carries the bootloader, the
+partition table, `boot_app0` and the app in one file, **flashed to `0x0`**:
+
+```bash
+pio run -e LilyGo_TDeck_rift -t mergebin
+```
+
+`mergebin` is a custom target, not a post-build step — `merge-bin.py` registers it
+that way — so a plain `pio run` does not produce it and the file is simply absent
+until asked for. `rift-release.yml` calls it and publishes the result as
+`rift-merged.bin`; `flasher/manifest.json` is where the `0x0` offset is declared
+for ESP Web Tools.
+
+Worth telling anyone you hand the file to: erase the flash on a first install.
+Leftover `nvs` and `spiffs` from a different partition layout is a source of
+behaviour nobody can explain afterwards, and the project's own manifest sets
+`new_install_prompt_erase` for that reason.
+
 ---
 
 ## Uploading
