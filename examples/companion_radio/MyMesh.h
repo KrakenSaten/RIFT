@@ -464,6 +464,10 @@ private:
   uint8_t  rift_pending_kind;      // RIFT_REP_* from ui-rift/RiftRepeater.h
   uint32_t rift_pending_tag;       // status and telemetry
   uint8_t  rift_pending_key[4];    // login
+  // The last login sent and when, kept past the wait so a reply that arrives
+  // after the timeout can still be recognised. 0 = none outstanding.
+  uint8_t  rift_login_key[4];
+  uint32_t rift_login_sent_ms;
 #endif
   BaseSerialInterface *_serial;
   AbstractUITask* _ui;

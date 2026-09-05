@@ -6490,16 +6490,22 @@ public:
     ChannelDetails ch;
     bool headed = true;
     const char* heading = NULL;
-    char room_heading[80];
+    char contact_heading[96];
     if (!_target_is_channel) {
-      heading = _target_name;
+      // Translated like every other name on the screen. The raw UTF-8 went to
+      // the driver before, so "Prøverommet" headed its conversation as two
+      // CP437 glyphs where the ø was.
+      char shown_name[sizeof(_target_name) * 2];
+      riftTranslateUTF8(shown_name, _target_name, sizeof(shown_name));
       // A room is named as one, with the login state beside it: it is the one
       // fact that decides whether Enter will post or ask for a password.
       if (targetIsRoom()) {
-        snprintf(room_heading, sizeof(room_heading), "%s  ROOM - %s", _target_name,
+        snprintf(contact_heading, sizeof(contact_heading), "%s  ROOM - %s", shown_name,
                  riftLoginText(roomLoginState()));
-        heading = room_heading;
+      } else {
+        snprintf(contact_heading, sizeof(contact_heading), "%s", shown_name);
       }
+      heading = contact_heading;
     } else if (!getTargetChannel(ch)) {
       heading = "NO CHANNEL";   // nothing in the strip is filled in this state
     } else {
@@ -7315,6 +7321,18 @@ public:
   int render(DisplayDriver& display) override {
     RiftRepeaterSession& s = riftRepeater();   // observed only; the loop services it
 
+    // Opened from a room to log in, and logged in: the job is done, so the
+    // panel goes and the room comes back with the draft still in its compose
+    // line. Left up, it showed stats and telemetry keys for what the user
+    // knows as a chat room, and read as the room being treated as a repeater.
+    if (_for_room && _mode == RIFT_RP_VIEW && s.loginState() == RIFT_LOGIN_OK
+        && s.pending() == RIFT_REP_IDLE) {
+      _for_room = false;
+      _task->dismissOverlay();
+      _task->showAlert("Logged in - ENTER posts your message", 1800);
+      return 100;
+    }
+
     const int x = 4, w = display.width() - 8;
     const int y = 18, h = 202;
 
@@ -7540,7 +7558,11 @@ public:
     // The hints are the affordance, so they follow capability rather than
     // listing keys the node will not answer - the mistake that made repeater
     // control itself invisible.
-    if (allowsLogin()) {
+    if (_for_room) {
+      // Still here means the login did not go through. Two things to do, and
+      // the repeater keys are not among them.
+      display.drawTextLeftAlign(lx, fy, "L try the login again");
+    } else if (allowsLogin()) {
       display.drawTextLeftAlign(lx, fy, "L login   S stats   T telemetry");
     } else {
       display.drawTextLeftAlign(lx, fy, "T telemetry");

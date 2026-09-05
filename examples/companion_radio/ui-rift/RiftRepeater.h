@@ -184,8 +184,15 @@ public:
     // The estimate from the mesh layer is airtime, not the time the repeater
     // takes to think, so it gets a floor and some slack. A wait that ends too
     // early reports a timeout for a reply that is still in flight.
-    uint32_t wait = est_timeout_millis + 4000;
-    if (wait < 8000) wait = 8000;
+    //
+    // Doubled with a twenty-second floor. The eight-second floor gave up on a
+    // room seven hops out whose reply took twenty-eight seconds - the estimate
+    // is for the packet's own air time and the flood, not for a busy mesh's
+    // retries and the far node's own reply delay. A late reply is still taken
+    // (MyMesh::riftMatchResponse), but a wait that ends before the answer is
+    // a wrong answer on the screen for as long as it stands.
+    uint32_t wait = est_timeout_millis * 2 + 8000;
+    if (wait < 20000) wait = 20000;
     _deadline = millis() + wait;
     if (kind == RIFT_REP_LOGIN) _login = RIFT_LOGIN_WAITING;
   }
@@ -210,6 +217,17 @@ public:
     _perms = ok ? perms : 0;
     _acl = ok ? acl : 0;
     _fw_level = ok ? fw : 0;
+    if (_pending == RIFT_REP_LOGIN) _pending = RIFT_REP_IDLE;
+  }
+
+  // A room server pushes posts only to clients it has admitted, so a post
+  // arriving from the target room is proof of a login whatever the panel
+  // recorded - the reply may have been lost on the air or come after the wait.
+  // Permissions stay as they were: a post says "member", not "admin".
+  void noteRoomTraffic(const uint8_t* pub_key) {
+    if (!isTarget(pub_key)) return;
+    if (_login == RIFT_LOGIN_OK) return;
+    _login = RIFT_LOGIN_OK;
     if (_pending == RIFT_REP_LOGIN) _pending = RIFT_REP_IDLE;
   }
 

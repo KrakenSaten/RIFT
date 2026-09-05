@@ -677,6 +677,30 @@ int MyMesh::resolvePathHash(const uint8_t* hash, uint8_t hash_len,
 // same radio sees precisely what it saw before this existed.
 bool MyMesh::riftMatchResponse(const ContactInfo& contact, const uint8_t* data,
                               uint8_t len, uint32_t tag) {
+  // A login answered after the wait gave up. Seen on the device: LOGIN sent to a
+  // room seven hops out, "no answer" at twelve seconds, the reply - riding on
+  // the path return - at twenty-eight. The server had admitted us and began
+  // pushing posts, while the screen still said no answer and Enter kept asking
+  // for the password. So a reply from the node the last login went to, in the
+  // shape of a login OK, is taken while nothing else is outstanding and the
+  // login is recent. Only OK: a late refusal changes nothing the timeout did
+  // not already say.
+  if (rift_pending_kind == RIFT_REP_IDLE && rift_login_sent_ms != 0
+      && memcmp(rift_login_key, contact.id.pub_key, 4) == 0
+      && (uint32_t) millis() - rift_login_sent_ms < 300000u) {
+    if (len >= 13 && data[4] == RESP_SERVER_LOGIN_OK) {
+      rift_login_sent_ms = 0;
+      riftRepeater().onLogin(contact.id.pub_key, true, data[6], data[7], data[12]);
+      riftLogf("LOGIN ok from %s (late)", contact.name);
+      return true;
+    }
+    if (len >= 6 && memcmp(&data[4], "OK", 2) == 0) {
+      rift_login_sent_ms = 0;
+      riftRepeater().onLogin(contact.id.pub_key, true, 0, 0, 0);
+      riftLogf("LOGIN ok from %s (late)", contact.name);
+      return true;
+    }
+  }
   if (rift_pending_kind == RIFT_REP_IDLE) return false;
 
   if (rift_pending_kind == RIFT_REP_LOGIN) {
@@ -684,6 +708,7 @@ bool MyMesh::riftMatchResponse(const ContactInfo& contact, const uint8_t* data,
     // the one case that has to match on the key.
     if (memcmp(rift_pending_key, contact.id.pub_key, 4) != 0) return false;
     rift_pending_kind = RIFT_REP_IDLE;
+    rift_login_sent_ms = 0;   // answered in time; nothing for the late path to take
 
     // The two shapes upstream accepts, each stating the length it reads. Parsed
     // here rather than shared with the companion branch below, because sharing
@@ -772,6 +797,9 @@ bool MyMesh::riftLogin(const ContactInfo& contact, const char* password, uint32_
   rift_pending_kind = RIFT_REP_LOGIN;
   rift_pending_tag = 0;
   memcpy(rift_pending_key, contact.id.pub_key, 4);
+  memcpy(rift_login_key, contact.id.pub_key, 4);
+  rift_login_sent_ms = (uint32_t) millis();
+  if (rift_login_sent_ms == 0) rift_login_sent_ms = 1;   // 0 means "no login outstanding"
   riftRepeater().beginPending(RIFT_REP_LOGIN, est_timeout);
   // Deliberately no password in this line, or in any other.
   riftLogf("LOGIN sent to %s", contact.name);
@@ -905,7 +933,9 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
 #ifdef RIFT_VERSION
   // A route changing is the difference between a DM that lands and one that does
   // not, and nothing on screen said it had happened.
-  riftLogf("path %s now %d hop", contact.name, (int) contact.out_path_len);
+  // The hop count, not the raw path_len: bits 6-7 of that byte are the hash
+  // size, so a five-hop route with two-byte hashes logged as "69 hop".
+  riftLogf("path %s now %d hop", contact.name, (int) mesh::Packet::pathHashCount(contact.out_path_len));
   // A path return is the route being seen to work in one direction at least.
   markPathConfirmed(contact.id.pub_key, sizeof(AdvertPath::pubkey_prefix));
   {
@@ -1173,6 +1203,9 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
     }
     riftRxLog().annotateLast(RIFT_AIR_K_DM, from.name, shown);
     riftNoteScope(pkt, NULL);
+    // A room only pushes to members: this post is the login having worked,
+    // whether or not its reply was seen.
+    if (from.type == ADV_TYPE_ROOM) riftRepeater().noteRoomTraffic(from.id.pub_key);
 #endif
     _ui->newMsgConv(path_len, from.name, shown, offline_queue_len,
                     2, 0, from.id.pub_key);
@@ -1757,6 +1790,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   rift_pending_kind = RIFT_REP_IDLE;
   rift_pending_tag = 0;
   memset(rift_pending_key, 0, sizeof(rift_pending_key));
+  memset(rift_login_key, 0, sizeof(rift_login_key));
+  rift_login_sent_ms = 0;
 #endif
   next_ack_idx = 0;
   sign_data = NULL;
