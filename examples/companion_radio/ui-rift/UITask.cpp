@@ -720,6 +720,31 @@ static void navMarkerSpan(int i, int* x, int* w) {
   *x = NAV_CENTRE_X[i] - *w / 2;
 }
 
+// The one window pattern every list with a cursor uses, from the September
+// design round (design/redesign-2026-09/00-SYSTEM.md section 4). A 1px track in
+// rule at x 319 down the visible list, and a 2px thumb in fg at x 318 whose
+// position and length are the window's share of the whole. Drawn only when the
+// list is longer than the window, so a list that fits shows nothing. Text in a
+// row stops at x 314 to leave it room. Not a touch target: the track is 1px and
+// cannot be hit, so scrolling is always a drag on the rows.
+//
+// first/total/view are in whatever unit the list scrolls by - rows for a
+// stepping list, pixels for COMMS - as long as all three agree.
+static void riftDrawThumb(DisplayDriver& display, int y0, int len, long first, long total, long view,
+                          int x_track = 319) {
+  if (total <= view || total <= 0 || len <= 0) return;
+  display.setColor(rift_pal.rule);
+  display.fillRect(x_track, y0, 1, len);
+  long th = (view * len + total / 2) / total;
+  if (th < 6) th = 6;
+  if (th > len) th = len;
+  long ty = (first * len + total / 2) / total;
+  if (ty + th > len) ty = len - th;
+  if (ty < 0) ty = 0;
+  display.setColor(rift_pal.fg);
+  display.fillRect(x_track - 1, y0 + (int) ty, 2, (int) th);
+}
+
 static void renderNavBar(DisplayDriver& display, int curr_idx) {
   const int y_rule = NAV_RULE_Y;
 
@@ -767,9 +792,12 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   // correctly suppressed because the message was already on screen - and so nothing
   // ever dismissed the popup, which was the only thing that cleared the counter. The
   // dot stayed lit permanently for a message that had been read.
+  // fg, not accent: unread is a shape (present or absent), and the accent is
+  // reserved for active tab, selection, warning and the wordmark after the
+  // September design round. Vertically centred on the label row.
   if (msg_unread.any()) {
-    display.setColor(rift_pal.accent);
-    display.fillRect(240, 227, 3, 3);
+    display.setColor(rift_pal.fg);
+    display.fillRect(240, 231, 3, 3);
   }
 
   // Battery, moved down from the title bar into space that was already here:
@@ -865,11 +893,14 @@ static const RiftPalette RIFT_DAY = {
   // computing the palette's contrast rather than by looking at it, which is the only
   // way this kind of failure gets noticed: it looks like a colour choice.
   //
-  // This is the lightest green at that hue that still clears 4.5:1 on white: L
-  // 0.1825, 4.52:1. Per-mode, exactly as acc_tx already is - the palette swaps
-  // roles by design, so a value that cannot work in one mode is replaced rather
-  // than compromised in both.
-  /* ok     */ 0x4422
+  // #428610 was the lightest green at that hue clearing 4.5:1 on white, and it
+  // sat OKLab 0.053 from channel colour 2 - the closest pair in the palette, so in
+  // day mode a channel name and "delivered" were nearly one colour. The September
+  // design round moved it to #2A6400: 7.10:1 on white, 0.104 and 0.124 from the
+  // two channel greens, still 137 degrees of hue. A day value need not work on
+  // black, which is what lets it go darker than the channel band. Per-mode,
+  // exactly as acc_tx already is. tools/palette-check.py prints the figures.
+  /* ok     */ 0x2B20
 };
 
 RiftPalette rift_pal = RIFT_NIGHT;
@@ -902,6 +933,13 @@ static void riftStreamFrame() {
   Serial.write((const uint8_t*) "RIFTSCRN", 8);
   Serial.write(hdr, sizeof(hdr));
   Serial.write((const uint8_t*) fb, (size_t) w * h * 2);
+  // A tail of zeros after the frame. One capture in four arrived 256 bytes
+  // short - the size of the USB CDC endpoint buffer - with flush() making no
+  // difference, so the last packet was sitting in the peripheral waiting for
+  // more data behind it. The pad is that data; the host reads the frame length
+  // it was told and ignores the rest.
+  static const uint8_t pad[64] = { 0 };
+  for (int i = 0; i < 8; i++) Serial.write(pad, sizeof(pad));
   Serial.flush();
 #endif
 }
@@ -1515,8 +1553,9 @@ public:
       sprintf(row, "LAST RX %s AGO", age);
     } else {
       // nothing since boot points at frequency, SF or antenna - not at a quiet
-      // network - so it is worth saying which of the two this is
-      strcpy(row, "NOTHING HEARD SINCE BOOT");
+      // network - so it is worth saying which of the two this is. Same label as
+      // the live row, so the eye finds the fact in the same place.
+      strcpy(row, "LAST RX none since boot");
     }
     display.drawTextLeftAlign(2, 62, row);
 
@@ -1566,8 +1605,15 @@ public:
     if (the_mesh.contactsFullNow()) display.setColor(rift_pal.accent);
     display.drawTextLeftAlign(2, 170, tmp);
 
-    sprintf(tmp, "LINK %.0f / %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
-    display.drawTextRightAlign(display.width() - 2, 170, tmp);
+    // Two numbers with their names. "LINK -80 / -4" was the one place on the
+    // screen that needed prior knowledge to read. "--" until something has been
+    // heard: the radio's last reading is nothing, not zero.
+    if (the_mesh.hasHeardMesh()) {
+      sprintf(tmp, "RSSI %.0f  SNR %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
+    } else {
+      strcpy(tmp, "RSSI --  SNR --");
+    }
+    display.drawTextRightAlign(316, 170, tmp);
 
     // The radio line, unless a tropo opening is running - in which case that is
     // the more interesting thing this screen can say, and the frequency has not
@@ -3061,7 +3107,7 @@ public:
         y += RIFT_LINE_H;
       }
 
-      display.setColor(rift_pal.accent);
+      display.setColor(rift_pal.mid);   // a key hint, not a warning
       display.drawTextLeftAlign(CX, y, "ENTER: open log");
     }
 
@@ -3459,10 +3505,10 @@ class RiftConstellationScreen : public RiftScreen {
   // An unknown route draws all ten hollow and keeps its `?`. Nine hollow cells
   // cannot be misread as near, which a short bar could be.
   static const int REACH_X = 140;      // first cell
-  static const int REACH_PITCH = 12;   // 6 of cell, 6 of gap - a count, not a bar
+  static const int REACH_PITCH = 12;   // 8 of cell, 4 of gap - a count, not a bar
   static const int REACH_CELLS = 10;
-  static const int REACH_W = 6;
-  static const int REACH_H = 7;
+  static const int REACH_W = 8;        // the shared 8x8 cell of the September design system
+  static const int REACH_H = 8;
 
   // hops < 0 means no route known: every cell hollow.
   void renderReach(DisplayDriver& display, int y, int hops, uint16_t ink) {
@@ -3489,16 +3535,12 @@ class RiftConstellationScreen : public RiftScreen {
     return riftHopBucket((int) riftHopCount(path_len));
   }
 
-  // Relative, and four characters wide. "14:32" says nothing about how long ago that
-  // was without the reader doing arithmetic, which is the question the list asks.
-  // Monotonic, so it is right whether or not the clock has ever been set.
+  // Relative age, the same words the conversation list and the RIFT tab use.
+  // Monotonic, so it is right whether or not the clock has ever been set. This
+  // used to be a second age formatter with its own thresholds and its own
+  // vocabulary ("now", "9d+"); one clock, one vocabulary.
   static void ageText(uint32_t recv_millis, char* out, size_t out_size) {
-    uint32_t s = ((uint32_t) millis() - recv_millis) / 1000u;
-    if (s < 60u)         StrHelper::strncpy(out, "now", out_size);
-    else if (s < 5400u)  snprintf(out, out_size, "%um", (unsigned) (s / 60u));
-    else if (s < 86400u) snprintf(out, out_size, "%uh", (unsigned) (s / 3600u));
-    else if (s < 864000u) snprintf(out, out_size, "%ud", (unsigned) (s / 86400u));
-    else                 StrHelper::strncpy(out, "9d+", out_size);
+    riftFormatAge((uint32_t) millis() - recv_millis, out, out_size);
   }
 
   // Now a thin call into the mesh layer, which is the only place with both the recent
@@ -3571,7 +3613,7 @@ class RiftConstellationScreen : public RiftScreen {
         StrHelper::strncpy(out + used, " ...", out_size - used);
         return;
       }
-      if (used) { memcpy(out + used, " > ", 3); used += 3; }
+      if (used) { memcpy(out + used, " \xAF ", 3); used += 3; }   // CP437 0xAF, a right guillemet
       size_t n = strlen(label);
       memcpy(out + used, label, n);
       used += n;
@@ -3587,7 +3629,7 @@ class RiftConstellationScreen : public RiftScreen {
   // Scrolled so the selected row *and* its two detail rows are drawn. A selection
   // that is not on screen does not exist for the user.
   void clampScroll() {
-    const int TOP = 68, BOTTOM = 226;
+    const int TOP = 56, BOTTOM = 226;
     if (_scroll > _sel) _scroll = _sel;
     if (_scroll < 0) _scroll = 0;
     for (;;) {
@@ -3632,84 +3674,98 @@ class RiftConstellationScreen : public RiftScreen {
       }
     }
 
+    // Geometry from design/redesign-2026-09/rift-nodes-spec.md: heading y 2,
+    // bucket labels y 14, tracks y 24, counts y 30, column headings y 44, rows
+    // from y 56 on the 12px pitch (14 of them), text at the row top and the
+    // selection fill two pixels above it. Text stops at x 314; 318-319 is the
+    // thumb's.
+
     // ---- heading
     display.setColor(rift_pal.mid);
-    // "RECENT", not "HEARD". The cache holds a bounded number of the most recently
-    // heard nodes, so on a mesh larger than the cache "28 HEARD" read as a claim that
-    // 28 is all there are. When it is at capacity the eviction count says so, because
-    // that is the number which decides whether the cache is too small.
+    // "RECENT" is heard in the last 30 minutes - the same threshold as the filled
+    // freshness marker - and "NODES" is what the cache holds. The cache is bounded,
+    // so on a mesh larger than it the count is not a claim about the mesh; when it
+    // is at capacity the eviction count says so, because that is the number which
+    // decides whether the cache is too small.
+    int recent = 0;
+    for (int i = 0; i < _count; i++) {
+      if (((uint32_t) millis() - _paths[i].recv_millis) < 1800000u) recent++;
+    }
     int cache_used = the_mesh.getPathCacheUsed(), cache_size = the_mesh.getPathCacheSize();
     if (cache_used >= cache_size && the_mesh.getPathEvictions() > 0) {
-      // See the PATH CACHE row on SYSTEM: this counts eviction events, and a node
-      // evicted twice counts twice, so it is not a tally of nodes no longer held.
-      snprintf(tmp, sizeof(tmp), "%d RECENT, %u EVICT", _count,
-               (unsigned) the_mesh.getPathEvictions());
+      snprintf(tmp, sizeof(tmp), "%d RECENT %s %d NODES %s %u EVICT", recent, RIFT_DOT, _count,
+               RIFT_DOT, (unsigned) the_mesh.getPathEvictions());
+    } else if (_count == 0) {
+      StrHelper::strncpy(tmp, "0 NODES", sizeof(tmp));
     } else {
-      snprintf(tmp, sizeof(tmp), "%d RECENT", _count);
+      snprintf(tmp, sizeof(tmp), "%d RECENT %s %d NODES", recent, RIFT_DOT, _count);
     }
     display.drawTextLeftAlign(2, 2, tmp);
     if (maxhop >= 0) {
       snprintf(tmp, sizeof(tmp), "MAX %d HOPS", maxhop);
-      display.drawTextRightAlign(318, 2, tmp);
+      display.drawTextRightAlign(314, 2, tmp);
     }
 
     // ---- bucket band. The bars compare the five with each other, not against an
     // absolute scale: on a mesh of six nodes an absolute scale draws five stubs.
+    // The track is always drawn, so an empty bucket is a shape rather than an
+    // absence.
     int maxc = 0;
     for (int b = 0; b < RIFT_HOPB_COUNT; b++) if (counts[b] > maxc) maxc = counts[b];
     for (int b = 0; b < RIFT_HOPB_COUNT; b++) {
       display.setColor(rift_pal.mid);
       display.drawTextLeftAlign(BUCKET_X[b], 14, BUCKET_LABEL[b]);
+      display.setColor(rift_pal.rule);
+      display.drawRect(BUCKET_X[b], 24, BUCKET_BAR_W, 4);
       if (counts[b] > 0 && maxc > 0) {
         int w = (counts[b] * BUCKET_BAR_W + maxc / 2) / maxc;
         if (w < 2) w = 2;
         display.setColor(rift_pal.fg);
-        display.fillRect(BUCKET_X[b], 26, w, 6);
+        display.fillRect(BUCKET_X[b], 24, w, 4);
       }
       display.setColor(rift_pal.fg);
       snprintf(tmp, sizeof(tmp), "%d", counts[b]);
-      display.drawTextLeftAlign(BUCKET_X[b], 36, tmp);
+      display.drawTextLeftAlign(BUCKET_X[b], 30, tmp);
     }
 
-    display.setColor(rift_pal.rule);
-    display.fillRect(0, 52, display.width(), 1);
-
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(14, 56, "NODE");
-    display.drawTextLeftAlign(REACH_X, 56, "REACH");
-    display.drawTextRightAlign(278, 56, "HOPS");
-    display.drawTextRightAlign(318, 56, "HEARD");
+    display.drawTextLeftAlign(2, 44, "NODE");
+    display.drawTextLeftAlign(REACH_X, 44, "REACH");
+    display.drawTextRightAlign(284, 44, "HOPS");
+    display.drawTextRightAlign(314, 44, "AGE");
 
     for (int i = 0; i < RIFT_CONST_MAX; i++) _row_y[i] = -1;
 
     if (_count == 0) {
       display.setColor(rift_pal.mid);
       // "since boot" is part of the claim: this cache is cleared at startup, so an
-      // empty list after a restart is the normal state and not a fault.
-      display.drawTextLeftAlign(2, 68, "No adverts heard since boot");
+      // empty list after a restart is the normal state and not a fault. The second
+      // line says what to do about it.
+      display.drawTextLeftAlign(2, 56, "NO NODES HEARD SINCE BOOT");
+      display.drawTextLeftAlign(2, 68, "ADVERT NEAR on RIFT asks neighbours");
       renderNavBar(display, RIFT_NAV_NODES);
       return 1000;
     }
 
     clampScroll();
 
-    const int BOTTOM = 226;
-    int y = 68;
+    const int TOP = 56, BOTTOM = 226;
+    int y = TOP;
     int shown = 0;
     for (int i = _scroll; i < _count; i++) {
       int h = rowHeight(i);
       if (y + h > BOTTOM) break;
-      _row_y[i] = y;
+      _row_y[i] = y - 2;   // the fill's top, which is what a finger lands on
       shown++;
 
       bool sel = (i == _sel);
       AdvertPath* p = &_paths[i];
-      bool known = (p->path_len != 0xFF);
+      bool known = !riftHopsUnknown(p->path_len);
       int hops = known ? (int) riftHopCount(p->path_len) : 0;
 
       if (sel) {
         display.setColor(rift_pal.accent);
-        display.fillRect(0, y, display.width(), 12);
+        display.fillRect(0, y - 2, 316, h);
       }
       uint16_t ink = sel ? rift_pal.on_accent : rift_pal.fg;
 
@@ -3717,18 +3773,18 @@ class RiftConstellationScreen : public RiftScreen {
       // other in sunlight, a filled versus hollow square does not.
       display.setColor(ink);
       uint32_t age_s = ((uint32_t) millis() - p->recv_millis) / 1000u;
-      if (age_s < 1800u) display.fillRect(2, y + 3, 5, 5);
-      else               display.drawRect(2, y + 3, 5, 5);
+      if (age_s < 1800u) display.fillRect(2, y + 1, 5, 5);
+      else               display.drawRect(2, y + 1, 5, 5);
 
       char shown_name[24];
       riftTranslateUTF8(shown_name, p->name, sizeof(shown_name));
       display.setColor(ink);
-      display.drawTextEllipsized(14, y + 2, 120, shown_name);
+      display.drawTextEllipsized(10, y, 120, shown_name);
 
       // Saturating at the last cell rather than clamping the printed value: the
       // digit still says 21 where the bar has run out of room to.
       int reach = known ? (hops > REACH_CELLS - 1 ? REACH_CELLS - 1 : hops) : -1;
-      renderReach(display, y + 2, reach, sel ? rift_pal.on_accent : rift_pal.fg);
+      renderReach(display, y, reach, ink);
 
       if (known) {
         snprintf(tmp, sizeof(tmp), "%d", hops);
@@ -3737,38 +3793,60 @@ class RiftConstellationScreen : public RiftScreen {
         StrHelper::strncpy(tmp, "?", sizeof(tmp));
         display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
       }
-      display.drawTextRightAlign(278, y + 2, tmp);
+      display.drawTextRightAlign(284, y, tmp);
 
       ageText(p->recv_millis, tmp, sizeof(tmp));
       display.setColor(ink);
-      display.drawTextRightAlign(318, y + 2, tmp);
+      display.drawTextRightAlign(314, y, tmp);
 
       if (sel) {
-        int dy = y + 12;
+        // Two more rows inside the same fill: the route, then the action with the
+        // node's type and heard time on the right. All in on_accent - the accent
+        // as text was the old treatment for the action line, and text is the one
+        // thing the accent no longer is.
         int ambiguous = 0;
         char route[64];
         routeText(p, route, sizeof(route), &ambiguous);
 
-        display.setColor(rift_pal.mid);
+        display.setColor(rift_pal.on_accent);
         if (!known) {
-          display.drawTextLeftAlign(14, dy + 2, "flood, route unknown");
+          snprintf(tmp, sizeof(tmp), "route unknown %s heard by flood", RIFT_DOT);
+          display.drawTextLeftAlign(10, y + 12, tmp);
         } else if (ambiguous > 0) {
           // "ambiguous hops", not "candidates": this counts positions in the route
           // that could not be resolved, and one such position may itself have had
           // several candidate nodes behind it.
-          snprintf(tmp, sizeof(tmp), "%d ambiguous hop%s", ambiguous, ambiguous == 1 ? "" : "s");
-          display.drawTextLeftAlign(14, dy + 2, tmp);
+          snprintf(tmp, sizeof(tmp), "route ambiguous %s %d hop%s", RIFT_DOT, ambiguous,
+                   ambiguous == 1 ? "" : "s");
+          display.drawTextLeftAlign(10, y + 12, tmp);
         } else if (route[0]) {
           snprintf(tmp, sizeof(tmp), "via %s", route);
-          display.drawTextEllipsized(14, dy + 2, 300, tmp);
+          display.drawTextEllipsized(10, y + 12, 304, tmp);
         } else {
-          display.drawTextLeftAlign(14, dy + 2, "heard direct");
+          display.drawTextLeftAlign(10, y + 12, "heard direct");
         }
 
-        // Type and absolute time. The RSSI the design asks for here does not exist:
-        // adverts are cached without it, so the segment is omitted rather than
-        // filled with a number this device does not have.
+        // Offered only when it would work. A repeater cannot receive a message, and
+        // an action that will be refused is worse than no action shown.
+        // The inverse of the rule above is just as true: an action with no hint
+        // is an action nobody finds. Repeater control shipped without this line
+        // and was invisible - the row looked exactly like one where ENTER does
+        // nothing, so the key was never pressed.
         ContactInfo* contact = the_mesh.lookupContactByPubKey(p->pubkey_prefix, 6);
+        const char* action = "not a contact yet";
+        if (contact != NULL) {
+          if (riftCanDirectMessage(contact->type))          action = "ENTER: message";
+          else if (contact->type == RIFT_ADV_REPEATER)      action = "ENTER: control";
+          else if (contact->type == RIFT_ADV_SENSOR)        action = "ENTER: read";
+          else                                              action = "no action for this type";
+        }
+        display.drawTextLeftAlign(10, y + 24, action);
+
+        // Type and the absolute time it was heard, when the clock can say. The
+        // spec's "RIGHT: control" is not offered: left and right are the screen
+        // change on every screen, and one screen where they are not is a trap.
+        // The RSSI the design once asked for here does not exist - adverts are
+        // cached without it - so it is omitted rather than invented.
         const char* type = (contact != NULL) ? riftAdvertTypeName(contact->type) : "unknown";
         uint32_t clk = the_mesh.getRTCClock()->getCurrentTime();
         char detail[48];
@@ -3777,51 +3855,17 @@ class RiftConstellationScreen : public RiftScreen {
           riftCivilFromEpoch(p->recv_timestamp, NULL, NULL, NULL, &hh, &mm);
           snprintf(detail, sizeof(detail), "%s %s %02d:%02d", type, RIFT_DOT, hh, mm);
         } else {
-          // no invented time, and no --:-- either
-          StrHelper::strncpy(detail, type, sizeof(detail));
+          StrHelper::strncpy(detail, type, sizeof(detail));   // no invented time
         }
-        display.setColor(rift_pal.mid);
-        display.drawTextLeftAlign(14, dy + 14, detail);
-
-        // Offered only when it would work. A repeater cannot receive a message, and
-        // an action that will be refused is worse than no action shown.
-        // The inverse of the rule above is just as true: an action with no hint
-        // is an action nobody finds. Repeater control shipped without this line
-        // and was invisible - the row looked exactly like one where ENTER does
-        // nothing, so the key was never pressed.
-        const char* action = NULL;
-        if (contact != NULL) {
-          if (riftCanDirectMessage(contact->type))          action = "ENTER: message";
-          else if (contact->type == RIFT_ADV_REPEATER)      action = "ENTER: control";
-          else if (contact->type == RIFT_ADV_SENSOR)        action = "ENTER: read";
-        }
-        if (action != NULL) {
-          if (rift_day_mode) {
-            // Sized to the label. The fill was a fixed 78px at x 240 while the label
-            // is right-aligned at 316, so "ENTER: control" at 84px begins at 232 and
-            // its first glyph and a half sat outside the fill. It could not be seen
-            // until now: the ink out there used to be white on a white field. Black
-            // ink is what made a geometry error legible.
-            int tw = (int) strlen(action) * RIFT_CHAR_W;
-            display.setColor(rift_pal.accent);
-            display.fillRect(316 - tw - 4, dy + 12, tw + 6, 12);
-            display.setColor(rift_pal.on_accent);
-          } else {
-            display.setColor(rift_pal.accent);
-          }
-          display.drawTextRightAlign(316, dy + 14, action);
-        }
+        display.drawTextRightAlign(314, y + 24, detail);
       }
 
       y += h;
     }
 
-    int remaining = _count - _scroll - shown;
-    if (remaining > 0 && y + 12 <= BOTTOM) {
-      display.setColor(rift_pal.dim);
-      snprintf(tmp, sizeof(tmp), "%d more", remaining);
-      display.drawTextLeftAlign(14, y + 2, tmp);
-    }
+    // The window pattern says where in the list this is; "N more" used to.
+    // The expanded selection is three rows, so the window is counted in rows drawn.
+    riftDrawThumb(display, TOP - 2, BOTTOM - (TOP - 2), _scroll, _count, shown);
 
     renderNavBar(display, RIFT_NAV_NODES);
     return 1000;
@@ -4239,6 +4283,10 @@ class RiftRadarScreen : public RiftScreen {
   bool _have_sel;
   int  _sel_idx;
   bool _resel;        // set by up/down: adopt whatever is at _sel_idx next frame
+  // Whether any sweep has reported since the radios came up, so an empty table can
+  // say "listening" rather than "nothing found" while the first one is running.
+  bool _scanned_once = false;
+  int _watch_first = 0;   // first watched entry drawn; the window follows _watch_sel
 
 
   void beginWifi() {
@@ -4253,6 +4301,7 @@ class RiftRadarScreen : public RiftScreen {
   }
 
   void collectWifi(int n) {
+    _scanned_once = true;
     int8_t per_channel[RIFT_WF_CHANNELS];
     memset(per_channel, 0, sizeof(per_channel));
 
@@ -4362,6 +4411,7 @@ public:
     for (int i = 0; i < rf_watch_count; i++) rf_watch[i].present = false;
     _state = OFF;
     _torn_down = true;
+    _scanned_once = false;   // the next visit starts with "listening" again
   }
 
   // Driven every main-loop iteration, whichever screen is showing, so that
@@ -4433,6 +4483,7 @@ public:
           BLEDevice::getScan()->stop();
         }
         if (ble_scan_done || overdue) {
+          _scanned_once = true;
           BLEDevice::getScan()->clearResults();   // keep the internal map bounded
           rfAgeOut();
           // after ageing, so a device that has just dropped out of the table is
@@ -4581,9 +4632,26 @@ public:
     //
     // The heading therefore appears exactly when there is something to say. That
     // is deliberate rather than a flicker.
+    // Geometry from design/redesign-2026-09/rift-radar-spec.md: heading y 2, the
+    // count at y 16 in size 3, bands at y 48/60/72 with their cells from x 92,
+    // column headings y 88, nine rows from y 100, footer y 214. Text stops at
+    // x 314; 318-319 is the thumb's.
+    char tmp[64];
+
+    // The heading is the source and the state - which radios are on is the
+    // distinction the source switch exists to make, and "0 devices" with a radio
+    // off is a different reading from "0 devices" with it on. The watch lamp
+    // takes the row when a watched device is present.
     if (!renderWatchLamp(display)) {
-      if (_state == OFF) renderHeading(display, "IDLE");
-      else if (!_wifi_up && !_ble_up) renderHeading(display, "INITIALISING");
+      const char* src = (rift_radar_src == RIFT_SRC_BOTH) ? "WIFI+BLE"
+                      : (rift_radar_src == RIFT_SRC_WIFI) ? "WIFI" : "BLE";
+      const char* st = (_state == OFF) ? "IDLE"
+                     : (!_wifi_up && !_ble_up) ? "INITIALISING" : "SCANNING";
+      snprintf(tmp, sizeof(tmp), "%s %s %s", src, RIFT_DOT, st);
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(2, 2, tmp);
+      // a claim the user is entitled to see on the device, not only in the README
+      display.drawTextRightAlign(314, 2, "nothing transmitted");
     }
 
     // snapshot under the lock, then draw without holding it
@@ -4596,67 +4664,49 @@ public:
     portEXIT_CRITICAL(&rf_mux);
     _last_n = n;
 
-    int wifi_n = 0, ble_n = 0, new_n = 0;
+    int new_n = 0;
     for (int i = 0; i < n; i++) {
-      if (snap[i].is_wifi) wifi_n++; else ble_n++;
       if (now_ms - snap[i].first_seen < 60000) new_n++;
     }
 
-    char tmp[64];
-
     // The one large value on the screen. "Is there anything around me" is the
     // question RADAR exists for, and it was previously answered by counting
-    // dots in a scatter plot.
+    // dots in a scatter plot. "--" until the first sweep has reported.
     display.setTextSize(3);
     display.setColor(rift_pal.fg);
-    sprintf(tmp, "%d", n);
-    display.drawTextLeftAlign(2, 22, tmp);
+    bool first_sweep_pending = (_state != OFF && n == 0 && !_scanned_once);
+    if (first_sweep_pending) strcpy(tmp, "--"); else sprintf(tmp, "%d", n);
+    display.drawTextLeftAlign(2, 16, tmp);
+    int count_w = (int) strlen(tmp) * 18;
 
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(44, 24, "DEVICES NEARBY");
-    // A disabled radio is dimmed and labelled rather than hidden. Hiding it would
-    // make "0 ble" and "not looking for ble" the same reading, which is the
-    // distinction the whole switch exists to make.
-    display.setColor(riftScanWifi() ? rift_pal.fg : rift_pal.dim);
-    snprintf(tmp, sizeof(tmp), riftScanWifi() ? "%d wifi" : "wifi off", wifi_n);
-    display.drawTextLeftAlign(44, 36, tmp);
-    display.setColor(riftScanBle() ? rift_pal.fg : rift_pal.dim);
-    snprintf(tmp, sizeof(tmp), riftScanBle() ? "%d ble" : "ble off", ble_n);
-    display.drawTextLeftAlign(120, 36, tmp);
+    display.drawTextLeftAlign(2 + count_w + 6, 32, n == 1 ? "DEVICE" : "DEVICES");
 
-    // "and is that changing" - the second half of the question
+    // "and is that changing" - the second half of the question. Kept from the
+    // previous screen, in mid rather than accent: it is information, not a warning.
     if (new_n > 0) {
-      sprintf(tmp, "+%d new", new_n);
-      if (rift_day_mode) {
-        display.setColor(rift_pal.accent);
-        display.fillRect(280, 23, 40, 10);
-        display.setColor(rift_pal.on_accent);
-      } else {
-        display.setColor(rift_pal.accent);
-      }
-      display.drawTextRightAlign(display.width() - 2, 24, tmp);
+      snprintf(tmp, sizeof(tmp), "+%d new in 60s", new_n);
       display.setColor(rift_pal.mid);
-      display.drawTextRightAlign(display.width() - 2, 36, "in 60s");
+      display.drawTextRightAlign(314, 32, tmp);
     }
 
     // Distance bands replace the scatter. The scatter placed each blip by
     // `i & 15` - its index in a table that compacts whenever a device ages out -
     // so blips moved with nothing having moved. One countable cell per device
-    // in a signal-strength band says the same thing and stays still.
-    display.setColor(rift_pal.rule);
-    display.fillRect(0, 54, display.width(), 1);
-
-    static const int BAND_Y[3] = { 62, 78, 94 };
+    // in a signal-strength band says the same thing and stays still. The dBm
+    // boundary sits in its own column so the three cell rows start on one x.
+    static const int BAND_Y[3] = { 48, 60, 72 };
     static const char* BAND_LABEL[3] = { "CLOSE", "MID", "FAR" };
-    static const char* BAND_RANGE[3] = { "-30..-60", "-60..-80", "-80..-100" };
-    const int CELL_X = 116;
-    const int CELL_SHOWN = 24;   // (320-116-2)/8 = 25 slots; the last marks overflow
+    static const char* BAND_RANGE[3] = { "> -60", "-60/-80", "< -80" };
+    const int CELL_X = 92;
+    const int CELL_SLOTS = 28;   // 92 + 28*8 = 316; the last slot is the overflow mark
 
     for (int b = 0; b < 3; b++) {
-      display.setColor(rift_pal.mid);
+      display.setColor(rift_pal.fg);
       display.drawTextLeftAlign(2, BAND_Y[b], BAND_LABEL[b]);
-      display.drawTextLeftAlign(46, BAND_Y[b], BAND_RANGE[b]);
+      display.setColor(rift_pal.dim);
+      display.drawTextLeftAlign(38, BAND_Y[b], BAND_RANGE[b]);
 
       int cnt = 0;
       for (int i = 0; i < n; i++) {
@@ -4666,7 +4716,7 @@ public:
       }
 
       display.setColor(rift_pal.fg);
-      int drawn = (cnt > CELL_SHOWN) ? CELL_SHOWN : cnt;
+      int drawn = (cnt > CELL_SLOTS) ? CELL_SLOTS - 1 : cnt;
       for (int c = 0; c < drawn; c++) {
         int x = CELL_X + c * 8;
         // FAR is hollow rather than a dimmer grey: brightness steps disappear
@@ -4674,10 +4724,11 @@ public:
         if (b == 2) display.drawRect(x, BAND_Y[b], 6, 8);
         else        display.fillRect(x, BAND_Y[b], 6, 8);
       }
-      if (cnt > CELL_SHOWN) {
-        // more than the row can hold - say so rather than silently clipping
-        display.setColor(rift_pal.accent);
-        display.fillRect(CELL_X + CELL_SHOWN * 8, BAND_Y[b], 6, 8);
+      if (cnt > CELL_SLOTS) {
+        // more than the row can hold: a glyph that says "more", in fg. Overflow is
+        // not a warning, and the accent is spoken for.
+        display.setColor(rift_pal.fg);
+        display.drawTextLeftAlign(CELL_X + (CELL_SLOTS - 1) * 8, BAND_Y[b], "\xAF");
       }
     }
 
@@ -4721,67 +4772,74 @@ public:
 
     // Scroll follows the cursor. Without this the selection could sit outside the
     // visible window, which is the state NODES was just fixed for having.
-    const int ROWS = (192 - 120) / RIFT_LINE_H + 1;
+    const int LIST_TOP = 100, ROWS = 9;
     if (_sel_idx < _scroll) _scroll = _sel_idx;
     if (_sel_idx >= _scroll + ROWS) _scroll = _sel_idx - ROWS + 1;
     if (_scroll < 0) _scroll = 0;
 
-    display.setColor(rift_pal.rule);
-    display.fillRect(0, 112, display.width(), 1);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 88, "DEVICE");
+    display.drawTextLeftAlign(254, 88, "RSSI");
+    display.drawTextLeftAlign(290, 88, "SEEN");
 
-    int y = 120;
-    for (int i = _scroll; i < n && y <= 192; i++, y += RIFT_LINE_H) {
-      bool top = (i == 0);
+    int y = LIST_TOP;
+    int shown = 0;
+    for (int i = _scroll; i < n && shown < ROWS; i++, y += RIFT_LINE_H, shown++) {
       bool is_sel = _have_sel && (i == _sel_idx);
       bool watched = rfWatchFind(snap[i].key, snap[i].is_wifi) >= 0;
 
-      // cursor left of the RSSI column, and a filled block for a watched device.
-      // Two marks rather than one colour: a watched device that is also selected
-      // has to read as both, and colour cannot say two things in one cell.
+      // The selected row is the accent fill every other list uses. A watched
+      // device carries a filled 5x5 in its own column: two marks rather than one
+      // colour, because a watched device that is also selected has to read as
+      // both, and colour cannot say two things in one cell.
       if (is_sel) {
-        display.setColor(rift_pal.fg);
-        display.drawTextLeftAlign(-4, y, ">");
-      }
-      if (watched) {
         display.setColor(rift_pal.accent);
-        display.fillRect(24, y + 1, 4, 6);
+        display.fillRect(0, y - 2, 316, 12);
       }
+      uint16_t ink = is_sel ? rift_pal.on_accent : rift_pal.fg;
+      uint16_t sub = is_sel ? rift_pal.on_accent : rift_pal.mid;
+
+      display.setColor(sub);
+      display.drawTextLeftAlign(2, y, snap[i].is_wifi ? "W" : "B");
+
       char filtered[sizeof(snap[i].name)];
       riftTranslateUTF8(filtered, snap[i].name, sizeof(filtered));
+      display.setColor(ink);
+      display.drawTextEllipsized(14, y, 222, filtered);
 
-      display.setColor(top ? rift_pal.fg : rift_pal.mid);
-      sprintf(tmp, "%d", snap[i].rssi);
-      display.drawTextLeftAlign(2, y, tmp);
-      display.drawTextEllipsized(32, y, 180, filtered);
-
-      if (snap[i].is_wifi) {
-        sprintf(tmp, "WIFI c%d%s", snap[i].channel, snap[i].encrypted ? " *" : "");
-      } else {
-        strcpy(tmp, "BLE");
+      if (watched) {
+        display.setColor(ink);
+        display.fillRect(243, y + 1, 5, 5);
       }
-      display.setColor(top ? (rift_day_mode ? 0x2104 : rift_pal.accent) : rift_pal.mid);
-      display.drawTextRightAlign(display.width() - 2, y, tmp);
+
+      sprintf(tmp, "%d", snap[i].rssi);
+      display.setColor(ink);
+      display.drawTextRightAlign(272, y, tmp);
+
+      // How long since it was last heard, so a row that is about to age out reads
+      // as one. "now" inside two seconds; the age otherwise.
+      uint32_t since = (uint32_t) (now_ms - snap[i].seen_at);
+      if (since < 2000u) strcpy(tmp, "now"); else riftFormatAge(since, tmp, sizeof(tmp));
+      display.setColor(ink);
+      display.drawTextRightAlign(314, y, tmp);
     }
 
     if (n == 0) {
       display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(2, 120, "listening...");
+      if (first_sweep_pending) {
+        display.drawTextLeftAlign(2, LIST_TOP, "listening...");
+      } else if (_state == OFF) {
+        display.drawTextLeftAlign(2, LIST_TOP, "Not scanning.");
+      } else {
+        display.drawTextLeftAlign(2, LIST_TOP, "No devices in the last scan.");
+        display.drawTextLeftAlign(2, LIST_TOP + 12, "S switches source; walls cost 20 dB.");
+      }
     }
 
-    display.setColor(rift_pal.rule);
-    display.fillRect(0, 196, display.width(), 1);
+    riftDrawThumb(display, LIST_TOP - 2, ROWS * RIFT_LINE_H, _scroll, n, shown);
+
     display.setColor(rift_pal.mid);
-    {
-      char foot[44];
-      int watched = rf_watch_count;
-      // the count doubles as the way in: it is the only hint that a list of them
-      // exists, and W is how you reach it
-      if (watched > 0) snprintf(foot, sizeof(foot), "ENTER watch  W wave/%d  S src", watched);
-      else             snprintf(foot, sizeof(foot), "ENTER watch  W wave  S src");
-      display.drawTextLeftAlign(2, 206, foot);
-    }
-    // a claim the user is entitled to see on the device, not only in the README
-    display.drawTextRightAlign(display.width() - 2, 206, "nothing transmitted");
+    display.drawTextLeftAlign(2, 214, "ENTER: waterfall  N: name  S: source  W: watched");
 
     renderNavBar(display, RIFT_NAV_RADAR);
     return 700;   // coarse: the TFT shares its SPI bus with the LoRa radio
@@ -4858,10 +4916,9 @@ public:
 
     if (rf_watch_count == 0) {
       display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(2, 40, "Nothing marked.");
-      display.setColor(rift_pal.dim);
-      display.drawTextLeftAlign(2, 56, "W goes back. ENTER on a device");
-      display.drawTextLeftAlign(2, 68, "in that list marks it.");
+      display.drawTextLeftAlign(2, 40, "No watched devices.");
+      display.drawTextLeftAlign(2, 52, "N on a RADAR row names one, which watches it.");
+      display.drawTextLeftAlign(2, 214, "W: back");
       renderNavBar(display, RIFT_NAV_RADAR);
       return 1000;
     }
@@ -4869,8 +4926,18 @@ public:
     if (_watch_sel >= rf_watch_count) _watch_sel = rf_watch_count - 1;
     if (_watch_sel < 0) _watch_sel = 0;
 
+    // Six two-line rows fit between the heading and the footer. The list holds
+    // twelve, and rows seven to twelve used to draw over the footer and the nav
+    // bar with the cursor able to reach them unseen. A window that follows the
+    // cursor, and the thumb says where in the list it is.
+    const int WROWS = 6;
+    if (_watch_sel < _watch_first) _watch_first = _watch_sel;
+    if (_watch_sel >= _watch_first + WROWS) _watch_first = _watch_sel - WROWS + 1;
+    if (_watch_first < 0) _watch_first = 0;
+    riftDrawThumb(display, 28, WROWS * RIFT_LINE_H * 2, _watch_first, rf_watch_count, WROWS);
+
     int y = 30;
-    for (int i = 0; i < rf_watch_count; i++, y += RIFT_LINE_H * 2) {
+    for (int i = _watch_first; i < rf_watch_count && i < _watch_first + WROWS; i++, y += RIFT_LINE_H * 2) {
       bool sel = (i == _watch_sel);
       if (sel) {
         display.setColor(rift_pal.accent);
@@ -4895,7 +4962,7 @@ public:
       else if (rf_watch[i].present) StrHelper::strncpy(tag, "near", sizeof(tag));
       else                          StrHelper::strncpy(tag, "not heard", sizeof(tag));
       display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
-      display.drawTextRightAlign(display.width() - 2, y, tag);
+      display.drawTextRightAlign(314, y, tag);
 
       // The address, because a BLE name is often absent or shared and the key is what
       // is actually being matched. It is also the only way to tell two "AirPods"
@@ -4909,10 +4976,8 @@ public:
       display.drawTextLeftAlign(16, y + RIFT_LINE_H, addr);
     }
 
-    display.setColor(rift_pal.rule);
-    display.fillRect(0, 196, display.width(), 1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 206, "ENTER unwatch  N rename  up/down  W back");
+    display.drawTextLeftAlign(2, 214, "ENTER: forget  N: rename  W: back");
     renderNavBar(display, RIFT_NAV_RADAR);
     return 1000;
   }
@@ -5024,37 +5089,46 @@ public:
       riftLogf("radar source: %s", label);
       return true;
     }
+    // Keys after the September design round, and the footer names them:
+    //   ENTER  waterfall on and off - a view swap, so it is the same key both ways
+    //   N      name the selected device, which also watches it
+    //   S      source
+    //   W      the watched list and back
+    // ENTER used to toggle the watch and W used to walk three views in a ring;
+    // naming a device meant watching it first and then finding it in a second
+    // list. Now the row you are looking at is the one you name.
     if (c == 'w' || c == 'W') {
-      // bands -> waterfall -> watches -> bands. Three on one key rather than a second
-      // letter: they are all "which view of the same scan", and the footer names it.
-      _view = (_view == VIEW_BANDS) ? VIEW_WATERFALL
-            : (_view == VIEW_WATERFALL) ? VIEW_WATCHES : VIEW_BANDS;
+      _view = (_view == VIEW_WATCHES) ? VIEW_BANDS : VIEW_WATCHES;
       return true;
     }
-    if (c == KEY_ENTER && _view == VIEW_BANDS) {
+    if (c == KEY_ENTER) {
+      _view = (_view == VIEW_WATERFALL) ? VIEW_BANDS : VIEW_WATERFALL;
+      return true;
+    }
+    if ((c == 'n' || c == 'N') && _view == VIEW_BANDS) {
       if (!_have_sel) {
-        _task->showAlert("Nothing to watch", 1200);
-      } else {
+        _task->showAlert("Nothing selected", 1200);
+        return true;
+      }
+      int at = rfWatchFind(_sel_key, _sel_is_wifi);
+      if (at < 0) {
         char msg[40];
         switch (rfWatchToggle(_sel_key, _sel_is_wifi, _sel_name)) {
           case RF_WATCH_ADDED:
             riftSaveSettings();
-            snprintf(msg, sizeof(msg), "Watching %s", _sel_name);
-            _task->showAlert(msg, 1600);
             riftLogf("watch + %s %s", _sel_is_wifi ? "wifi" : "ble", _sel_name);
-            break;
-          case RF_WATCH_REMOVED:
-            riftSaveSettings();
-            _task->showAlert("Watch removed", 1400);
-            riftLogf("watch - %s", _sel_name);
+            at = rfWatchFind(_sel_key, _sel_is_wifi);
             break;
           case RF_WATCH_FULL:
             // nothing changed, so nothing is saved either
             snprintf(msg, sizeof(msg), "Watch list full (%d)", RIFT_WATCH_MAX);
             _task->showAlert(msg, 1800);
+            return true;
+          default:
             break;
         }
       }
+      if (at >= 0) _task->openRenameWatch(at);
       return true;
     }
     // waterfall is a level down from the band view
@@ -5109,8 +5183,12 @@ public:
 
     display.setColor(rift_pal.bg);
     display.fillRect(x, y, w, h);
-    display.setColor(rift_pal.accent);
+    // A 2px frame in rule (September design round): a box says "on top" by being
+    // a box, where the accent said "act on all of this". Two nested rects, since
+    // the driver has no line width.
+    display.setColor(rift_pal.rule);
     display.drawRect(x, y, w, h);
+    display.drawRect(x + 1, y + 1, w - 2, h - 2);
 
     display.setTextSize(1);
     display.setColor(rift_pal.accent);
@@ -5771,13 +5849,18 @@ private:
   const char* deliveryLabel(const RiftMsgLog::Entry* p, char* buf, size_t buf_len) {
     if (!p->outgoing || p->expected_ack == 0) return NULL;   // channel send / incoming
     if (p->delivered) {
-      snprintf(buf, buf_len, "ACK %.1fs", p->trip_ms / 1000.0f);
+      // The check glyph (CP437 0xFB) is the form; the colour is the second cue.
+      // No channel or sender name can begin with it, and it sits in the slot where
+      // names never are, so "delivered" survives even where day-mode green and a
+      // channel colour would be confused. The trip time is what this device knows
+      // about the delivery; the hop count of the ack is not.
+      snprintf(buf, buf_len, "\xFB %.1fs", p->trip_ms / 1000.0f);
       return buf;
     }
     // subtract rather than add: millis() wraps at ~49.7 days, and
     // (sent_at + timeout) would overflow and report a fresh send as timed out
     if (p->timeout_ms > 0 && millis() - p->sent_at_ms > p->timeout_ms) return "no ack";
-    return "...";
+    return "sending";
   }
 
   int pickerRows() const { return (BODY_BOTTOM - (BODY_TOP + 4)) / RIFT_LINE_H; }
@@ -5798,15 +5881,26 @@ private:
   // have moved the cursor to is the wrong row to lose it on. Drawn in the fill's
   // own ink instead: the shape survives, which is the property it was chosen for.
   void renderUnreadDot(DisplayDriver& display, int x, int y, bool on_fill = false) {
-    display.setColor(on_fill ? rift_pal.on_accent : rift_pal.accent);
+    // fg since the September design round: unread is a shape, and the accent is
+    // reserved for active tab, selection, warning and the wordmark.
+    display.setColor(on_fill ? rift_pal.on_accent : rift_pal.fg);
     display.fillRect(x, y, 3, 3);
   }
 
   int renderPicker(DisplayDriver& display) {
-    renderHeading(display, "CONVERSATIONS");
     display.setTextSize(1);
-
     int total = _pick_count;
+
+    // The heading is the count, in words, with the key on the right. "How many is
+    // there" was one of the three questions this list could not answer, and the
+    // total was once shown as a fraction of a cursor position, which read as one.
+    {
+      char cnt[32];
+      snprintf(cnt, sizeof(cnt), "%d conversation%s", total, total == 1 ? "" : "s");
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(2, 2, cnt);
+      display.drawTextRightAlign(314, 2, "ENTER: open");
+    }
     int y = BODY_TOP + 4;
     bool drew_channels = false, drew_direct = false;
     _pick_rows_drawn = 0;
@@ -5843,18 +5937,23 @@ private:
       // it and costs two cells on every row to say something about one.
       if (sel) {
         display.setColor(rift_pal.accent);
-        display.fillRect(0, y - 2, display.width(), 12);
+        display.fillRect(0, y - 2, 316, 12);
       }
-      if (_picks[i].unread > 0) renderUnreadDot(display, 1, y + 2, sel);
+      if (_picks[i].unread > 0) renderUnreadDot(display, 2, y + 2, sel);
 
-      // The channel's colour, as the 2px chip the strip borders already use. Only
-      // four channels get one - see design/channel-colours.md - so a fifth draws
-      // nothing rather than repeating a colour, which would be worse than none.
+      // The channel's colour, as the 2px chip the strip borders already use, the
+      // full row height. Only four channels get one - see design/channel-colours.md
+      // - so a fifth draws the chip in rule: it has an identity, not a colour, and
+      // repeating a colour would be worse than none. Public, which every node
+      // has, draws no chip at all.
       if (is_ch) {
         uint16_t cc = riftChannelColour(_picks[i].channel_idx);
         if (cc != RIFT_CHAN_COL_NONE) {
           display.setColor(cc);
-          display.fillRect(6, y, 2, 7);
+          display.fillRect(7, y - 2, 2, 12);
+        } else if (_picks[i].channel_idx != 0) {
+          display.setColor(sel ? rift_pal.on_accent : rift_pal.rule);
+          display.fillRect(7, y - 2, 2, 12);
         }
       }
 
@@ -5906,13 +6005,23 @@ private:
       } else {
         riftFormatAgeSecs(now - _picks[i].last_ts, age, sizeof(age));
       }
-      if (_picks[i].is_room) snprintf(right, sizeof(right), "ROOM %s", age);
-      else                   StrHelper::strncpy(right, age, sizeof(right));
-      display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
-      display.drawTextRightAlign(display.width() - 4, y, right);
+      // Type in its own column at x 258 in mid, age right-aligned at 314 in fg -
+      // the September design system's row: the tail is the thumb's, and the two
+      // facts get two colours because they are two facts.
+      (void) right;
+      if (_picks[i].is_room) {
+        display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
+        display.drawTextLeftAlign(258, y, "ROOM");
+      }
+      display.setColor(sel ? rift_pal.on_accent : rift_pal.fg);
+      display.drawTextRightAlign(314, y, age);
 
       y += RIFT_LINE_H;
     }
+
+    // The window pattern: where in the list this is, in rows drawn.
+    riftDrawThumb(display, BODY_TOP + 2, BODY_BOTTOM - (BODY_TOP + 2),
+                  _pick_scroll, total, _pick_rows_drawn);
 
     if (_pick_count == 0) {
       display.setColor(UIColor::secondary_txt);
@@ -5927,21 +6036,8 @@ private:
                                 "list full - contacts with no history not shown");
     }
 
-    // How many conversations there are, always - and in words, because "4/17" in
-    // this corner was a scroll position and read as one. "How many is there" was
-    // one of the three questions this list could not answer, and the total was
-    // already on screen; it was hidden on exactly the short lists where it is
-    // cheapest to draw and shown as a fraction of a cursor position on the long
-    // ones. The position is what the list itself shows by scrolling.
-    if (total > 0) {
-      display.setColor(UIColor::secondary_txt);
-      char cnt[24];
-      snprintf(cnt, sizeof(cnt), "%d conversation%s", total, total == 1 ? "" : "s");
-      display.drawTextRightAlign(display.width() - 4, BODY_TOP + 4, cnt);
-    }
-
-    display.setColor(UIColor::secondary_txt);
-    display.drawTextLeftAlign(4, INPUT_Y, "drag or trackball  tap or ENTER opens");
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, INPUT_Y, "drag or trackball  tap or ENTER opens");
 
     renderNavBar(display, RIFT_NAV_COMMS);
     return 1000;
@@ -6222,8 +6318,10 @@ public:
       // Own messages carry a 2px accent bar down the left edge rather than being
       // right-aligned: on a 320px screen right alignment costs half the width for
       // every outgoing line, and this costs two pixels.
+      // fg, not accent (September design round): no other row has a bar, so the
+      // shape alone says "mine", and the accent is kept for selection and warning.
       if (p->outgoing) {
-        display.setColor(rift_pal.accent);
+        display.setColor(rift_pal.fg);
         display.fillRect(0, y, 2, block_h - 2);
       }
 
@@ -6282,20 +6380,22 @@ public:
       // two clock times. Delivery wins the slot when there is one: a channel
       // message has no ack truth, so the hop count stands alone there.
       if (ack != NULL) {
-        // green for delivered, accent for a send that never landed
-        bool ok = (strncmp(ack, "ACK", 3) == 0);
-        display.setColor(ok ? rift_pal.ok : (ack[0] == '.' ? rift_pal.mid : rift_pal.accent));
-        display.drawTextRightAlign(display.width() - 2, y, ack);
+        // ok for delivered, which begins with the check glyph; mid while it is
+        // still on its way; accent for a send that never landed, which is the one
+        // warning in the history.
+        bool ok = ((unsigned char) ack[0] == 0xFB);
+        bool waiting = (strcmp(ack, "sending") == 0);
+        display.setColor(ok ? rift_pal.ok : (waiting ? rift_pal.mid : rift_pal.accent));
+        display.drawTextRightAlign(314, y, ack);
       } else {
         int hops = 0;
         bool direct = false;
         if (riftOriginHops(p->origin, &hops, &direct)) {
+          // "0 hops" rather than "direct": one column, one unit, never empty.
           char hb[12];
-          if (direct)        strcpy(hb, "direct");
-          else if (hops == 1) strcpy(hb, "1 hop");
-          else                snprintf(hb, sizeof(hb), "%d hops", hops);
+          snprintf(hb, sizeof(hb), "%d hop%s", direct ? 0 : hops, (!direct && hops == 1) ? "" : "s");
           display.setColor(rift_pal.mid);
-          display.drawTextRightAlign(display.width() - 2, y, hb);
+          display.drawTextRightAlign(314, y, hb);
         }
       }
 
@@ -6319,6 +6419,14 @@ public:
     renderTabs(display);
     display.setTextSize(1);
 
+    // The window pattern, in pixels: the history is anchored at its newest end, so
+    // the window's top is the content height less the view less the scroll.
+    {
+      long first = (long) total_h - (long) view_h - (long) _scroll;
+      if (first < 0) first = 0;
+      riftDrawThumb(display, _hist_top, BODY_BOTTOM - _hist_top, first, total_h, view_h);
+    }
+
     // An empty conversation now exists, where it could not before: the history used
     // to show every message from everywhere, so it was blank only on a device that
     // had never received anything. A blank panel reads as a screen that failed to
@@ -6334,16 +6442,17 @@ public:
     display.setColor(rift_pal.rule);
     display.fillRect(0, INPUT_Y - 4, display.width(), 1);
 
-    display.setColor(rift_pal.dim);
+    display.setColor(rift_pal.mid);
     if (_len == 0) {
-      display.drawTextRightAlign(display.width() - 2, INPUT_Y, "ENTER: conversations");
+      display.drawTextRightAlign(316, INPUT_Y, "ENTER: conversations");
     } else {
-      // MeshCore truncates at MAX_TEXT_LEN, so show how close the message is
+      // MeshCore truncates at MAX_TEXT_LEN, so show how close the message is: mid
+      // while there is room, fg for the last ten characters, accent at the cap.
       char cnt[12];
       int cap = channelCapacity();
-      sprintf(cnt, "%d/%d", _len, cap);
-      display.setColor(_len >= cap ? rift_pal.accent : rift_pal.dim);
-      display.drawTextRightAlign(display.width() - 2, INPUT_Y, cnt);
+      snprintf(cnt, sizeof(cnt), "%d/%d", _len, cap);
+      display.setColor(_len >= cap ? rift_pal.accent : (_len >= cap - 10 ? rift_pal.fg : rift_pal.mid));
+      display.drawTextRightAlign(316, INPUT_Y, cnt);
     }
 
     // Translate first, then take the tail of the *translated* text. The compose
@@ -6624,8 +6733,12 @@ public:
 
     display.setColor(rift_pal.bg);
     display.fillRect(x, y, w, h);
-    display.setColor(rift_pal.accent);
+    // A 2px frame in rule (September design round): a box says "on top" by being
+    // a box, where the accent said "act on all of this". Two nested rects, since
+    // the driver has no line width.
+    display.setColor(rift_pal.rule);
     display.drawRect(x, y, w, h);
+    display.drawRect(x + 1, y + 1, w - 2, h - 2);
 
     display.setTextSize(1);
     display.setColor(rift_pal.accent);
@@ -6886,8 +6999,12 @@ public:
 
     display.setColor(rift_pal.bg);
     display.fillRect(x, y, w, h);
-    display.setColor(rift_pal.accent);
+    // A 2px frame in rule (September design round): a box says "on top" by being
+    // a box, where the accent said "act on all of this". Two nested rects, since
+    // the driver has no line width.
+    display.setColor(rift_pal.rule);
     display.drawRect(x, y, w, h);
+    display.drawRect(x + 1, y + 1, w - 2, h - 2);
 
     display.setTextSize(1);
     const int lx = x + 5;
@@ -7271,8 +7388,12 @@ public:
 
     display.setColor(rift_pal.bg);
     display.fillRect(x, y, w, h);
-    display.setColor(rift_pal.accent);
+    // A 2px frame in rule (September design round): a box says "on top" by being
+    // a box, where the accent said "act on all of this". Two nested rects, since
+    // the driver has no line width.
+    display.setColor(rift_pal.rule);
     display.drawRect(x, y, w, h);
+    display.drawRect(x + 1, y + 1, w - 2, h - 2);
 
     display.setTextSize(1);
     display.setColor(rift_pal.dim);
@@ -7358,8 +7479,12 @@ public:
 
     display.setColor(rift_pal.bg);
     display.fillRect(x, y, w, h);
-    display.setColor(rift_pal.accent);
+    // A 2px frame in rule (September design round): a box says "on top" by being
+    // a box, where the accent said "act on all of this". Two nested rects, since
+    // the driver has no line width.
+    display.setColor(rift_pal.rule);
     display.drawRect(x, y, w, h);
+    display.drawRect(x + 1, y + 1, w - 2, h - 2);
 
     display.setTextSize(1);
     display.setColor(rift_pal.accent);
@@ -8256,8 +8381,11 @@ void UITask::loop() {
 
         _display->setColor(rift_pal.bg);
         _display->fillRect(bx, by, bw, bh);
-        _display->setColor(rift_pal.accent);
+        // the same 2px rule frame as every overlay: an alert is a box on top, and
+        // the accent is kept for what needs acting on
+        _display->setColor(rift_pal.rule);
         _display->drawRect(bx, by, bw, bh);
+        _display->drawRect(bx + 1, by + 1, bw - 2, bh - 2);
         _display->setColor(rift_pal.fg);
         _display->drawTextCentered(_display->width() / 2, by + 14, _alert);
         _next_refresh = _alert_expiry;

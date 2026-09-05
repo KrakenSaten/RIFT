@@ -541,6 +541,10 @@ static inline char riftNordicToCP437(uint32_t cp) {
     case 0x00C4: return (char) 0x8E;                  // A-umlaut
     case 0x00F6: return (char) 0x94;                  // o-umlaut
     case 0x00D6: return (char) 0x99;                  // O-umlaut
+    case 0x00FC: return (char) 0x81;                  // u-umlaut
+    case 0x00DC: return (char) 0x9A;                  // U-umlaut
+    case 0x00E9: return (char) 0x82;                  // e-acute
+    case 0x00E8: return (char) 0x8A;                  // e-grave
     case 0x00F8: return (char) RIFT_GLYPH_OSLASH;     // o-slash: synthesised
     case 0x00D8: return (char) RIFT_GLYPH_OSLASH_UC;  // O-slash: synthesised
   }
