@@ -473,14 +473,17 @@ Claude Design; PNG pluss markdown er like bra så lenge koordinatene er reelle.
 
 ## 11. Skjermbilder
 
-**Alle bildene i `design/screens/` er fra 20. august og foreldet.** De viser ikke
-COMMS-redesignet, avsenderfarger, knapperaden på hjem, rekkeviddeskalaen i NODES,
-repeater-panelet, oppdagelsespanelet, scope-skjermen eller de nye SYSTEM-radene.
+**Bildene i `design/screens/` med navn `<skjerm>-<modus>.png` er enhetens egne
+piksler**, tatt 5. september med `tools/rift-screenshot.py` over USB: firmwaren
+tegner skjermen den blir bedt om og strømmer rammebufferen, 320×240 RGB565, som
+PNG i 1× og 2×. De er eksakte, ikke fotografert, og kan måles fra. `-2x`-filene er
+nærmeste-nabo-skalert, så hver enhetspiksel er et 2×2-kvadrat.
 
-Firmwaren har ingen skjermdump. Ferske bilder er fotografier av enheten, og det er
-verdt å ta dem i både natt- og dagmodus, innendørs og i sol. Et alternativ som kan
-bygges på en time er en USB-kommando som strømmer rammebufferen (150 KB RGB565) til
-PC-en som PNG; si fra om det er ønsket før runden starter, så blir bildene eksakte.
+De eldre filene (`nodes-1c-*`, `system-1d-*`, `comms-4c`, `splash-2c`, `mark-*`) er
+renderinger fra augustrunden og viser ikke dagens skjerm. De beholdes som historikk.
+
+Overlegg og popuper fanges med `--screen current` etter at de er satt opp på
+enheten; en ny runde bilder er en kommando, ikke en fotosesjon.
 
 ---
 

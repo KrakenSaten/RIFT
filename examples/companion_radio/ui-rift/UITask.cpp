@@ -4,6 +4,7 @@
 #include "RiftRxLog.h"
 #include "RiftRepeater.h"
 #include "RiftScopes.h"
+#include "RiftScreenDump.h"
 #include <helpers/sensors/LPPDataHelpers.h>   // LPP_* type codes, for the telemetry labels
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/UTF8Helpers.h>
@@ -873,6 +874,37 @@ static const RiftPalette RIFT_DAY = {
 
 RiftPalette rift_pal = RIFT_NIGHT;
 bool rift_day_mode = false;
+
+// ---- screen dump, see RiftScreenDump.h ----
+//
+// The request is recorded here and acted on from UITask::loop(): the parser runs
+// inside the mesh loop, and the frame it wants does not exist until the UI has
+// drawn it. Two steps - switch and redraw, then stream - so what goes out is the
+// screen that was asked for, freshly composed, overlays and alert box included.
+static volatile bool s_dump_pending = false;
+static volatile int  s_dump_nav = -1;
+
+void riftRequestScreenDump(int nav) {
+  s_dump_nav = nav;
+  s_dump_pending = true;
+}
+
+// Raw on the port, outside the companion framing: a frame holds 184 bytes and
+// this is 153600. Nothing else writes to Serial from this loop iteration, so the
+// bytes cannot interleave with a push frame.
+static void riftStreamFrame() {
+#ifdef RIFT_DISPLAY
+  const uint16_t* fb = display.frameBuffer();
+  if (fb == NULL) return;   // no canvas: the driver is drawing straight to the panel
+  const uint16_t w = (uint16_t) display.width(), h = (uint16_t) display.height();
+  const uint8_t hdr[8] = { (uint8_t) (w & 0xFF), (uint8_t) (w >> 8),
+                           (uint8_t) (h & 0xFF), (uint8_t) (h >> 8), 16, 0, 0, 0 };
+  Serial.write((const uint8_t*) "RIFTSCRN", 8);
+  Serial.write(hdr, sizeof(hdr));
+  Serial.write((const uint8_t*) fb, (size_t) w * h * 2);
+  Serial.flush();
+#endif
+}
 bool rift_screen_always_on = false;
 
 #ifdef RIFT_RADAR
@@ -8163,6 +8195,23 @@ void UITask::loop() {
     }
   }
 
+  // A screen dump was asked for: put the requested screen up, wake the panel if it
+  // is asleep, and force a redraw. The frame is streamed after endFrame() below.
+  bool dump_now = false;
+  if (s_dump_pending && _display != NULL) {
+    int nav = s_dump_nav;
+    if (nav >= 0 && nav < RIFT_NAV_COUNT && nav != nav_idx) {
+      dismissOverlay();
+      nav_idx = nav;
+      setCurrScreen(nav_screens[nav_idx]);
+    }
+    if (!_display->isOn()) _display->turnOn();
+    _auto_off = millis() + AUTO_OFF_MILLIS;
+    refreshNow();
+    dump_now = true;
+    s_dump_pending = false;
+  }
+
   if (_display != NULL && _display->isOn()) {
     if (riftDue((uint32_t) millis(), _next_refresh) && curr) {
       // Once per frame, for the nav bar to draw. The title bar used to read the
@@ -8217,6 +8266,7 @@ void UITask::loop() {
         _next_refresh = millis() + delay_millis;
       }
       _display->endFrame();
+      if (dump_now) riftStreamFrame();
     }
 #if AUTO_OFF_MILLIS > 0
 #ifdef KEEP_DISPLAY_ON_USB

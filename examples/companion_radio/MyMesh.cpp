@@ -13,6 +13,7 @@
 #include "ui-rift/RiftLogic.h"
 #include "ui-rift/RiftRepeater.h"
 #include "ui-rift/RiftScopes.h"
+#include "ui-rift/RiftScreenDump.h"
 #include <helpers/sensors/LPPDataHelpers.h>   // LPPReader, to decode a telemetry reply
 #endif
 // Channel PSKs are shared between nodes as base64. Declared rather than
@@ -1771,6 +1772,16 @@ void MyMesh::handleCmdFrame(size_t len) {
     writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     return;
   }
+
+#ifdef RIFT_VERSION
+  // Bench command, RIFT only: hand the composed frame to the host. See
+  // ui-rift/RiftScreenDump.h for the format. The UI does the work after its
+  // next render, so the answer is the screen as it is drawn, not as it was.
+  if (cmd_frame[0] == CMD_RIFT_SCREEN_DUMP && len >= 1) {
+    riftRequestScreenDump(len >= 2 ? (int) cmd_frame[1] : 0xFF);
+    return;
+  }
+#endif
 
   if (cmd_frame[0] == CMD_DEVICE_QUERY && len >= 2) { // sent when app establishes connection
     app_target_ver = cmd_frame[1];                    // which version of protocol does app understand

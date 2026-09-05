@@ -227,6 +227,24 @@ responsible can be named rather than guessed at.
 
 ---
 
+## Screenshots
+
+The device's own pixels, over USB, as PNG at 1× and 2×:
+
+```bash
+.venv/Scripts/python.exe tools/rift-screenshot.py --port COM8 --all --tag night
+```
+
+`--all` walks the five nav screens; `--screen current` captures whatever is
+showing, overlays and popups included, so the repeater panel or the conversation
+list is captured by putting it up on the device first. Night and day are the
+device's own setting - toggle on SYSTEM and capture again with another `--tag`.
+Files land in `design/screens/`. The firmware side is a companion command
+(`ui-rift/RiftScreenDump.h`); the device has to be in companion mode, not CLI
+rescue, and the port is opened with DTR and RTS low so the chip is not reset.
+
+---
+
 ## Other environments
 
 `LilyGo_TDeck_rift` is additive. The four upstream T-Deck environments

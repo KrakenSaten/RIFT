@@ -67,4 +67,10 @@ public:
   void drawXbm(int x, int y, const uint8_t* bits, int w, int h) override;
   uint16_t getTextWidth(const char* str) override;
   void endFrame() override;
+
+  // The composed frame, 320*240 RGB565 in native (little-endian) order, or NULL
+  // when the driver fell back to drawing straight to the panel. Read by the
+  // screen-dump command so a design round can work from the device's own
+  // pixels rather than from photographs of it.
+  const uint16_t* frameBuffer() const { return _canvas ? _canvas->getBuffer() : NULL; }
 };
