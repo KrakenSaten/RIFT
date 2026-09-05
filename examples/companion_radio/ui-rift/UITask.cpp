@@ -1454,7 +1454,6 @@ public:
 class RiftMeshScreen : public RiftScreen {
   UITask* _task;
   NodePrefs* _node_prefs;
-  int _tick;
   // recorded at render so a tap hits the box actually drawn, like the COMMS tabs
   // Three actions on this screen now, so their hit boxes are an array and the
   // selected one is tracked for the trackball. Discovery stays index 0, which is
@@ -1466,7 +1465,7 @@ class RiftMeshScreen : public RiftScreen {
 
 public:
   RiftMeshScreen(UITask* task, NodePrefs* node_prefs)
-     : _task(task), _node_prefs(node_prefs), _tick(0) { }
+     : _task(task), _node_prefs(node_prefs) { }
 
   int render(DisplayDriver& display) override {
 
@@ -1505,12 +1504,16 @@ public:
     // fails on white.
     // Up 14px from where the title bar used to end. This screen has no heading -
     // the nav bar says RIFT - so the masthead sits at the very top instead.
+    // Geometry from design/redesign-2026-09/rift-home-spec.md: source at y 2, the
+    // state word at y 20, three fact rows from y 58, the activity strip at y 112,
+    // three mid rows from y 136, the buttons at y 180 and their note at y 200,
+    // and nothing in the fourteen pixels above the nav bar.
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 4, "meshcore.io");
+    display.drawTextLeftAlign(2, 2, "meshcore.io");
     display.setTextSize(3);
-    display.setColor(state_col);
-    display.drawTextLeftAlign(2, 16, state);
+    display.setColor(activity == RIFT_MESH_QUIET ? rift_pal.dim : state_col);
+    display.drawTextLeftAlign(2, 20, state);
 
     // The wordmark, top right, on the same baseline as the state headline.
     //
@@ -1532,7 +1535,7 @@ public:
     // in mid-air would be the arbitrary choice. It begins in mid-air on the left at
     // x=196 rather than crossing the screen, because continuing would put a diagonal
     // through the headline and then the LAST RX row.
-    riftDrawWordmark(display, 240, 16, rift_pal.fg, 196, display.width() - 1);
+    riftDrawWordmark(display, 244, 20, rift_pal.fg, 176, 316);
 
     // Show the age and the count, not just the verdict. Every hardware problem
     // on this project was settled by putting the real value on screen, and a
@@ -1551,39 +1554,63 @@ public:
       // the live row, so the eye finds the fact in the same place.
       strcpy(row, "LAST RX none since boot");
     }
-    display.drawTextLeftAlign(2, 62, row);
+    display.drawTextLeftAlign(2, 58, row);
 
-    display.setColor(rift_pal.mid);
     sprintf(row, "RX %u PACKETS", (unsigned) the_mesh.getRxCount());
-    display.drawTextLeftAlign(2, 74, row);
+    display.drawTextLeftAlign(2, 70, row);
 
     // The companion link, still reported, now labelled for what it measures.
     // hasConnection() returns AbstractUITask::_connected, which only the serial
     // interface sets.
-    const char* link = _task->hasConnection() ? "CONNECTED"
-                     : (the_mesh.getBLEPin() != 0 ? "PAIRING" : "STANDBY");
-    sprintf(row, "USB/BLE %s", link);
-    display.drawTextLeftAlign(2, 90, row);
-
-    // radar box, right of the state. Same mechanism as before - three nested
-    // rects and one blip at eight discrete positions - just moved off centre.
-    int cx = 210, cy = 120;
-    display.setColor(rift_pal.rule);
-    display.drawRect(cx - 50, cy - 40, 100, 80);
     display.setColor(rift_pal.mid);
-    display.drawRect(cx - 33, cy - 27, 66, 54);
-    display.drawRect(cx - 16, cy - 13, 32, 26);
+    const char* link = _task->hasConnection() ? "USB/BLE CONNECTED"
+                     : (the_mesh.getBLEPin() != 0 ? "BLE PAIRING" : "NO HOST");
+    display.drawTextLeftAlign(2, 82, link);
 
-    static const int8_t dx[8] = { 0, 35, 50, 35, 0, -35, -50, -35 };
-    static const int8_t dy[8] = { -40, -28, 0, 28, 40, 28, 0, -28 };
-    int pos = _tick % 8;
-    display.setColor(rift_pal.accent);
-    display.fillRect(cx + dx[pos] - 2, cy + dy[pos] - 2, 4, 4);
-    _tick++;
-
+    // The activity strip: twenty cells, one per minute, oldest on the left,
+    // filled when anything was heard in that minute. It replaced a radar
+    // animation that showed only that the screen was drawing, and it is the
+    // literal answer to the screen's question. Read from the air log, which
+    // already carries every receive with its time, so it needs no state of its
+    // own; on a mesh so busy the log turns over inside twenty minutes every
+    // cell is filled anyway. QUIET is carried here in form as well as in the
+    // word's grey, so the grey is not the only bearer.
     char tmp[40];
     display.setTextSize(1);
-    display.setColor(rift_pal.fg);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 100, "HEARD, LAST 20 MIN");
+    {
+      bool heard[20];
+      for (int i = 0; i < 20; i++) heard[i] = false;
+      uint32_t now_ms = (uint32_t) millis();
+      RiftRxLog& log = riftRxLog();
+      for (int i = 0; i < log.count; i++) {
+        const RiftRxLog::Entry* e = log.peek(i);
+        if (e == NULL) break;
+        if (e->dir != RIFT_AIR_RX) continue;
+        uint32_t back = (now_ms - e->at_ms) / 60000u;
+        if (back < 20) heard[19 - back] = true;
+      }
+      display.setColor(rift_pal.fg);
+      for (int i = 0; i < 20; i++) {
+        if (heard[i]) display.fillRect(2 + 12 * i, 112, 8, 8);
+        else          display.drawRect(2 + 12 * i, 112, 8, 8);
+      }
+    }
+
+    // Two numbers with their names, on the strip's label row. "LINK -80 / -4"
+    // was the one place on the screen that needed prior knowledge to read. "--"
+    // until something has been heard: the radio's last reading is nothing, not
+    // zero.
+    display.setColor(rift_pal.mid);
+    if (the_mesh.hasHeardMesh()) {
+      sprintf(tmp, "RSSI %.0f  SNR %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
+    } else {
+      strcpy(tmp, "RSSI --  SNR --");
+    }
+    display.drawTextRightAlign(316, 100, tmp);
+
+    display.setColor(rift_pal.mid);
     // "NODES 256" answered neither question: 256 is how many contacts are stored,
     // which says nothing about whether any of them are around right now. Stored comes
     // from the persisted contact table, heard from the session path cache.
@@ -1597,31 +1624,29 @@ public:
     sprintf(tmp, "%d/%d STORED %s %d HEARD", the_mesh.getNumContacts(),
             the_mesh.getContactsCapacity(), RIFT_DOT, the_mesh.getPathCacheUsed());
     if (the_mesh.contactsFullNow()) display.setColor(rift_pal.accent);
-    display.drawTextLeftAlign(2, 170, tmp);
+    display.drawTextLeftAlign(2, 136, tmp);
 
-    // Two numbers with their names. "LINK -80 / -4" was the one place on the
-    // screen that needed prior knowledge to read. "--" until something has been
-    // heard: the radio's last reading is nothing, not zero.
-    if (the_mesh.hasHeardMesh()) {
-      sprintf(tmp, "RSSI %.0f  SNR %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
-    } else {
-      strcpy(tmp, "RSSI --  SNR --");
-    }
-    display.drawTextRightAlign(316, 170, tmp);
+    display.setColor(rift_pal.mid);
+    sprintf(tmp, "%.3fMHz SF%d %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
+    display.drawTextLeftAlign(2, 148, tmp);
 
-    // The radio line, unless a tropo opening is running - in which case that is
-    // the more interesting thing this screen can say, and the frequency has not
-    // changed since the last time it was read.
+    // Tropo on its own row. It used to replace the radio line while an opening
+    // ran, and a row that changes meaning is a mode the user has to discover.
+    // Open in fg, which is information rather than warning; the detail is on
+    // SYSTEM.
     {
       RiftTropo& tr = riftTropoState();
       if (tr.active) {
-        display.setColor(rift_pal.accent);
+        display.setColor(rift_pal.fg);
         sprintf(tmp, "TROPO OPEN %s peak %d hops", RIFT_DOT, (int) tr.peak_hops);
+      } else if (tr.peak_hops == 0) {
+        display.setColor(rift_pal.mid);
+        strcpy(tmp, "TROPO none since boot");
       } else {
         display.setColor(rift_pal.mid);
-        sprintf(tmp, "%.3fMHz  SF%d  %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
+        sprintf(tmp, "TROPO closed %s peak %d hops", RIFT_DOT, (int) tr.peak_hops);
       }
-      display.drawTextCentered(display.width() / 2, 182, tmp);
+      display.drawTextLeftAlign(2, 160, tmp);
     }
 
     // The one action on this screen, drawn as a button because it is one - an
@@ -1651,8 +1676,12 @@ public:
         w[i] = (int) strlen(labels[i]) * RIFT_CHAR_W + 12;
         total += w[i];
       }
-      const int gap = 8;
-      int bx = (display.width() - total - gap * (BTN_COUNT - 1)) / 2;
+      // From the left margin, like every other row on the screen, rather than
+      // centred: a row that starts where the text above it starts reads as part
+      // of the same column.
+      const int gap = 6;
+      int bx = 2;
+      (void) total;
 
       for (int i = 0; i < BTN_COUNT; i++) {
         bool sel = (i == _btn_sel);
@@ -1689,17 +1718,20 @@ public:
         case BTN_ADVERT_MESH: note = "reaches nodes past direct range - more airtime"; break;
         default:              note = "asks direct neighbours only"; break;
       }
-      display.setColor(rift_pal.dim);
-      display.drawTextCentered(display.width() / 2, DISCOVER_BTN_Y + 16, note);
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(2, DISCOVER_BTN_Y + 20, note);
     }
 
     renderNavBar(display, RIFT_NAV_MESH);
     // while a round is open the button label and the result count both move, so
-    // refresh faster than the blip alone would need
-    return the_mesh.isDiscovering() ? 300 : 700;
+    // refresh faster; otherwise the strip changes once a minute and the ages once
+    // a second
+    return the_mesh.isDiscovering() ? 300 : 1000;
   }
 
-  static const int DISCOVER_BTN_Y = 198;
+  // Up from 198: the fourteen pixels above the nav bar are empty now, and the
+  // bottom third of the screen has air again (September design round, 8.2).
+  static const int DISCOVER_BTN_Y = 180;
 
   // Left and right already move between screens, so the row of buttons is walked
   // with up and down. They did nothing here before.
@@ -3370,13 +3402,25 @@ class RiftConstellationScreen : public RiftScreen {
   static const int REACH_W = 8;        // the shared 8x8 cell of the September design system
   static const int REACH_H = 8;
 
-  // hops < 0 means no route known: every cell hollow.
-  void renderReach(DisplayDriver& display, int y, int hops, uint16_t ink) {
+  // hops < 0 means no route known: every cell hollow. A known route draws its
+  // cells full when it has been seen to work - a path return or an ACK came back
+  // through it - and as a dot (a hollow cell with a 4x4 centre) when the count
+  // comes from an advert alone. Three forms that survive sunlight, where the
+  // screen used to spend two (September design round, 8.1).
+  void renderReach(DisplayDriver& display, int y, int hops, uint16_t ink, bool confirmed) {
     for (int c = 0; c < REACH_CELLS; c++) {
       int cx = REACH_X + c * REACH_PITCH;
       display.setColor(ink);
-      if (hops >= 0 && c <= hops) display.fillRect(cx, y, REACH_W, REACH_H);
-      else                        display.drawRect(cx, y, REACH_W, REACH_H);
+      if (hops >= 0 && c <= hops) {
+        if (confirmed) {
+          display.fillRect(cx, y, REACH_W, REACH_H);
+        } else {
+          display.drawRect(cx, y, REACH_W, REACH_H);
+          display.fillRect(cx + 2, y + 2, 4, 4);
+        }
+      } else {
+        display.drawRect(cx, y, REACH_W, REACH_H);
+      }
     }
   }
 
@@ -3644,7 +3688,7 @@ class RiftConstellationScreen : public RiftScreen {
       // Saturating at the last cell rather than clamping the printed value: the
       // digit still says 21 where the bar has run out of room to.
       int reach = known ? (hops > REACH_CELLS - 1 ? REACH_CELLS - 1 : hops) : -1;
-      renderReach(display, y, reach, ink);
+      renderReach(display, y, reach, ink, p->confirmed);
 
       if (known) {
         snprintf(tmp, sizeof(tmp), "%d", hops);
@@ -5051,16 +5095,14 @@ public:
     display.drawRect(x + 1, y + 1, w - 2, h - 2);
 
     display.setTextSize(1);
-    display.setColor(rift_pal.accent);
-    display.drawTextLeftAlign(x + 6, y + 6, "MESSAGES");
-
     char tmp[40];
     // From the model rather than from a count of its own. This panel presents the
     // newest few entries of the message log; how much is unread is not a fact about
-    // the panel.
-    sprintf(tmp, "Unread: %d", (int) msg_unread.total());
+    // the panel. The count is the heading, in mid: a popup's title is not a warning.
+    int unread = (int) msg_unread.total();
+    snprintf(tmp, sizeof(tmp), "%d NEW MESSAGE%s", unread, unread == 1 ? "" : "S");
     display.setColor(rift_pal.mid);
-    display.drawTextRightAlign(x + w - 6, y + 6, tmp);
+    display.drawTextLeftAlign(x + 6, y + 6, tmp);
 
     int row_y = y + 22;
     int shown = 0;
@@ -5098,13 +5140,8 @@ public:
     // The hint row doubles as the overflow notice. Anything past the six newest
     // is in COMMS, which is one key away - there is deliberately no scrolling
     // here, because scrolling is what COMMS is for.
-    display.setColor(rift_pal.dim);
-    if (msg_log.count > shown) {
-      sprintf(tmp, "+%d more - ENTER opens COMMS", msg_log.count - shown);
-    } else {
-      strcpy(tmp, "ENTER opens COMMS   BKSP dismiss");
-    }
-    display.drawTextLeftAlign(x + 6, y + h - 14, tmp);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(x + 6, y + h - 14, "ENTER: open COMMS   BACKSPACE: close");
 
     return 1000;
   }
@@ -6601,24 +6638,31 @@ public:
     display.drawRect(x + 1, y + 1, w - 2, h - 2);
 
     display.setTextSize(1);
-    display.setColor(rift_pal.accent);
-    display.drawTextLeftAlign(x + 6, y + 6, "NAME THIS DEVICE");
-
-    // the address, because that is the identity and the name is only a label on it
+    // The heading carries the address, because that is the identity and the
+    // name is only a label on it.
+    display.setColor(rift_pal.mid);
     if (_idx >= 0 && _idx < rf_watch_count) {
       const uint8_t* k = rf_watch[_idx].key;
-      char addr[32];
-      snprintf(addr, sizeof(addr), "%s %02X:%02X:%02X:%02X:%02X:%02X",
-               rf_watch[_idx].is_wifi ? "wifi" : "ble",
+      char head[48];
+      snprintf(head, sizeof(head), "NAME DEVICE %s %02X:%02X:%02X:%02X:%02X:%02X", RIFT_DOT,
                k[0], k[1], k[2], k[3], k[4], k[5]);
-      display.setColor(rift_pal.dim);
-      display.drawTextLeftAlign(x + 6, y + 20, addr);
+      display.drawTextLeftAlign(x + 6, y + 6, head);
+    } else {
+      display.drawTextLeftAlign(x + 6, y + 6, "NAME DEVICE");
     }
 
-    _edit.render(display, x + 6, y + 42, w - 12);
+    _edit.render(display, x + 6, y + 24, w - 60);
+    {
+      char cnt[12];
+      snprintf(cnt, sizeof(cnt), "%d/%d", _edit.len, _edit.cap);
+      display.setColor(rift_pal.mid);
+      display.drawTextRightAlign(x + w - 6, y + 24, cnt);
+    }
 
-    display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(x + 6, y + h - 14, "ENTER save   BACKSPACE delete / back");
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(x + 6, y + 48, "Named devices are watched: a lamp on");
+    display.drawTextLeftAlign(x + 6, y + 60, "RADAR when they appear.");
+    display.drawTextLeftAlign(x + 6, y + h - 14, "ENTER: save   BACKSPACE: delete / back");
     return 1000;
 #else
     (void) display;
@@ -7256,8 +7300,8 @@ public:
     display.drawRect(x + 1, y + 1, w - 2, h - 2);
 
     display.setTextSize(1);
-    display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(x + 6, y + 4, "ENTER  BKSP");
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(x + 6, y + 4, "ENTER: insert  BACKSPACE: keep");
 
     for (int i = 0; i < _count; i++) {
       int cx = x + 6 + i * cell;
@@ -7326,30 +7370,30 @@ public:
 // on a route.
 class RiftDiscoverScreen : public RiftScreen {
   UITask* _task;
+  int _sel = 0;     // which repeater the cursor is on; ENTER opens its panel
+  int _first = 0;   // the window follows it
+
+  static const int ROWS = 11;
 
 public:
   RiftDiscoverScreen(UITask* task) : _task(task) { }
 
   bool isOverlay() const override { return true; }
 
+  // Geometry from design/redesign-2026-09/rift-overlays-spec.md section 1: box
+  // [6, 22, 308, 186], heading y 26, columns y 38, eleven rows from y 50, the
+  // thumb at the box's right edge, and the hint at y 194.
   int render(DisplayDriver& display) override {
     const int x = 6, w = display.width() - 12;
     const int y = 22, h = 186;
-    const int inner = w - 12;
 
     display.setColor(rift_pal.bg);
     display.fillRect(x, y, w, h);
-    // A 2px frame in rule (September design round): a box says "on top" by being
-    // a box, where the accent said "act on all of this". Two nested rects, since
-    // the driver has no line width.
     display.setColor(rift_pal.rule);
     display.drawRect(x, y, w, h);
     display.drawRect(x + 1, y + 1, w - 2, h - 2);
 
     display.setTextSize(1);
-    display.setColor(rift_pal.accent);
-    display.drawTextLeftAlign(x + 6, y + 5, "0-HOP REPEATERS");
-
     char tmp[48];
     int n = the_mesh.getDiscoveredCount();
     bool live = the_mesh.isDiscovering();
@@ -7358,19 +7402,35 @@ public:
     // answer after a widened random delay because many reply at once - so an empty
     // list one second in means nothing yet, and must not read as "none found".
     display.setColor(rift_pal.mid);
-    if (live) snprintf(tmp, sizeof(tmp), "listening %us", (unsigned) (the_mesh.discoveryElapsedMs() / 1000));
-    else      snprintf(tmp, sizeof(tmp), "%d found", n);
-    display.drawTextRightAlign(x + w - 6, y + 5, tmp);
+    if (live) snprintf(tmp, sizeof(tmp), "DISCOVER 0-HOP %s LISTENING", RIFT_DOT);
+    else      snprintf(tmp, sizeof(tmp), "DISCOVER 0-HOP %s %d REPEATER%s", RIFT_DOT, n, n == 1 ? "" : "S");
+    display.drawTextLeftAlign(10, 26, tmp);
+    if (live) snprintf(tmp, sizeof(tmp), "%us", (unsigned) (the_mesh.discoveryElapsedMs() / 1000));
+    else      strcpy(tmp, "done");
+    display.drawTextRightAlign(310, 26, tmp);
 
-    // column headings for the two directions
-    display.setColor(rift_pal.dim);
-    display.drawTextRightAlign(x + inner - 46, y + 20, "rx");
-    display.drawTextRightAlign(x + inner + 6, y + 20, "tx");
+    // The two SNR columns are the point of the feature: rx is how well we heard
+    // the answer, tx the SNR the repeater reported for our request.
+    display.drawTextLeftAlign(10, 38, "REPEATER");
+    display.drawTextLeftAlign(220, 38, "RX SNR");
+    display.drawTextLeftAlign(268, 38, "TX SNR");
 
-    int row_y = y + 34;
-    for (int i = 0; i < n && row_y < y + h - 20; i++) {
+    if (_sel >= n) _sel = n > 0 ? n - 1 : 0;
+    if (_sel < _first) _first = _sel;
+    if (_sel >= _first + ROWS) _first = _sel - ROWS + 1;
+    if (_first < 0) _first = 0;
+
+    int row_y = 50;
+    int shown = 0;
+    for (int i = _first; i < n && shown < ROWS; i++, row_y += RIFT_LINE_H, shown++) {
       const MyMesh::DiscoveredRepeater* d = the_mesh.getDiscovered(i);
       if (d == NULL) continue;
+      bool sel = (i == _sel);
+      if (sel) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(8, row_y - 2, 301, 12);
+      }
+      uint16_t ink = sel ? rift_pal.on_accent : rift_pal.fg;
 
       // Name it if we know it. A repeater can answer a discovery without ever
       // having sent us an advert, so there may be no name at all - then the key
@@ -7383,34 +7443,58 @@ public:
         snprintf(label, sizeof(label), "%02X%02X%02X%02X...",
                  d->pubkey[0], d->pubkey[1], d->pubkey[2], d->pubkey[3]);
       }
-      display.setColor(rift_pal.fg);
-      display.drawTextEllipsized(x + 6, row_y, inner - 100, label);
+      display.setColor(ink);
+      display.drawTextEllipsized(10, row_y, 200, label);
 
       // SNR arrives as a signed value times four, from both sides
-      display.setColor(rift_pal.mid);
       snprintf(tmp, sizeof(tmp), "%.1f", d->snr_we_heard_them / 4.0f);
-      display.drawTextRightAlign(x + inner - 46, row_y, tmp);
+      display.drawTextRightAlign(256, row_y, tmp);
       snprintf(tmp, sizeof(tmp), "%.1f", d->snr_they_heard_us / 4.0f);
-      display.drawTextRightAlign(x + inner + 6, row_y, tmp);
-
-      row_y += RIFT_LINE_H;
+      display.drawTextRightAlign(304, row_y, tmp);
     }
 
     if (n == 0) {
-      display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(x + 6, y + 34,
-        live ? "waiting for replies" : "no repeater answered");
+      if (live) {
+        display.setColor(rift_pal.mid);
+        display.drawTextLeftAlign(10, 50, "waiting for replies");
+      } else {
+        display.setColor(rift_pal.fg);
+        display.drawTextLeftAlign(10, 50, "No repeater answered within 8 s.");
+        display.setColor(rift_pal.mid);
+        display.drawTextLeftAlign(10, 62, "0-hop asks direct neighbours only.");
+        display.drawTextLeftAlign(10, 74, "Try ADVERT NEAR, or move.");
+      }
     }
 
-    display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(x + 6, y + h - 14,
-      live ? "BKSP dismiss - keeps listening" : "BKSP dismiss");
+    riftDrawThumb(display, 48, ROWS * RIFT_LINE_H, _first, n, shown, x + w - 5);
+
+    display.setColor(rift_pal.mid);
+    if (n == 0 && !live) display.drawTextLeftAlign(10, 194, "ENTER: retry   BACKSPACE: close");
+    else if (live)       display.drawTextLeftAlign(10, 194, "ENTER: control   BACKSPACE: close, keeps listening");
+    else                 display.drawTextLeftAlign(10, 194, "ENTER: control   BACKSPACE: close");
 
     return live ? 500 : 1000;
   }
 
   bool handleInput(char c) override {
-    if (c == RIFT_KEY_BACK || c == KEY_CANCEL || c == KEY_ENTER) {
+    int n = the_mesh.getDiscoveredCount();
+    if (c == KEY_UP)   { if (_sel > 0) _sel--; return true; }
+    if (c == KEY_DOWN) { if (_sel + 1 < n) _sel++; return true; }
+    if (c == KEY_ENTER) {
+      if (n == 0) {
+        if (!the_mesh.isDiscovering()) _task->startRepeaterDiscovery();
+        return true;
+      }
+      const MyMesh::DiscoveredRepeater* d = the_mesh.getDiscovered(_sel);
+      if (d == NULL) return true;
+      // the panel is an overlay too, and only one is up at a time
+      uint8_t key[PUB_KEY_SIZE];
+      memcpy(key, d->pubkey, PUB_KEY_SIZE);
+      _task->dismissOverlay();
+      _task->openRepeaterPanel(key);
+      return true;
+    }
+    if (c == RIFT_KEY_BACK || c == KEY_CANCEL) {
       // Dismissing does not cancel the round. The window stays open in MyMesh, so
       // late replies are still collected and reopening the panel shows them.
       _task->dismissOverlay();

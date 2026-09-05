@@ -94,6 +94,12 @@ struct AdvertPath {
   // Explicit, rather than inferring occupancy from a timestamp or a name. Both of
   // those were tried and both were wrong for a value that is legitimately zero.
   bool valid;
+  // Whether the route has been seen to work: a path return or an ACK came back
+  // through it since the advert that set it. An advert only says how far the node
+  // is; this says the way there has carried something. NODES draws the two
+  // differently (September design round, 8.1). Cleared whenever an advert
+  // rewrites the path.
+  bool confirmed;
   uint8_t path[MAX_PATH_SIZE];
 };
 
@@ -117,6 +123,11 @@ public:
   // which is invisible from the screen - and was, for every boot from 0.9.1 to
   // 0.9.2, while the I2S master clock held the boot button down. SYSTEM shows it.
   bool isCLIRescue() const { return _cli_rescue; }
+
+  // The route to this node has just carried something back - a path return or
+  // an ACK - so the advert cache's entry for it is marked confirmed. A prefix
+  // of the public key, as the cache stores it.
+  void markPathConfirmed(const uint8_t* pubkey, int len);
 
   // advert() sends zero-hop, so only direct neighbours hear it. This floods the
   // advert through the mesh instead, which is what distant nodes need before

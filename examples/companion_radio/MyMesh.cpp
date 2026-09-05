@@ -524,6 +524,7 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
     p->recv_timestamp = getRTCClock()->getCurrentTime();
     p->recv_millis = millis();
     p->valid = true;
+    p->confirmed = false;   // a new path, until something comes back through it
     p->path_len = mesh::Packet::copyPath(p->path, path, path_len);
   }
 
@@ -811,11 +812,23 @@ int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
   return n;
 }
 
+void MyMesh::markPathConfirmed(const uint8_t* pubkey, int len) {
+  if (pubkey == NULL || len <= 0) return;
+  if (len > (int) sizeof(AdvertPath::pubkey_prefix)) len = sizeof(AdvertPath::pubkey_prefix);
+  for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
+    if (advert_paths[i].valid && memcmp(advert_paths[i].pubkey_prefix, pubkey, (size_t) len) == 0) {
+      advert_paths[i].confirmed = true;
+    }
+  }
+}
+
 void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
 #ifdef RIFT_VERSION
   // A route changing is the difference between a DM that lands and one that does
   // not, and nothing on screen said it had happened.
   riftLogf("path %s now %d hop", contact.name, (int) contact.out_path_len);
+  // A path return is the route being seen to work in one direction at least.
+  markPathConfirmed(contact.id.pub_key, sizeof(AdvertPath::pubkey_prefix));
 #endif
   out_frame[0] = PUSH_CODE_PATH_UPDATED;
   memcpy(&out_frame[1], contact.id.pub_key, PUB_KEY_SIZE);
@@ -981,6 +994,12 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
         memcpy(&ack_hash, data, 4);
         _ui->msgDelivered(ack_hash, trip_time);
       }
+#ifdef RIFT_VERSION
+      // An ACK is the route having carried a message there and something back.
+      if (expected_ack_table[i].contact != NULL) {
+        markPathConfirmed(expected_ack_table[i].contact->id.pub_key, sizeof(AdvertPath::pubkey_prefix));
+      }
+#endif
 
       // NOTE: the same ACK can be received multiple times!
       expected_ack_table[i].ack = 0; // clear expected hash, now that we have received ACK
