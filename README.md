@@ -164,22 +164,22 @@ Five screens, reached from a nav bar along the bottom. The first is labelled
 | **NODES** | Who I can reach, and how far away |
 | **RADAR** | Is there anything around me, and is that changing |
 | **COMMS** | Conversations, channels and direct |
-| **SYSTEM** | Actions on page 1, readings on page 2 |
+| **SYSTEM** | Settings, and what is this device doing |
 
 <table>
 <tr>
-<td width="50%"><img src="design/screens/system-1d-page1-day.png" alt="SYSTEM page 1 in day mode: a full-width ACTIONS list with the selected row filled in orange and a warning line beneath it, each action's current state right-aligned, and a footer reading PRIVATE KEY EXPORT DISABLED" width="100%"></td>
-<td width="50%"><img src="design/screens/system-1d-page2-day.png" alt="SYSTEM page 2 in day mode: readings in two columns, grouped DEVICE and MESH on the left, RUNTIME and EVENT LOG on the right, each row a label and a value" width="100%"></td>
+<td width="50%"><img src="design/screens/rift-night-2x.png" alt="RIFT home screen in night mode: NO SIGNAL in orange, the wordmark top right, LAST RX / RX PACKETS / USB rows, a twenty-cell activity strip, stored and heard counts, the radio line, a TROPO row, and three buttons with DISCOVER 0-HOP selected" width="100%"></td>
+<td width="50%"><img src="design/screens/system-night-2x.png" alt="SYSTEM in night mode: one list headed by the version and uptime, an ACTIONS group with each setting's value right-aligned, then a DEVICE group of readings, with the selected row filled in orange" width="100%"></td>
 </tr>
 <tr>
-<td colspan="2"><strong>SYSTEM</strong> — actions on page 1, readings on page 2, trackball left and right between them. The nav bar prints the page number where the battery percentage sits on the other four screens.</td>
+<td><strong>RIFT</strong> — the home screen. The strip is one cell per minute, filled when anything was heard.</td>
+<td><strong>SYSTEM</strong> — one list, five groups, the same cursor and window as every other list; the thumb at the right edge says where in it you are.</td>
 </tr>
 </table>
 
-> Design renderings at 1:1 device resolution, shown at 2x — not photographs of the
-> panel. Only screens whose renderings match the shipping firmware are here: the
-> NODES and splash renderings from the same design round differ from what is built,
-> so they are left out rather than captioned. Photographs of the rest are wanted.
+> The device's own pixels, captured over USB with `tools/rift-screenshot.py` and
+> shown at 2x. Every `<screen>-night.png` in `design/screens/` is the same, and a
+> fresh set is one command.
 
 
 Night and day are the same geometry with a swapped colour table, toggled from
@@ -197,11 +197,11 @@ left/right**, **double-click** (previous screen), or **tapping a nav-bar tab**.
 
 | Screen | What it shows | Screen-specific controls |
 |---|---|---|
-| **RIFT** | Whether the mesh is alive: `ACTIVE` / `IDLE` / `QUIET` / `NO SIGNAL` set large, with how long ago the radio last decoded anything and how many packets it has heard. Plus node count, link RSSI/SNR, radio config, and the USB/BLE companion link, labelled for what it actually measures. A tropo opening replaces the radio line while one is running | three buttons — `DISCOVER 0-HOP`, `ADVERT NEAR`, `ADVERT MESH` — with a line explaining the selected one. Trackball left/right chooses, **Enter** runs it |
-| **NODES** | Who you can reach and how far away. Each row carries a ten-cell reach scale, filled up to the node's hop count and hollow beyond, so distance is a length compared down the column rather than a digit read per row; the exact count stays in the `HOPS` column and a route nobody knows draws ten hollow cells. Above the list, five bands — `DIRECT` `1-2` `3-5` `6+` `NO ROUTE`. Filled freshness marker = heard in the last 30 minutes, hollow = older. The selected node's route is drawn through the repeaters it actually travelled | trackball up/down or drag selects a node, or tap one; **Enter** opens what that node can do — a DM for a chat node or room, the control panel for a repeater, a reading for a sensor |
-| **RADAR** | Passive Wi-Fi + BLE. Device count, how many are new in the last 60s, three signal-strength bands with one cell per device, and the strongest-first list | **Enter** toggles the waterfall; up/down scrolls the list |
-| **COMMS** | MeshCore text terminal — channel strip, message history, compose line with a character count. Each row is a time, the sender's name in a colour derived from that name, and either the delivery state or the hop count. Own messages carry a 2px accent bar rather than being right-aligned, which on 320px costs two pixels instead of half the width of every line | **tap a channel** to switch to it; **Enter** sends, or opens the conversation list when the line is empty; **backspace** deletes; up/down or drag scrolls history by pixel. Each row of the list carries an unread mark, the channel's colour chip or the sender's colour, `ROOM` where it is a room server, and how long ago it last spoke |
-| **SYSTEM** | Actions left of the divider, read-only diagnostics right of it: node name, keyboard, last key, I²C bus, touch, GPS, free heap, external power, last reset, boot timings, tropo baseline | up/down, drag or tap selects; **Enter** activates. Actions: edit node name, add or remove a channel, set a channel's flood scope, path hash size, day/night. The two adverts moved to the home screen in 0.9.0, where the list they affect is the screen next door |
+| **RIFT** | Whether the mesh is alive: `ACTIVE` / `IDLE` / `QUIET` / `NO SIGNAL` set large, then how long ago the radio last decoded anything, how many packets it has heard, and the USB/BLE host state. A twenty-cell strip, one per minute, filled when anything was heard, with RSSI and SNR beside its label. Stored and heard counts, the radio line, and a TROPO row that says `none since boot`, `closed`, or `OPEN` with the peak hop count | three buttons — `DISCOVER 0-HOP`, `ADVERT NEAR`, `ADVERT MESH` — with a line explaining the selected one. Trackball up/down chooses, **Enter** runs it |
+| **NODES** | Who you can reach and how far away. Each row carries a ten-cell reach scale: cells up to the node's hop count are filled when the route has been seen to work (a path return or an ACK came back through it) and drawn as a dot when the count comes from an advert alone, hollow beyond; the exact count stays in `HOPS`, the age in `AGE`, and a route nobody knows draws ten hollow cells and `?`. Above the list, five bands — `DIRECT` `1-2` `3-5` `6+` `NO ROUTE` — whose tracks are always drawn. Filled freshness marker = heard in the last 30 minutes, hollow = older. The selected node's row grows to three: its route through the repeaters it actually travelled, and what **Enter** does with it | trackball up/down or drag selects a node, or tap one; **Enter** opens what that node can do — a DM for a chat node or room, the control panel for a repeater, a reading for a sensor |
+| **RADAR** | Passive Wi-Fi + BLE. The source and state in the heading, the device count set large, three signal-strength bands with one 6×8 cell per device (filled for close and mid, hollow for far, `»` when a row overflows), and a `DEVICE / RSSI / SEEN` list, strongest first, with a filled 5×5 mark on a watched device | **Enter** toggles the waterfall; **N** names the selected device, which also watches it; **S** switches source; **W** opens the watched list; up/down or drag scrolls |
+| **COMMS** | MeshCore text terminal — channel strip, message history, compose line. Each row is a time, the sender's name in a colour derived from that name, and a right-hand slot: `N hops` for an incoming message, `√` and the trip time in green once a direct message is delivered, `sending` until then, `no ack` in the accent if it never is. Own messages carry a 2px bar down the left edge rather than being right-aligned, which on 320px costs two pixels instead of half the width of every line | **tap a channel** to switch to it; **Enter** sends, or opens the conversation list when the line is empty; **backspace** deletes; up/down or drag scrolls history by pixel, and the compose line counts characters while you type. Each row of the list carries an unread mark, the channel's colour chip or the sender's colour, `ROOM` where it is a room server, and how long ago it last spoke |
+| **SYSTEM** | One list, five groups: `ACTIONS` with each setting's current value beside it, then `DEVICE`, `MESH`, `RUNTIME` and `EVENT LOG` readings — keyboard, touch, GPS, clock, power, USB serial mode, the boot button's raw level, contacts, path cache, tropo, heap, last reset, boot timings, and the two newest log lines. The heading is the version and uptime | up/down, drag or tap selects an action; **Enter** activates. Actions: edit node name, add or remove a channel, set a channel's flood scope, path hash size, screen, sound, day/night, set time, open the event log or the air log. Deleting a channel raises a warning box with `KEEP` selected; **right** then **Enter** deletes |
 
 **An incoming message raises a panel** over whatever you are doing, listing the six
 newest with sender and time. **Enter** opens COMMS for the full history;
@@ -365,6 +365,23 @@ plus 8 anonymous slots at 184 bytes each — 65.7 KB, or a fifth of the chip's 3
 statically allocated whether it holds one contact or all of them. It is the single
 largest
 item in the firmware.
+
+**Unreleased, on `rift-tdeck`:** the September redesign round
+(`design/redesign-2026-09/`), built in three passes. One shared system: a window
+pattern with a thumb at the right edge for every list, row text stopping at 314,
+the accent reduced from seven meanings to four (active tab, selection, warning,
+wordmark) with unread and own-message marks in the foreground colour and overlay
+frames in the rule grey, and a day-mode green moved away from the two channel
+colours it sat on. NODES on a 14-row grid with confirmed and unconfirmed routes as
+two cell forms; RADAR with a source-and-state heading, a `DEVICE / RSSI / SEEN`
+list and new keys; COMMS with `√` for delivered and a character count; SYSTEM as
+one list with five groups and a loss warning in one form; the home screen with a
+per-minute activity strip instead of an animation. Plus, from the review that
+preceded it: the I2S clock off GPIO0 (every boot had been a rescue boot), the
+touch calibration applied, the transport-packet path length read from the right
+byte, migrated log entries evictable, regions requests reaching routed repeaters,
+the advert cache size back to upstream's in stock builds, and screenshots from the
+device's own frame buffer over USB.
 
 **0.9.2** acts on a design review. The central finding was a rule that forbade
 nothing: "on white the accent may only be a fill with white reversed out of it"
