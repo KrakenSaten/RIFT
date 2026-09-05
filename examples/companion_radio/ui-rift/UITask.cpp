@@ -1586,21 +1586,26 @@ public:
                      : (the_mesh.getBLEPin() != 0 ? "BLE PAIRING" : "NO HOST");
     display.drawTextLeftAlign(2, 82, link);
 
-    // The activity strip: twenty cells, one per minute, oldest on the left,
-    // filled when anything was heard in that minute. It replaced a radar
-    // animation that showed only that the screen was drawing, and it is the
-    // literal answer to the screen's question. Read from the air log, which
-    // already carries every receive with its time, so it needs no state of its
-    // own; on a mesh so busy the log turns over inside twenty minutes every
-    // cell is filled anyway. QUIET is carried here in form as well as in the
-    // word's grey, so the grey is not the only bearer.
+    // The activity graph: twenty bars, one per minute, oldest on the left, each
+    // as tall as that minute's share of the busiest minute in the window, on a
+    // 1px baseline in rule. It replaced a radar animation that showed only that
+    // the screen was drawing, and it is the literal answer to the screen's
+    // question. Read from the air log, which already carries every receive with
+    // its time, so it needs no state of its own; on a mesh so busy the log turns
+    // over inside twenty minutes the newest bars are the true ones and the
+    // oldest under-count, which is the honest direction to be wrong in.
+    //
+    // In the accent, at the owner's request. The design round reserved the
+    // accent for active tab, selection, warning and wordmark; this is a fifth
+    // use, stated here so it is a decision and not a drift.
     char tmp[40];
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(2, 100, "HEARD, LAST 20 MIN");
     {
-      bool heard[20];
-      for (int i = 0; i < 20; i++) heard[i] = false;
+      const int GX = 2, GY = 110, GH = 16;   // bars grow upward from y GY+GH
+      uint16_t per_min[20];
+      for (int i = 0; i < 20; i++) per_min[i] = 0;
       uint32_t now_ms = (uint32_t) millis();
       RiftRxLog& log = riftRxLog();
       for (int i = 0; i < log.count; i++) {
@@ -1608,13 +1613,24 @@ public:
         if (e == NULL) break;
         if (e->dir != RIFT_AIR_RX) continue;
         uint32_t back = (now_ms - e->at_ms) / 60000u;
-        if (back < 20) heard[19 - back] = true;
+        if (back < 20 && per_min[19 - back] < 0xFFFF) per_min[19 - back]++;
       }
-      display.setColor(rift_pal.fg);
+      uint16_t peak = 1;
+      for (int i = 0; i < 20; i++) if (per_min[i] > peak) peak = per_min[i];
+
+      display.setColor(rift_pal.rule);
+      display.fillRect(GX, GY + GH, 20 * 12 - 4, 1);
+      display.setColor(rift_pal.accent);
       for (int i = 0; i < 20; i++) {
-        if (heard[i]) display.fillRect(2 + 12 * i, 112, 8, 8);
-        else          display.drawRect(2 + 12 * i, 112, 8, 8);
+        if (per_min[i] == 0) continue;
+        int h = 1 + (int) (((long) per_min[i] * (GH - 1) + peak / 2) / peak);
+        if (h > GH) h = GH;
+        display.fillRect(GX + 12 * i, GY + GH - h, 8, h);
       }
+      // the busiest minute, so the bars have a scale
+      snprintf(tmp, sizeof(tmp), "%u/min", (unsigned) peak);
+      display.setColor(rift_pal.mid);
+      display.drawTextRightAlign(316, 112, tmp);
     }
 
     // Two numbers with their names, on the strip's label row. "LINK -80 / -4"
@@ -1935,6 +1951,7 @@ class RiftSystemScreen : public RiftScreen {
 public:
   void beginAddChannel(bool from_comms)    { _return_to_comms = from_comms; activate(IT_CHANNEL); }
   void beginDeleteChannel(bool from_comms) { _return_to_comms = from_comms; activate(IT_DELCHANNEL); }
+  void beginChannelScope(bool from_comms)  { _return_to_comms = from_comms; activate(IT_SCOPE); }
 private:
 
   // shared by render() and handleTouch(), so touch targets follow the layout.
@@ -2809,7 +2826,7 @@ public:
       // list, beside the channels they act on.
       addRow(ROW_GROUP, -1, "ACTIONS");
       for (int i = 0; i < IT_COUNT; i++) {
-        if (i == IT_CHANNEL || i == IT_DELCHANNEL) continue;
+        if (i == IT_CHANNEL || i == IT_DELCHANNEL || i == IT_SCOPE) continue;   // in COMMS
         Row* r = addRow(ROW_ACTION, i, itemLabel(i));
         itemValue(i, tmp, sizeof(tmp));
         setValue(r, tmp, rift_pal.mid);
@@ -5390,7 +5407,7 @@ private:
     // the end of the CHANNELS section because that is where the channels are.
     uint8_t action;
   };
-  static const uint8_t PICK_ADD_CHANNEL = 1, PICK_REMOVE_CHANNEL = 2;
+  static const uint8_t PICK_ADD_CHANNEL = 1, PICK_REMOVE_CHANNEL = 2, PICK_SCOPE = 3;
   PickEntry _picks[RIFT_PICKER_MAX];
   int _pick_count;
   bool _pick_truncated;
@@ -5651,9 +5668,11 @@ private:
     // The two channel actions close the section. They used to be SYSTEM actions,
     // two screens away from the list they change; the flows still live there and
     // come back here when they are done.
-    for (int a = PICK_ADD_CHANNEL; a <= PICK_REMOVE_CHANNEL && _pick_count < RIFT_PICKER_MAX; a++) {
+    for (int a = PICK_ADD_CHANNEL; a <= PICK_SCOPE && _pick_count < RIFT_PICKER_MAX; a++) {
       PickEntry* e = &_picks[_pick_count++];
-      StrHelper::strncpy(e->name, a == PICK_ADD_CHANNEL ? "+ Add channel" : "- Remove channel", sizeof(e->name));
+      StrHelper::strncpy(e->name, a == PICK_ADD_CHANNEL ? "+ Add channel"
+                                : a == PICK_REMOVE_CHANNEL ? "- Remove channel"
+                                                           : "  Channel scope", sizeof(e->name));
       e->is_channel = true;
       e->channel_idx = 0xFF;
       e->action = (uint8_t) a;
@@ -6079,8 +6098,9 @@ private:
     _pick_idx = i;
     if (e->action != 0) {
       _picking = false;
-      if (e->action == PICK_ADD_CHANNEL) _task->startChannelAdd();
-      else                               _task->startChannelRemove();
+      if (e->action == PICK_ADD_CHANNEL)         _task->startChannelAdd();
+      else if (e->action == PICK_REMOVE_CHANNEL) _task->startChannelRemove();
+      else                                       _task->startChannelScope();
       return;
     }
     _target_is_channel = e->is_channel;
@@ -8051,6 +8071,13 @@ void UITask::startChannelRemove() {
   nav_idx = RIFT_NAV_SYSTEM;
   setCurrScreen(nav_screens[RIFT_NAV_SYSTEM]);
   ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->beginDeleteChannel(true);
+}
+
+void UITask::startChannelScope() {
+  dismissOverlay();
+  nav_idx = RIFT_NAV_SYSTEM;
+  setCurrScreen(nav_screens[RIFT_NAV_SYSTEM]);
+  ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->beginChannelScope(true);
 }
 
 /*

@@ -297,6 +297,7 @@ public:
   // They run on SYSTEM, where they were written, and return to COMMS when done.
   void startChannelAdd();
   void startChannelRemove();
+  void startChannelScope();
   // last key code the UI saw - reading this on screen is what identified the
   // keyboard co-processor repeating held keys
   int lastKeyCode() const { return _last_key; }
