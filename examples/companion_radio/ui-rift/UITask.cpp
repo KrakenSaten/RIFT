@@ -1615,8 +1615,10 @@ public:
         uint32_t back = (now_ms - e->at_ms) / 60000u;
         if (back < 20 && per_min[19 - back] < 0xFFFF) per_min[19 - back]++;
       }
-      uint16_t peak = 1;
+      uint16_t peak = 0;
       for (int i = 0; i < 20; i++) if (per_min[i] > peak) peak = per_min[i];
+      bool any = peak > 0;
+      if (peak == 0) peak = 1;   // no division by zero; no bars are drawn anyway
 
       display.setColor(rift_pal.rule);
       display.fillRect(GX, GY + GH, 20 * 12 - 4, 1);
@@ -1627,8 +1629,10 @@ public:
         if (h > GH) h = GH;
         display.fillRect(GX + 12 * i, GY + GH - h, 8, h);
       }
-      // the busiest minute, so the bars have a scale
-      snprintf(tmp, sizeof(tmp), "%u/min", (unsigned) peak);
+      // the busiest minute, so the bars have a scale; "--" while there is nothing
+      // to scale, rather than a 1 that was never measured
+      if (any) snprintf(tmp, sizeof(tmp), "%u/min", (unsigned) peak);
+      else     strcpy(tmp, "--/min");
       display.setColor(rift_pal.mid);
       display.drawTextRightAlign(316, 112, tmp);
     }
