@@ -1151,11 +1151,30 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   if (should_display && _ui) {
     // 2 = direct. The sender's key prefix identifies the conversation; the name
     // does not, because two contacts may share one and a rename changes it.
+    // A room server relays posts as signed messages: the text is the post and
+    // `extra` is the first four bytes of the author's public key. The companion
+    // app resolves that prefix itself; this UI got the text alone, so a room
+    // read as the server talking to itself. The author goes in front of the
+    // text the way a channel message carries its sender - by name when the
+    // author is a contact, else as the prefix in hex, which is what the room's
+    // other members can be asked about.
+    const char* shown = text;
 #ifdef RIFT_VERSION
-    riftRxLog().annotateLast(RIFT_AIR_K_DM, from.name, text);
+    char with_author[MAX_TEXT_LEN + 40];
+    if (txt_type == TXT_TYPE_SIGNED_PLAIN && extra != NULL && extra_len >= 4) {
+      ContactInfo* author = lookupContactByPubKey(extra, 4);
+      if (author != NULL) {
+        snprintf(with_author, sizeof(with_author), "%s: %s", author->name, text);
+      } else {
+        snprintf(with_author, sizeof(with_author), "%02X%02X%02X%02X: %s",
+                 extra[0], extra[1], extra[2], extra[3], text);
+      }
+      shown = with_author;
+    }
+    riftRxLog().annotateLast(RIFT_AIR_K_DM, from.name, shown);
     riftNoteScope(pkt, NULL);
 #endif
-    _ui->newMsgConv(path_len, from.name, text, offline_queue_len,
+    _ui->newMsgConv(path_len, from.name, shown, offline_queue_len,
                     2, 0, from.id.pub_key);
     if (!_serial->isConnected() || _ui->notifiesWhileConnected()) {
       _ui->notify(UIEventType::contactMessage);

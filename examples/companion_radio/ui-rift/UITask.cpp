@@ -869,6 +869,19 @@ static void renderHeading(DisplayDriver& display, const char* text) {
   display.drawTextLeftAlign(2, 2, text);
 }
 
+// The login state of the repeater session in words. Shared between the repeater
+// panel, which owns the session, and a room conversation in COMMS, whose heading
+// says the same thing about the room.
+static const char* riftLoginText(uint8_t state) {
+  switch (state) {
+    case RIFT_LOGIN_WAITING: return "logging in";
+    case RIFT_LOGIN_OK:      return "logged in";
+    case RIFT_LOGIN_FAILED:  return "login refused";
+    case RIFT_LOGIN_TIMEOUT: return "no answer";
+    default:                 return "not logged in";
+  }
+}
+
 // RGB565 straight from the design handoff. Night and day are the same geometry
 // with a swapped colour table.
 //
@@ -5557,6 +5570,26 @@ public:
     else _target_name[0] = 0;
   }
 
+  // A room server is a contact that can be messaged, and also one that drops a
+  // post from a node it has not admitted - without an ack, so the send only
+  // fails slowly. Looked up rather than cached: the contact table is what knows
+  // the type, and a target set from NODES never passed through the picker.
+  bool targetIsRoom() const {
+    if (_target_is_channel) return false;
+    ContactInfo* c = the_mesh.lookupContactByPubKey(_target_key, 6);
+    return c != NULL && c->type == ADV_TYPE_ROOM;
+  }
+
+  // What the repeater session knows about this room's login. The session holds
+  // one target, so a room it is not pointed at reads as "not logged in" - which
+  // is the safe reading: the send path then asks, and a blank password gets a
+  // member straight back in.
+  uint8_t roomLoginState() const {
+    RiftRepeaterSession& s = riftRepeater();
+    if (!s.haveTarget() || memcmp(s.target(), _target_key, RIFT_REP_KEY_LEN) != 0) return RIFT_LOGIN_NONE;
+    return s.loginState();
+  }
+
   // This used to be unconditional, and the reasoning was sound at the time: the
   // history walked the whole log without filtering, so an arriving message was
   // already on screen and a popup would only cover the view that was showing it.
@@ -6031,6 +6064,24 @@ private:
       return;
     }
 
+    // A room server only takes posts from nodes it has admitted, and answers a
+    // stranger with silence rather than a refusal - so a post sent without a
+    // login sat at "sending" and ended at "no ack", and nothing on the screen
+    // said why or offered the login that exists one panel away. The login comes
+    // first now; the draft stays in the compose line for Enter afterwards.
+    if (rcpt->type == ADV_TYPE_ROOM) {
+      uint8_t st = roomLoginState();
+      if (st == RIFT_LOGIN_WAITING) {
+        _task->showAlert("Logging in - wait for the answer", 1400);
+        return;
+      }
+      if (st != RIFT_LOGIN_OK) {
+        riftLogf("room %s: login before post", _target_name);
+        _task->openRoomLogin(_target_key);
+        return;
+      }
+    }
+
     uint32_t expected_ack = 0, est_timeout = 0;
     int result = the_mesh.sendTextTo(rcpt, _input, expected_ack, est_timeout);
     if (result == MSG_SEND_FAILED) {
@@ -6439,8 +6490,16 @@ public:
     ChannelDetails ch;
     bool headed = true;
     const char* heading = NULL;
+    char room_heading[80];
     if (!_target_is_channel) {
       heading = _target_name;
+      // A room is named as one, with the login state beside it: it is the one
+      // fact that decides whether Enter will post or ask for a password.
+      if (targetIsRoom()) {
+        snprintf(room_heading, sizeof(room_heading), "%s  ROOM - %s", _target_name,
+                 riftLoginText(roomLoginState()));
+        heading = room_heading;
+      }
     } else if (!getTargetChannel(ch)) {
       heading = "NO CHANNEL";   // nothing in the strip is filled in this state
     } else {
@@ -7155,6 +7214,9 @@ class RiftRepeaterScreen : public RiftScreen {
   // any movement. Holding the index rather than a bool means moving the cursor
   // and pressing Enter cannot fire the command you were confirming.
   int _confirm_idx;
+  // Opened from a room conversation to log in, so the hints say how to get back
+  // to it rather than what else the panel can do.
+  bool _for_room;
 
   ContactInfo* contact() const {
     if (!_have_key) return NULL;
@@ -7207,19 +7269,12 @@ class RiftRepeaterScreen : public RiftScreen {
     return false;
   }
 
-  static const char* loginText(uint8_t state) {
-    switch (state) {
-      case RIFT_LOGIN_WAITING: return "logging in";
-      case RIFT_LOGIN_OK:      return "logged in";
-      case RIFT_LOGIN_FAILED:  return "login refused";
-      case RIFT_LOGIN_TIMEOUT: return "no answer";
-      default:                 return "not logged in";
-    }
-  }
+  static const char* loginText(uint8_t state) { return riftLoginText(state); }
 
 public:
   RiftRepeaterScreen(UITask* task)
-     : _task(task), _have_key(false), _mode(RIFT_RP_VIEW), _type(0), _menu_sel(0), _confirm_idx(-1) {
+     : _task(task), _have_key(false), _mode(RIFT_RP_VIEW), _type(0), _menu_sel(0), _confirm_idx(-1),
+       _for_room(false) {
     memset(_key, 0, sizeof(_key));
   }
 
@@ -7239,6 +7294,21 @@ public:
     _menu_sel = 0;
     _confirm_idx = -1;
     riftRepeater().setTarget(pub_key);   // drops any state belonging to another node
+    _for_room = false;
+    return true;
+  }
+
+  // Opened from COMMS for a room server: straight into the password prompt,
+  // because the one thing wanted here is the login, and the transcript can
+  // wait. A blank password is a valid answer - the room accepts it from a node
+  // already on its member list, and that is the common case after a reboot.
+  bool openForLogin(const uint8_t* pub_key) {
+    if (!openFor(pub_key)) return false;
+    if (!allowsLogin()) return false;
+    _edit.begin("", 31);
+    _edit.mask = true;
+    _mode = RIFT_RP_PASSWORD;
+    _for_room = true;
     return true;
   }
 
@@ -7450,8 +7520,12 @@ public:
       if (_mode == RIFT_RP_COMMAND && _confirm_idx == -2) {
         display.drawTextLeftAlign(lx, fy, "ENTER again to send");
       } else {
+        // A room takes a blank password from a node already on its member
+        // list, and that is the usual case after a reboot - so the prompt says
+        // so, or the natural reading is that a password is always required.
         display.drawTextLeftAlign(lx, fy,
-          _mode == RIFT_RP_PASSWORD ? "PASSWORD" : "COMMAND");
+          _mode != RIFT_RP_PASSWORD ? "COMMAND"
+          : (_type == RIFT_ADV_ROOM ? "ROOM PASSWORD - blank if already a member" : "PASSWORD"));
       }
       _edit.render(display, lx, fy + 11, w - 10);
       return 400;
@@ -7472,7 +7546,8 @@ public:
       display.drawTextLeftAlign(lx, fy, "T telemetry");
     }
     display.drawTextLeftAlign(lx, fy + 11,
-      (allowsCli() && s.isAdmin()) ? "C commands   BACK close" : "BACK close");
+      _for_room ? "BACK return to the room"
+      : ((allowsCli() && s.isAdmin()) ? "C commands   BACK close" : "BACK close"));
     return 1000;
   }
 
@@ -8239,6 +8314,23 @@ void UITask::openRepeaterPanel(const uint8_t* pub_key) {
     return;
   }
   riftLogf("repeater panel opened");
+  pushOverlay(repeater_panel);
+}
+
+void UITask::openRoomLogin(const uint8_t* pub_key) {
+  if (repeater_panel == NULL) {
+    showAlert("Login panel unavailable", 1600);
+    return;
+  }
+  if (_overlay != NULL) {
+    riftLogf("room login: overlay already up");
+    return;
+  }
+  if (!((RiftRepeaterScreen *) repeater_panel)->openForLogin(pub_key)) {
+    showAlert("Not a contact yet", 1600);
+    return;
+  }
+  riftLogf("room login prompt opened");
   pushOverlay(repeater_panel);
 }
 

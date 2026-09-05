@@ -288,6 +288,11 @@ public:
   // Log into a repeater and read it back. Reached with Enter on a repeater in
   // NODES, where that key had nothing to offer before.
   void openRepeaterPanel(const uint8_t* pub_key);
+  // The same panel, opened straight into its password prompt. COMMS calls it
+  // when a message is about to go to a room server this node has not logged
+  // into: the room drops posts from strangers without an ack, so the send
+  // would only have failed slowly.
+  void openRoomLogin(const uint8_t* pub_key);
 
   // Real navigation to COMMS, dismissing any popup on the way. The message
   // preview needs it: Enter there means "show me the full history", and the
