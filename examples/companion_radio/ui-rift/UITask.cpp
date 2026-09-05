@@ -589,7 +589,9 @@ static RiftConvKey riftChannelConv(uint8_t idx) {
 // counts). DisplayDriver::printWordWrap() is only a default that forwards to
 // print(), and ST7789NativeDisplay doesn't override it, so GFX would wrap to
 // x=0 rather than to our left margin - hence doing it ourselves.
-static int wrapText(const char* text, int max_px, int y, DisplayDriver* display, int x) {
+// max_lines > 0 stops after that many lines - the caller has measured the space
+// with a NULL display first and is asking for exactly what fits.
+static int wrapText(const char* text, int max_px, int y, DisplayDriver* display, int x, int max_lines = 0) {
   int max_chars = max_px / RIFT_CHAR_W;
   if (max_chars < 1) max_chars = 1;
 
@@ -597,7 +599,7 @@ static int wrapText(const char* text, int max_px, int y, DisplayDriver* display,
   int len = strlen(text);
   int pos = 0;
 
-  while (pos < len) {
+  while (pos < len && (max_lines <= 0 || lines < max_lines)) {
     int take = len - pos;
     if (take > max_chars) {
       take = max_chars;
@@ -1994,6 +1996,17 @@ public:
   void beginAddChannel(bool from_comms)    { _return_to_comms = from_comms; activate(IT_CHANNEL); }
   void beginDeleteChannel(bool from_comms) { _return_to_comms = from_comms; activate(IT_DELCHANNEL); }
   void beginChannelScope(bool from_comms)  { _return_to_comms = from_comms; activate(IT_SCOPE); }
+
+  // For the screen dump: put one of the sub-screens up as if it had been chosen
+  // from the list, so a capture can be taken of it without a hand on the device.
+  // 0 = air log, 1 = event log, 2 = diagnostics; anything else is the list.
+  void showSub(int which) {
+    _return_to_comms = false;
+    if (which == 0)      activate(IT_RXLOG);
+    else if (which == 1) activate(IT_LOG);
+    else if (which == 2) activate(IT_DIAG);
+    else                 _mode = MENU;
+  }
 private:
 
   // shared by render() and handleTouch(), so touch targets follow the layout.
@@ -2615,17 +2628,46 @@ private:
     if (_rx_scroll > log.count - 1) _rx_scroll = log.count - 1;
     if (_rx_scroll < 0) _rx_scroll = 0;
 
-    // A message takes two rows: the columns, then its text across the width
-    // under them. The WHO / WHAT column is twenty-two characters and a message
-    // is up to a hundred and sixty; on one row the text was cut after three
-    // words, which is the one thing on this screen worth reading in full.
+    // A message takes as many rows as it needs: the columns, then a line saying
+    // which channel and scope it came on, then its text wrapped across the width.
+    // The WHO / WHAT column is twenty-two characters and a message is up to a
+    // hundred and sixty; on one row the text was cut after three words, and on
+    // two rows after a third of it, which is the one thing on this screen worth
+    // reading in full. An entry is drawn whole or not at all - except the newest,
+    // which is clipped rather than lost when it alone is taller than the list.
     const int TOP = 38, BOTTOM = 196;
+    const int CONT_X = 54, CONT_W = 314 - 54;   // the continuation rows: under TYPE, to the thumb
     int y = TOP;
     for (int i = 0; y + RIFT_LINE_H <= BOTTOM; i++) {
       const RiftRxLog::Entry* e = log.peek(_rx_scroll + i);
       if (e == NULL) break;
-      bool two = (e->kind == RIFT_AIR_K_CHAN || e->kind == RIFT_AIR_K_DM) && e->text[0] != 0;
-      if (two && y + 2 * RIFT_LINE_H > BOTTOM) break;
+
+      bool tx   = (e->dir != RIFT_AIR_RX);
+      bool fail = (e->dir == RIFT_AIR_TXFAIL);
+      uint8_t pt = riftHeaderPayloadType(e->header);
+      bool msg  = (e->kind == RIFT_AIR_K_CHAN || e->kind == RIFT_AIR_K_DM) && e->text[0] != 0;
+
+      // The rows this entry wants, counted before anything is drawn. The info
+      // row exists for a channel message (its channel code and scope) and for a
+      // direct message that came scoped; the text rows are what the wrap needs.
+      char txt[RIFT_AIR_TEXT_MAX];
+      txt[0] = 0;
+      int text_rows = 0;
+      bool info = false;
+      if (msg) {
+        const char* body = e->text;
+        if (e->kind == RIFT_AIR_K_CHAN) body += riftChannelSender(e->text, NULL, 0);
+        riftTranslateUTF8(txt, body, sizeof(txt));
+        text_rows = txt[0] ? wrapText(txt, CONT_W, 0, NULL, 0) : 0;
+        info = (e->kind == RIFT_AIR_K_CHAN) || e->scope[0] != 0;
+      }
+      int rows = 1 + (info ? 1 : 0) + text_rows;
+      int avail = (BOTTOM - y) / RIFT_LINE_H;
+      if (rows > avail) {
+        if (i > 0) break;
+        text_rows -= (rows - avail);   // newest entry: show what fits
+        if (text_rows < 0) { text_rows = 0; info = false; }
+      }
 
       // seconds since boot, like the event log, so the two can be read against each
       // other - and monotonic, so it holds with no clock set
@@ -2633,9 +2675,6 @@ private:
       snprintf(tmp, sizeof(tmp), "%u.%u", (unsigned) (e->at_ms / 1000u),
                (unsigned) ((e->at_ms % 1000u) / 100u));
       display.drawTextRightAlign(40, y, tmp);
-
-      bool tx   = (e->dir != RIFT_AIR_RX);
-      bool fail = (e->dir == RIFT_AIR_TXFAIL);
 
       // Direction as a glyph, and a failed send as a third glyph rather than as a
       // colour on the second. Colour alone disappears in sunlight, and a send that
@@ -2648,7 +2687,6 @@ private:
       // The type in its own colour, so the eye can pick adverts, messages and
       // acks out of a scrolling column without reading it. Four letters: the
       // column is narrow and the colour carries the rest.
-      uint8_t pt = riftHeaderPayloadType(e->header);
       uint16_t tc = airTypeColour(pt);
       display.setColor(tc);
       display.drawTextLeftAlign(54, y, airTypeShort(pt));
@@ -2689,10 +2727,10 @@ private:
       }
 
       // Who and what, from the handler that decoded it. An advert names its node,
-      // a message its sender and text, an ack the node it came from. Names take
-      // the same colour they have in COMMS. A packet nobody decoded says only
-      // how long it was, in dim - it is someone else's traffic, and that is a
-      // fact worth seeing too.
+      // a message its sender, an ack the node it came from. Names take the same
+      // colour they have in COMMS. A group packet nobody here could decode says
+      // which channel code it was on and how long it was, in dim - it is someone
+      // else's traffic, and which channel it was on is a fact worth seeing too.
       const int WX = 178, WW = 314 - 178;
       char what[64];
       char who[24];
@@ -2703,17 +2741,15 @@ private:
           snprintf(what, sizeof(what), "%s%s", who, e->text[0] ? " (new)" : "");
           break;
         case RIFT_AIR_K_CHAN: {
-          // The channel and the sender on this row, in the sender's colour; the
-          // text is the second row. The text arrives as "sender: text", so the
-          // sender is split off it the way COMMS does.
+          // The sender on this row, in the sender's colour; the channel is the
+          // info row under it. The text arrives as "sender: text", so the sender
+          // is split off it the way COMMS does.
           char sender[RIFT_SENDER_MAX];
           int skip = riftChannelSender(e->text, sender, sizeof(sender));
           if (skip > 0) {
-            char shown[RIFT_SENDER_MAX * 2];
-            riftTranslateUTF8(shown, sender, sizeof(shown));
+            riftTranslateUTF8(what, sender, sizeof(what));
             uint16_t nc = riftNameColour(sender);
             display.setColor(nc != RIFT_CHAN_COL_NONE ? nc : rift_pal.fg);
-            snprintf(what, sizeof(what), "%s %s", who, shown);
           } else {
             display.setColor(rift_pal.fg);
             snprintf(what, sizeof(what), "%s", who);
@@ -2736,32 +2772,58 @@ private:
         case RIFT_AIR_K_CTRL:
         case RIFT_AIR_K_CLI:
         case RIFT_AIR_K_TRACE: {
-          char txt[48];
-          riftTranslateUTF8(txt, e->text, sizeof(txt));
+          char t2[48];
+          riftTranslateUTF8(t2, e->text, sizeof(t2));
           display.setColor(tc);
-          snprintf(what, sizeof(what), "%s %s", who, txt);
+          snprintf(what, sizeof(what), "%s %s", who, t2);
           break;
         }
         default:
           display.setColor(rift_pal.dim);
-          snprintf(what, sizeof(what), "%s %u bytes", tx ? "sent" : "not ours", (unsigned) e->len);
+          if (e->has_hash) {
+            // "ch 3A" is the channel code: the one clear byte of a channel's
+            // identity, so two undecoded packets on the same channel read as
+            // such. A scoped one says so - the route column's TF says it too,
+            // but this is the row the eye is on.
+            snprintf(what, sizeof(what), "ch %02X %s%uB%s", (unsigned) e->chan_hash,
+                     tx ? "sent " : "", (unsigned) e->len,
+                     (riftHeaderRouteType(e->header) == 0x00) ? " scoped" : "");
+          } else {
+            snprintf(what, sizeof(what), "%s %u bytes", tx ? "sent" : "not ours", (unsigned) e->len);
+          }
           break;
       }
       display.drawTextEllipsized(WX, y, WW, what);
+      y += RIFT_LINE_H;
 
-      if (two) {
-        // The text, under the TYPE column so the time column stays a column,
-        // across the rest of the width. A channel message loses its "sender: "
-        // prefix here because the row above has just said who.
-        const char* body = e->text;
-        if (e->kind == RIFT_AIR_K_CHAN) body += riftChannelSender(e->text, NULL, 0);
-        char txt[64];
-        riftTranslateUTF8(txt, body, sizeof(txt));
-        display.setColor(rift_pal.fg);
-        display.drawTextEllipsized(54, y + RIFT_LINE_H, 314 - 54, txt);
+      if (info) {
+        // The channel by name and code, and the scope the packet came under:
+        // "#Public ch 3A  scope #oslo". A channel with no scope reads "no scope"
+        // so the absence is stated rather than implied; a scope this node holds
+        // no key for is "scope ?" - it arrived, but from a region we are not in.
+        char line[80];
+        const char* sc = e->scope[0] ? e->scope : NULL;
+        if (e->kind == RIFT_AIR_K_CHAN) {
+          if (e->has_hash) snprintf(line, sizeof(line), "#%s ch %02X  %s%s", who, (unsigned) e->chan_hash,
+                                    sc ? "scope " : "no scope", sc ? sc : "");
+          else             snprintf(line, sizeof(line), "#%s  %s%s", who,
+                                    sc ? "scope " : "no scope", sc ? sc : "");
+        } else {
+          snprintf(line, sizeof(line), "direct  scope %s", sc ? sc : "?");
+        }
+        display.setColor(rift_pal.mid);
+        display.drawTextEllipsized(CONT_X, y, CONT_W, line);
         y += RIFT_LINE_H;
       }
-      y += RIFT_LINE_H;
+
+      if (text_rows > 0) {
+        // The text, under the TYPE column so the time column stays a column,
+        // wrapped at word breaks across the rest of the width. A channel message
+        // has lost its "sender: " prefix because the row above has said who.
+        display.setColor(rift_pal.fg);
+        int drawn = wrapText(txt, CONT_W, y, &display, CONT_X, text_rows);
+        y += drawn * RIFT_LINE_H;
+      }
     }
 
     display.setColor(rift_pal.rule);
@@ -8582,6 +8644,13 @@ void UITask::loop() {
       dismissOverlay();
       nav_idx = nav;
       setCurrScreen(nav_screens[nav_idx]);
+    } else if (nav >= 0x10 && nav <= 0x12) {
+      // A SYSTEM sub-screen - the logs and the diagnostics - which no nav index
+      // reaches. 0x10 air log, 0x11 event log, 0x12 diagnostics.
+      dismissOverlay();
+      nav_idx = RIFT_NAV_SYSTEM;
+      setCurrScreen(nav_screens[nav_idx]);
+      ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->showSub(nav - 0x10);
     }
     if (!_display->isOn()) _display->turnOn();
     _auto_off = millis() + AUTO_OFF_MILLIS;

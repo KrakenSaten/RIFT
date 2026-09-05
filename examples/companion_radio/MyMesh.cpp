@@ -329,6 +329,49 @@ void MyMesh::logTx(mesh::Packet* packet, int len) {
   unsigned long air = total - _last_air_total;
   _last_air_total = total;
   riftRxLog().addTx(true, (uint32_t) air, packet->header, packet->path_len, len);
+  uint8_t pt = packet->getPayloadType();
+  if ((pt == PAYLOAD_TYPE_GRP_TXT || pt == PAYLOAD_TYPE_GRP_DATA) && packet->payload_len > 0) {
+    riftRxLog().setLastHash(packet->payload[0]);
+  }
+}
+
+// Names the flood scope a received packet came under, for the air log.
+//
+// A scoped flood carries two transport codes, and the first is an HMAC of the
+// payload under the scope key - so the scope cannot be read off the packet, only
+// recognised: compute the code under each key this node holds and see which one
+// matches. Two candidates, which is all this node ever sends under: the node
+// default, and the channel's own scope when the message was on a channel that has
+// one. A code that matches neither is a scope this node is not part of, which is
+// worth knowing too, and is shown as "?".
+//
+// One HMAC-SHA256 per candidate, on a path that has just done an AES decrypt of
+// the same payload. Only for packets that carried codes at all.
+void MyMesh::riftNoteScope(const mesh::Packet* pkt, const mesh::GroupChannel* channel) {
+  if (pkt == NULL || !pkt->hasTransportCodes()) return;   // unscoped: nothing to say
+
+  const char* name = "?";
+  TransportKey k;
+  memcpy(k.key, _prefs.default_scope_key, sizeof(k.key));
+  if (!k.isNull() && k.calcTransportCode(pkt) == pkt->transport_codes[0]) {
+    name = _prefs.default_scope_name;
+  } else if (channel != NULL) {
+    int idx = findChannelIdx(*channel);
+    if (idx >= 0) {
+      static const uint8_t zeroes[16] = { 0 };
+      size_t klen = (memcmp(&channel->secret[16], zeroes, 16) == 0) ? 16 : 32;
+      uint32_t fp = riftChannelFingerprint(channel->secret, klen);
+      if (riftScopeKeyFor((uint8_t) idx, fp, k.key) && k.calcTransportCode(pkt) == pkt->transport_codes[0]) {
+        name = riftScopes().nameFor((uint8_t) idx, fp);
+      }
+    }
+  }
+  // Per-channel scopes are stored canonical, with the '#'; the node default is
+  // stored as the app sent it, usually without. One form on the screen.
+  char shown[RIFT_AIR_SCOPE_MAX];
+  if (name == NULL || name[0] == 0) name = "?";
+  snprintf(shown, sizeof(shown), "%s%s", (name[0] == '#' || name[0] == '?') ? "" : "#", name);
+  riftRxLog().setLastScope(shown);
 }
 
 void MyMesh::logTxFail(mesh::Packet* packet, int len) {
@@ -368,6 +411,16 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
   int pl_idx = riftRawPathLenIndex(header);
   uint8_t path_len = (len > pl_idx) ? raw[pl_idx] : 0;
   riftRxLog().add(snr, rssi, header, path_len, len);
+
+  // A group packet's first payload byte is the channel hash, sent in clear so
+  // receivers can pick which keys to try. The payload starts after the path,
+  // which is hash-count times hash-size bytes - Packet's own encoding of
+  // path_len. One byte copied; the air log turns it into "ch 3A" when asked.
+  uint8_t pt = riftHeaderPayloadType(header);
+  if (pt == PAYLOAD_TYPE_GRP_TXT || pt == PAYLOAD_TYPE_GRP_DATA) {
+    int pay_idx = pl_idx + 1 + mesh::Packet::pathHashCount(path_len) * mesh::Packet::pathHashSize(path_len);
+    if (len > pay_idx) riftRxLog().setLastHash(raw[pay_idx]);
+  }
 
   // Tropo: a mask, a compare and a counter. The transition is noticed by the UI
   // on its own timer, so nothing here formats a string or takes a decision.
@@ -1100,6 +1153,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
     // does not, because two contacts may share one and a rename changes it.
 #ifdef RIFT_VERSION
     riftRxLog().annotateLast(RIFT_AIR_K_DM, from.name, text);
+    riftNoteScope(pkt, NULL);
 #endif
     _ui->newMsgConv(path_len, from.name, text, offline_queue_len,
                     2, 0, from.id.pub_key);
@@ -1273,6 +1327,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   // label the user can edit, the index is what the message actually arrived on.
 #ifdef RIFT_VERSION
   riftRxLog().annotateLast(RIFT_AIR_K_CHAN, channel_name, text);
+  riftNoteScope(pkt, &channel);
 #endif
   if (_ui) _ui->newMsgConv(path_len, channel_name, text, offline_queue_len,
                            1, (uint8_t) channel_idx, NULL);

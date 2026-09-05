@@ -9,7 +9,8 @@
 //
 // Wire format, host to device: a normal companion frame whose first byte is
 // CMD_RIFT_SCREEN_DUMP and whose optional second byte is a nav index (0..4) to
-// switch to first, or absent/0xFF for whatever is showing now, overlays included.
+// switch to first, or 0x10..0x12 for a SYSTEM sub-screen (air log, event log,
+// diagnostics), or absent/0xFF for whatever is showing now, overlays included.
 //
 // Device to host, written raw on the serial port outside the companion framing
 // because a frame holds 184 bytes and a screen is 153600:

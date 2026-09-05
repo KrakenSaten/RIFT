@@ -129,6 +129,13 @@ public:
   // of the public key, as the cache stores it.
   void markPathConfirmed(const uint8_t* pubkey, int len);
 
+#ifdef RIFT_VERSION
+  // Records in the air log which flood scope a received packet came under, by
+  // recognising its transport code against the keys this node holds. channel
+  // may be NULL for a direct message.
+  void riftNoteScope(const mesh::Packet* pkt, const mesh::GroupChannel* channel);
+#endif
+
   // advert() sends zero-hop, so only direct neighbours hear it. This floods the
   // advert through the mesh instead, which is what distant nodes need before
   // they can decrypt a direct message from us. Mirrors the companion protocol's

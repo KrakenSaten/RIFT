@@ -235,7 +235,8 @@ The device's own pixels, over USB, as PNG at 1× and 2×:
 .venv/Scripts/python.exe tools/rift-screenshot.py --port COM8 --all --tag night
 ```
 
-`--all` walks the five nav screens; `--screen current` captures whatever is
+`--all` walks the five nav screens; `--screen airlog`, `eventlog` and `diag`
+open those SYSTEM sub-screens first; `--screen current` captures whatever is
 showing, overlays and popups included, so the repeater panel or the conversation
 list is captured by putting it up on the device first. Night and day are the
 device's own setting - toggle on SYSTEM and capture again with another `--tag`.

@@ -22,7 +22,8 @@ import argparse, os, struct, sys, time
 import serial
 from PIL import Image
 
-SCREENS = {"rift": 0, "nodes": 1, "radar": 2, "comms": 3, "system": 4, "current": 0xFF}
+SCREENS = {"rift": 0, "nodes": 1, "radar": 2, "comms": 3, "system": 4,
+           "airlog": 0x10, "eventlog": 0x11, "diag": 0x12, "current": 0xFF}
 MAGIC = b"RIFTSCRN"
 CMD_RIFT_SCREEN_DUMP = 0xF0
 

@@ -30,7 +30,13 @@
 // which is worth nothing after a reboot, and writing to flash on the packet path is
 // the opposite of what this is for.
 
-#define RIFT_RX_LOG_LINES 96
+// Sixty-four entries, down from ninety-six, to pay for the text field growing from
+// forty-eight bytes to the whole message: the ring is about ten kilobytes either
+// way, and a message the screen can show in full is worth more than another
+// thirty rows of adverts nobody scrolls back to.
+#define RIFT_RX_LOG_LINES 64
+#define RIFT_AIR_TEXT_MAX 144   // MAX_TEXT_LEN is 160; a channel message also carries "sender: "
+#define RIFT_AIR_SCOPE_MAX 12
 
 // Direction, and for a transmit whether it reached the air.
 #define RIFT_AIR_RX     0
@@ -72,12 +78,25 @@ struct RiftRxLog {
     // What the packet turned out to be, filled in after the fact by whichever
     // handler decoded it: an advert has a name, a message a sender and its text,
     // an ack the node it came from. A packet nobody could decode keeps kind 0
-    // and is what the raw fields say it is. Sixty-five bytes an entry - about
-    // six kilobytes for the ring - so the air log can say "Per: Godmorgon" where
-    // it used to say "GRP F 3h 42".
+    // and is what the raw fields say it is. About 180 bytes an entry - eleven
+    // kilobytes for the ring - so the air log can show the whole of "Per:
+    // Godmorgon, er noen på lufta?" where it used to say "GRP F 3h 42".
     uint8_t  kind;       // RIFT_AIR_K_*
+    // The first payload byte of a group packet is the channel hash - the one byte
+    // of a channel's identity that travels in clear. Recorded on the packet path
+    // for every GRP packet, decoded or not, so the air log can say which channel
+    // a message nobody here can read was on, and put the same code beside the
+    // ones it can. Valid when has_hash is set.
+    uint8_t  chan_hash;
+    uint8_t  has_hash;
     char     who[16];
-    char     text[48];   // what the second row can show, plus a margin for UTF-8
+    // The flood scope the packet came under. Empty when it carried no transport
+    // codes, which is an unscoped flood or a direct packet; "?" when it was
+    // scoped but under a key this node does not hold; else the scope's name.
+    // Filled in by the handler, which is the one place both the packet and the
+    // keys are to hand.
+    char     scope[RIFT_AIR_SCOPE_MAX];
+    char     text[RIFT_AIR_TEXT_MAX];
   };
   Entry lines[RIFT_RX_LOG_LINES];
   int head = RIFT_RX_LOG_LINES - 1;
@@ -105,9 +124,30 @@ struct RiftRxLog {
     e->path_len = path_len;
     e->len = (uint8_t) (len > 255 ? 255 : (len < 0 ? 0 : len));
     e->kind = RIFT_AIR_K_NONE;
+    e->chan_hash = 0;
+    e->has_hash = 0;
     e->who[0] = 0;
+    e->scope[0] = 0;
     e->text[0] = 0;
     return e;
+  }
+
+  // The channel hash of the packet most recently logged, either direction. Passed
+  // separately from add()/addTx() because only a group packet has one, and the
+  // caller has already worked out where the payload starts.
+  void setLastHash(uint8_t hash) {
+    if (count == 0) return;
+    lines[head].chan_hash = hash;
+    lines[head].has_hash = 1;
+  }
+
+  // The scope the most recent receive came under. NULL or empty leaves it as
+  // unscoped; the handler passes "?" for a scope it could not name.
+  void setLastScope(const char* name) {
+    if (count == 0 || name == NULL || name[0] == 0) return;
+    Entry* e = &lines[head];
+    if (e->dir != RIFT_AIR_RX) return;
+    snprintf(e->scope, sizeof(e->scope), "%s", name);
   }
 
   // Called by the handler that decoded the packet the radio most recently
