@@ -72,11 +72,12 @@ struct RiftRxLog {
     // What the packet turned out to be, filled in after the fact by whichever
     // handler decoded it: an advert has a name, a message a sender and its text,
     // an ack the node it came from. A packet nobody could decode keeps kind 0
-    // and is what the raw fields say it is. Forty bytes an entry, so the air log
-    // can say "Per: Godmorgon" where it used to say "GRP F 3h 42".
+    // and is what the raw fields say it is. Sixty-five bytes an entry - about
+    // six kilobytes for the ring - so the air log can say "Per: Godmorgon" where
+    // it used to say "GRP F 3h 42".
     uint8_t  kind;       // RIFT_AIR_K_*
     char     who[16];
-    char     text[24];
+    char     text[48];   // what the second row can show, plus a margin for UTF-8
   };
   Entry lines[RIFT_RX_LOG_LINES];
   int head = RIFT_RX_LOG_LINES - 1;

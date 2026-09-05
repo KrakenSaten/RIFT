@@ -2615,12 +2615,17 @@ private:
     if (_rx_scroll > log.count - 1) _rx_scroll = log.count - 1;
     if (_rx_scroll < 0) _rx_scroll = 0;
 
+    // A message takes two rows: the columns, then its text across the width
+    // under them. The WHO / WHAT column is twenty-two characters and a message
+    // is up to a hundred and sixty; on one row the text was cut after three
+    // words, which is the one thing on this screen worth reading in full.
     const int TOP = 38, BOTTOM = 196;
-    int rows = (BOTTOM - TOP) / RIFT_LINE_H;
     int y = TOP;
-    for (int i = 0; i < rows; i++, y += RIFT_LINE_H) {
+    for (int i = 0; y + RIFT_LINE_H <= BOTTOM; i++) {
       const RiftRxLog::Entry* e = log.peek(_rx_scroll + i);
       if (e == NULL) break;
+      bool two = (e->kind == RIFT_AIR_K_CHAN || e->kind == RIFT_AIR_K_DM) && e->text[0] != 0;
+      if (two && y + 2 * RIFT_LINE_H > BOTTOM) break;
 
       // seconds since boot, like the event log, so the two can be read against each
       // other - and monotonic, so it holds with no clock set
@@ -2698,19 +2703,26 @@ private:
           snprintf(what, sizeof(what), "%s%s", who, e->text[0] ? " (new)" : "");
           break;
         case RIFT_AIR_K_CHAN: {
-          // "#oslo Per: text" is too long; the text already begins with the
-          // sender, so the channel goes first as a chip-less tag
-          char txt[48];
-          riftTranslateUTF8(txt, e->text, sizeof(txt));
-          display.setColor(rift_pal.fg);
-          snprintf(what, sizeof(what), "%s %s", who, txt);
+          // The channel and the sender on this row, in the sender's colour; the
+          // text is the second row. The text arrives as "sender: text", so the
+          // sender is split off it the way COMMS does.
+          char sender[RIFT_SENDER_MAX];
+          int skip = riftChannelSender(e->text, sender, sizeof(sender));
+          if (skip > 0) {
+            char shown[RIFT_SENDER_MAX * 2];
+            riftTranslateUTF8(shown, sender, sizeof(shown));
+            uint16_t nc = riftNameColour(sender);
+            display.setColor(nc != RIFT_CHAN_COL_NONE ? nc : rift_pal.fg);
+            snprintf(what, sizeof(what), "%s %s", who, shown);
+          } else {
+            display.setColor(rift_pal.fg);
+            snprintf(what, sizeof(what), "%s", who);
+          }
           break;
         }
         case RIFT_AIR_K_DM: {
-          char txt[48];
-          riftTranslateUTF8(txt, e->text, sizeof(txt));
           display.setColor(riftNameColour(e->who) != RIFT_CHAN_COL_NONE ? riftNameColour(e->who) : rift_pal.fg);
-          snprintf(what, sizeof(what), "%s: %s", who, txt);
+          snprintf(what, sizeof(what), "%s", who);
           break;
         }
         case RIFT_AIR_K_ACK:
@@ -2736,6 +2748,20 @@ private:
           break;
       }
       display.drawTextEllipsized(WX, y, WW, what);
+
+      if (two) {
+        // The text, under the TYPE column so the time column stays a column,
+        // across the rest of the width. A channel message loses its "sender: "
+        // prefix here because the row above has just said who.
+        const char* body = e->text;
+        if (e->kind == RIFT_AIR_K_CHAN) body += riftChannelSender(e->text, NULL, 0);
+        char txt[64];
+        riftTranslateUTF8(txt, body, sizeof(txt));
+        display.setColor(rift_pal.fg);
+        display.drawTextEllipsized(54, y + RIFT_LINE_H, 314 - 54, txt);
+        y += RIFT_LINE_H;
+      }
+      y += RIFT_LINE_H;
     }
 
     display.setColor(rift_pal.rule);
