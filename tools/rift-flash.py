@@ -238,12 +238,18 @@ def main():
     # KB worked on the same board. Anything a human has to remember to pass here
     # is something that will be forgotten on the day the device is half-written.
     try:
-        flash_and_settle(base, args, paths)
+        flash_and_settle(base, args, paths, image)
     finally:
         boot_app(base)
 
 
-def flash_and_settle(base, args, paths):
+# image is passed in because the retry below re-splits it. When this loop was
+# lifted out of main() the name stayed behind, so the first time a chunk actually
+# failed the retry raised NameError instead of halving - which is the one moment
+# this function exists for, and it left the device with a partial image and the
+# tool's own promise ("starts the image over") broken. The halving path had never
+# run since the move; the happy path had, many times.
+def flash_and_settle(base, args, paths, image):
     kb = args.chunk_kb
     while True:
         if write_all(base, paths):
