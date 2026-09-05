@@ -348,7 +348,7 @@ Boot is now 5.1 seconds. Why the probe does that is still not established — se
 
 ## Status
 
-**Current release: 0.9.2** — set by the `RIFT_VERSION` build flag and shown on the
+**Current release: 0.9.3** — set by the `RIFT_VERSION` build flag and shown on the
 boot screen and SYSTEM, alongside the MeshCore version it is built on. Deliberately
 0.x: it works and is verified on hardware, but it has had no external users and the
 limitations above are real.
@@ -357,8 +357,8 @@ limitations above are real.
 over the companion protocol next to `FIRMWARE_VER_CODE`.
 
 Every screen from the original design concept is implemented and verified on
-physical hardware. Resource use: ~57 % of internal static RAM, ~25 % of the 6.5 MB
-app partition. 256 native tests across eight suites.
+physical hardware. Resource use: ~61 % of internal static RAM, ~26 % of the 6.5 MB
+app partition. 284 native tests across eight suites.
 
 Worth knowing where that RAM goes: MeshCore's contact table is `MAX_CONTACTS` 350
 plus 8 anonymous slots at 184 bytes each — 65.7 KB, or a fifth of the chip's 320 KB,
@@ -366,8 +366,23 @@ statically allocated whether it holds one contact or all of them. It is the sing
 largest
 item in the firmware.
 
-**Unreleased, on `rift-tdeck`:** the September redesign round
-(`design/redesign-2026-09/`), built in three passes. One shared system: a window
+**0.9.3** is the September review and redesign round, and what the device asked
+for once it was in use again. Room servers work from the device: a room is named
+as one in COMMS with its login state beside it, Enter on a draft logs in first when
+it has to (a blank password re-admits a member), a late reply or a pushed post
+counts as the login it proves, and posts carry their author. The air log shows
+whole messages wrapped over as many rows as they need, the channel code of every
+group packet - decoded or not - and the flood scope a packet came under, named by
+recognising its transport code against the keys this node holds. The clock follows
+the mesh: the median of recent adverts steps it when three nodes agree it is off by
+more than ninety seconds, so a flash no longer leaves it hours late until a GPS fix.
+The tropo alert is a shape rather than a colour, with the last opening and its
+peak; the diagnostics readings move one level down on SYSTEM; add, remove and scope
+for channels live in the COMMS conversation list; the home screen's activity strip
+is a per-minute bar graph. Screenshots come from the device's own frame buffer over
+USB, sub-screens included.
+
+The redesign itself (`design/redesign-2026-09/`) was built in three passes. One shared system: a window
 pattern with a thumb at the right edge for every list, row text stopping at 314,
 the accent reduced from seven meanings to four (active tab, selection, warning,
 wordmark) with unread and own-message marks in the foreground colour and overlay
@@ -377,7 +392,7 @@ two cell forms; RADAR with a source-and-state heading, a `DEVICE / RSSI / SEEN`
 list and new keys; COMMS with `√` for delivered and a character count; SYSTEM as
 one list with five groups and a loss warning in one form; the home screen with a
 per-minute activity strip instead of an animation. Plus, from the review that
-preceded it: the I2S clock off GPIO0 (every boot had been a rescue boot), the
+preceded it (`REVIEW-2026-09-03.md`): the I2S clock off GPIO0 (every boot had been a rescue boot), the
 touch calibration applied, the transport-packet path length read from the right
 byte, migrated log entries evictable, regions requests reaching routed repeaters,
 the advert cache size back to upstream's in stock builds, and screenshots from the
