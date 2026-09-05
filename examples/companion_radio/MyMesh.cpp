@@ -471,6 +471,7 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
   // log - which recorded only the adverts this node sent itself.
   riftLogf("%s %s %s %dh", is_new ? "NEW" : "adv", riftAdvertTypeName(contact.type),
            contact.name, (int) mesh::Packet::pathHashCount(path_len));
+  riftRxLog().annotateLast(RIFT_AIR_K_ADVERT, contact.name, is_new ? "new" : NULL);
 
   // The sender's clock against ours, one sample per node; when enough of them
   // agree that we are off by more than the margin, the clock is stepped. See
@@ -854,6 +855,11 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
   riftLogf("path %s now %d hop", contact.name, (int) contact.out_path_len);
   // A path return is the route being seen to work in one direction at least.
   markPathConfirmed(contact.id.pub_key, sizeof(AdvertPath::pubkey_prefix));
+  {
+    char hops[12];
+    snprintf(hops, sizeof(hops), "%d hop", (int) mesh::Packet::pathHashCount(contact.out_path_len));
+    riftRxLog().annotateLast(RIFT_AIR_K_PATH, contact.name, hops);
+  }
 #endif
   out_frame[0] = PUSH_CODE_PATH_UPDATED;
   memcpy(&out_frame[1], contact.id.pub_key, PUB_KEY_SIZE);
@@ -1023,6 +1029,11 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
       // An ACK is the route having carried a message there and something back.
       if (expected_ack_table[i].contact != NULL) {
         markPathConfirmed(expected_ack_table[i].contact->id.pub_key, sizeof(AdvertPath::pubkey_prefix));
+        char trip[16];
+        snprintf(trip, sizeof(trip), "%.1fs", trip_time / 1000.0f);
+        riftRxLog().annotateLast(RIFT_AIR_K_ACK, expected_ack_table[i].contact->name, trip);
+      } else {
+        riftRxLog().annotateLast(RIFT_AIR_K_ACK, NULL, "for us");
       }
 #endif
 
@@ -1087,6 +1098,9 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   if (should_display && _ui) {
     // 2 = direct. The sender's key prefix identifies the conversation; the name
     // does not, because two contacts may share one and a rename changes it.
+#ifdef RIFT_VERSION
+    riftRxLog().annotateLast(RIFT_AIR_K_DM, from.name, text);
+#endif
     _ui->newMsgConv(path_len, from.name, text, offline_queue_len,
                     2, 0, from.id.pub_key);
     if (!_serial->isConnected() || _ui->notifiesWhileConnected()) {
@@ -1178,6 +1192,7 @@ void MyMesh::onCommandDataRecv(const ContactInfo &from, mesh::Packet *pkt, uint3
                                const char *text) {
   markConnectionActive(from); // in case this is from a server, and we have a connection
 #ifdef RIFT_VERSION
+  riftRxLog().annotateLast(RIFT_AIR_K_CLI, from.name, text);
   // A repeater answers a CLI command here. Upstream queues it for the companion
   // app and that is the only copy, so with no phone attached the answer to
   // something the device itself asked was thrown away. Observed, not diverted:
@@ -1256,6 +1271,9 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   }
   // 1 = channel. The index rather than the name for the same reason: the name is a
   // label the user can edit, the index is what the message actually arrived on.
+#ifdef RIFT_VERSION
+  riftRxLog().annotateLast(RIFT_AIR_K_CHAN, channel_name, text);
+#endif
   if (_ui) _ui->newMsgConv(path_len, channel_name, text, offline_queue_len,
                            1, (uint8_t) channel_idx, NULL);
 #endif
@@ -1352,6 +1370,9 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
 }
 
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
+#ifdef RIFT_VERSION
+  riftRxLog().annotateLast(RIFT_AIR_K_CTRL, contact.name, "response");
+#endif
   // Remote input. Every read below is into a buffer whose length a sender chose, and
   // the tag read was unconditional - a four-byte response, or an empty one, read past
   // the end. The bytes do not come from unmapped memory on this part, so it does not
@@ -1540,6 +1561,15 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
     if (tag == discover_tag) {
       mesh::Identity id(&packet->payload[6]);
       if (!id.matches(self_id)) {
+#ifdef RIFT_VERSION
+        {
+          ContactInfo* c = lookupContactByPubKey(&packet->payload[6], PUB_KEY_SIZE);
+          char who[16];
+          if (c != NULL && c->name[0]) snprintf(who, sizeof(who), "%s", c->name);
+          else snprintf(who, sizeof(who), "%02X%02X%02X..", packet->payload[6], packet->payload[7], packet->payload[8]);
+          riftRxLog().annotateLast(RIFT_AIR_K_CTRL, who, "discover reply");
+        }
+#endif
         // one entry per node: a repeater can answer twice if the request was
         // repeated, and two rows for one node reads as two repeaters
         int slot = -1;

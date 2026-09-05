@@ -1828,8 +1828,46 @@ public:
   }
 };
 
-// SYSTEM: live keyboard/trackball diagnostics - proves the Step 2 input
-// drivers work end-to-end. Real settings/diagnostics content lands later.
+// The air log's colour per payload type, and a four-letter name for the narrow
+// column. Colour carries the type so a scrolling column can be read without
+// reading it: adverts blue, messages green, acks grey-green, paths purple,
+// requests steel blue, control violet - drawn from the name-colour table, which
+// was chosen to be told apart at 6px in daylight. Messages take the ok green
+// because they are the rows most worth finding.
+static uint16_t airTypeColour(uint8_t pt) {
+  switch (pt) {
+    case 0x04: return riftNameColourAt(4);   // ADVERT
+    case 0x02: return rift_pal.ok;           // TXT
+    case 0x05: case 0x06: return riftNameColourAt(0);   // GRP TXT / GRP DAT
+    case 0x03: return riftNameColourAt(6);   // ACK
+    case 0x08: return riftNameColourAt(9);   // PATH
+    case 0x00: case 0x01: case 0x07: return riftNameColourAt(10);   // REQ / RESP / ANONREQ
+    case 0x0B: return riftNameColourAt(8);   // CONTROL
+    case 0x09: return riftNameColourAt(5);   // TRACE
+    default:   return rift_pal.mid;
+  }
+}
+
+static const char* airTypeShort(uint8_t pt) {
+  switch (pt) {
+    case 0x00: return "REQ";
+    case 0x01: return "RESP";
+    case 0x02: return "MSG";
+    case 0x03: return "ACK";
+    case 0x04: return "ADV";
+    case 0x05: return "GRP";
+    case 0x06: return "GRPD";
+    case 0x07: return "ANON";
+    case 0x08: return "PATH";
+    case 0x09: return "TRAC";
+    case 0x0A: return "MULT";
+    case 0x0B: return "CTL";
+    case 0x0F: return "RAW";
+    default:   return "?";
+  }
+}
+
+// SYSTEM: the settings, the diagnostics one level down, and the two logs.
 class RiftSystemScreen : public RiftScreen {
   UITask* _task;
 
@@ -2550,16 +2588,16 @@ private:
              (unsigned) log.total_tx);
     display.drawTextRightAlign(318, 2, tmp);
 
-    // drawn at the same x as the data below it, not as one right-aligned string:
-    // a header that does not sit over its column is worse than no header
+    // Columns: time, direction, type, route and hops, signal, then who and what.
+    // Drawn at the same x as the data below, not as one right-aligned string: a
+    // header that does not sit over its column is worse than no header. One
+    // header over the two signal columns, because no per-column header is true
+    // for both directions: a receive fills them with RSSI and SNR, a transmit
+    // with the air time it spent.
     display.drawTextLeftAlign(54, 20, "TYPE");
-    display.drawTextLeftAlign(110, 20, "RT HOP");
-    // One header over both value columns, because no per-column header is true for
-    // both directions: a receive fills them with RSSI and SNR, a transmit with the
-    // air time it spent. Naming all three is honest where naming two would have left
-    // half the rows sitting under the wrong word.
-    display.drawTextRightAlign(262, 20, "RSSI SNR / AIR");
-    display.drawTextRightAlign(316, 20, "LEN");
+    display.drawTextLeftAlign(84, 20, "RT");
+    display.drawTextRightAlign(170, 20, "RSSI SNR/AIR");
+    display.drawTextLeftAlign(178, 20, "WHO / WHAT");
 
     display.setColor(rift_pal.rule);
     display.fillRect(0, 32, display.width(), 1);
@@ -2602,19 +2640,23 @@ private:
       display.setColor(fail ? rift_pal.accent : (tx ? rift_pal.ok : rift_pal.mid));
       display.drawTextLeftAlign(44, y, fail ? "!" : (tx ? ">" : "<"));
 
+      // The type in its own colour, so the eye can pick adverts, messages and
+      // acks out of a scrolling column without reading it. Four letters: the
+      // column is narrow and the colour carries the rest.
       uint8_t pt = riftHeaderPayloadType(e->header);
-      display.setColor(rift_pal.fg);
-      display.drawTextLeftAlign(54, y, riftPayloadTypeName(pt));
+      uint16_t tc = airTypeColour(pt);
+      display.setColor(tc);
+      display.drawTextLeftAlign(54, y, airTypeShort(pt));
 
       display.setColor(rift_pal.mid);
       if (e->path_len == 0xFF) {
         // no path recorded, which is not 63 hops
-        snprintf(tmp, sizeof(tmp), "%s  -", riftRouteTypeName(riftHeaderRouteType(e->header)));
+        snprintf(tmp, sizeof(tmp), "%s -", riftRouteTypeName(riftHeaderRouteType(e->header)));
       } else {
-        snprintf(tmp, sizeof(tmp), "%s %uh", riftRouteTypeName(riftHeaderRouteType(e->header)),
+        snprintf(tmp, sizeof(tmp), "%s%u", riftRouteTypeName(riftHeaderRouteType(e->header)),
                  (unsigned) riftHopCount(e->path_len));
       }
-      display.drawTextLeftAlign(110, y, tmp);
+      display.drawTextLeftAlign(84, y, tmp);
 
       if (tx) {
         // Air time, with its unit, so the value labels itself whatever the shared
@@ -2622,18 +2664,15 @@ private:
         // path in Dispatcher never adds to the air-time total, so zero there is the
         // absence of a measurement and not a measurement of zero.
         display.setColor(fail ? rift_pal.accent : rift_pal.mid);
-        if (fail) {
-          strcpy(tmp, "-");
-        } else {
-          snprintf(tmp, sizeof(tmp), "%ums", (unsigned) e->air_ms);
-        }
-        display.drawTextRightAlign(262, y, tmp);
+        if (fail) strcpy(tmp, "-");
+        else      snprintf(tmp, sizeof(tmp), "%ums", (unsigned) e->air_ms);
+        display.drawTextRightAlign(170, y, tmp);
       } else {
         // RSSI and SNR are what say whether a packet was comfortable or marginal, and
         // a marginal one that decoded is the interesting case
         display.setColor(rift_pal.fg);
         snprintf(tmp, sizeof(tmp), "%d", (int) e->rx.rssi);
-        display.drawTextRightAlign(206, y, tmp);
+        display.drawTextRightAlign(134, y, tmp);
         // Formatted from the magnitude with an explicit sign. Dividing a negative by
         // four truncates toward zero, so an SNR of -0.5 came out as "0.5" - the sign
         // vanished for exactly the marginal packets this column exists to show.
@@ -2641,18 +2680,79 @@ private:
         bool neg = q < 0;
         if (neg) q = -q;
         snprintf(tmp, sizeof(tmp), "%s%d.%d", neg ? "-" : "", q / 4, (q % 4) * 25 / 10);
-        display.drawTextRightAlign(262, y, tmp);
+        display.drawTextRightAlign(170, y, tmp);
       }
 
-      display.setColor(rift_pal.mid);
-      snprintf(tmp, sizeof(tmp), "%u", (unsigned) e->len);
-      display.drawTextRightAlign(316, y, tmp);
+      // Who and what, from the handler that decoded it. An advert names its node,
+      // a message its sender and text, an ack the node it came from. Names take
+      // the same colour they have in COMMS. A packet nobody decoded says only
+      // how long it was, in dim - it is someone else's traffic, and that is a
+      // fact worth seeing too.
+      const int WX = 178, WW = 314 - 178;
+      char what[64];
+      char who[24];
+      riftTranslateUTF8(who, e->who, sizeof(who));
+      switch (e->kind) {
+        case RIFT_AIR_K_ADVERT:
+          display.setColor(riftNameColour(e->who) != RIFT_CHAN_COL_NONE ? riftNameColour(e->who) : rift_pal.fg);
+          snprintf(what, sizeof(what), "%s%s", who, e->text[0] ? " (new)" : "");
+          break;
+        case RIFT_AIR_K_CHAN: {
+          // "#oslo Per: text" is too long; the text already begins with the
+          // sender, so the channel goes first as a chip-less tag
+          char txt[48];
+          riftTranslateUTF8(txt, e->text, sizeof(txt));
+          display.setColor(rift_pal.fg);
+          snprintf(what, sizeof(what), "%s %s", who, txt);
+          break;
+        }
+        case RIFT_AIR_K_DM: {
+          char txt[48];
+          riftTranslateUTF8(txt, e->text, sizeof(txt));
+          display.setColor(riftNameColour(e->who) != RIFT_CHAN_COL_NONE ? riftNameColour(e->who) : rift_pal.fg);
+          snprintf(what, sizeof(what), "%s: %s", who, txt);
+          break;
+        }
+        case RIFT_AIR_K_ACK:
+          display.setColor(tc);
+          snprintf(what, sizeof(what), "ack %s %s", who[0] ? who : "", e->text);
+          break;
+        case RIFT_AIR_K_PATH:
+          display.setColor(tc);
+          snprintf(what, sizeof(what), "path %s %s", who, e->text);
+          break;
+        case RIFT_AIR_K_CTRL:
+        case RIFT_AIR_K_CLI:
+        case RIFT_AIR_K_TRACE: {
+          char txt[48];
+          riftTranslateUTF8(txt, e->text, sizeof(txt));
+          display.setColor(tc);
+          snprintf(what, sizeof(what), "%s %s", who, txt);
+          break;
+        }
+        default:
+          display.setColor(rift_pal.dim);
+          snprintf(what, sizeof(what), "%s %u bytes", tx ? "sent" : "not ours", (unsigned) e->len);
+          break;
+      }
+      display.drawTextEllipsized(WX, y, WW, what);
     }
 
     display.setColor(rift_pal.rule);
     display.fillRect(0, 200, display.width(), 1);
-    display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(2, 206, "up/down  L/R page  ENTER back");
+    // The colour key, in the colours: the footer's job here is to make the
+    // TYPE column readable at a glance, and a key is shorter than a legend.
+    {
+      static const struct { const char* label; uint8_t pt; } KEY[] = {
+        { "ADV", 0x04 }, { "MSG", 0x02 }, { "GRP", 0x05 }, { "ACK", 0x03 }, { "PATH", 0x08 }, { "CTL", 0x0B },
+      };
+      int kx = 2;
+      for (size_t i = 0; i < sizeof(KEY) / sizeof(KEY[0]); i++) {
+        display.setColor(airTypeColour(KEY[i].pt));
+        display.drawTextLeftAlign(kx, 206, KEY[i].label);
+        kx += ((int) strlen(KEY[i].label) + 1) * RIFT_CHAR_W;
+      }
+    }
 
     // Remaining transmit budget, which this screen is now the right place for: the
     // air time column above says what each packet cost, and this says what is left to

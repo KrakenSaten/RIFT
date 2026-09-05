@@ -37,6 +37,17 @@
 #define RIFT_AIR_TX     1
 #define RIFT_AIR_TXFAIL 2
 
+// What a received packet was, once decoded. Set by MyMesh's handlers.
+#define RIFT_AIR_K_NONE    0   // not decoded: someone else's traffic, or a type we do not read
+#define RIFT_AIR_K_ADVERT  1   // who: the node
+#define RIFT_AIR_K_CHAN    2   // who: the channel, text: "sender: text"
+#define RIFT_AIR_K_DM      3   // who: the sender, text: the message
+#define RIFT_AIR_K_ACK     4   // who: the node whose ack it was
+#define RIFT_AIR_K_PATH    5   // who: the node whose route came back
+#define RIFT_AIR_K_CTRL    6   // who: the responder, text: what it answered
+#define RIFT_AIR_K_CLI     7   // who: the repeater, text: its reply
+#define RIFT_AIR_K_TRACE   8
+
 struct RiftRxLog {
   struct Entry {
     uint32_t at_ms;
@@ -58,6 +69,14 @@ struct RiftRxLog {
     uint8_t  path_len;   // Packet's encoding: hash count and hash size
     uint8_t  len;        // whole packet, capped at 255 which no packet exceeds
     uint8_t  dir;        // RIFT_AIR_*
+    // What the packet turned out to be, filled in after the fact by whichever
+    // handler decoded it: an advert has a name, a message a sender and its text,
+    // an ack the node it came from. A packet nobody could decode keeps kind 0
+    // and is what the raw fields say it is. Forty bytes an entry, so the air log
+    // can say "Per: Godmorgon" where it used to say "GRP F 3h 42".
+    uint8_t  kind;       // RIFT_AIR_K_*
+    char     who[16];
+    char     text[24];
   };
   Entry lines[RIFT_RX_LOG_LINES];
   int head = RIFT_RX_LOG_LINES - 1;
@@ -84,7 +103,24 @@ struct RiftRxLog {
     e->header = header;
     e->path_len = path_len;
     e->len = (uint8_t) (len > 255 ? 255 : (len < 0 ? 0 : len));
+    e->kind = RIFT_AIR_K_NONE;
+    e->who[0] = 0;
+    e->text[0] = 0;
     return e;
+  }
+
+  // Called by the handler that decoded the packet the radio most recently
+  // logged. The Dispatcher logs the raw frame, then hands it up, and the
+  // callbacks run inside that same call - so "the newest entry" is the packet
+  // being decoded. Only a receive is annotated; a transmit's row says what was
+  // sent from its header, and nothing decodes it afterwards.
+  void annotateLast(uint8_t kind, const char* who, const char* text) {
+    if (count == 0) return;
+    Entry* e = &lines[head];
+    if (e->dir != RIFT_AIR_RX) return;
+    e->kind = kind;
+    if (who != NULL)  snprintf(e->who, sizeof(e->who), "%s", who);
+    if (text != NULL) snprintf(e->text, sizeof(e->text), "%s", text);
   }
 
   void add(float snr, float rssi, uint8_t header, uint8_t path_len, int len) {
