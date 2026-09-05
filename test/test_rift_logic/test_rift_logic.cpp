@@ -6,6 +6,7 @@
 // exactly as upstream has them. The header is standalone - stdint and string.h
 // only - so there is nothing to link.
 #include "../../examples/companion_radio/ui-rift/RiftLogic.h"
+#include "../../examples/companion_radio/ui-rift/RiftClock.h"
 #include "../../examples/companion_radio/CompanionCmdLimits.h"
 
 // ---------------------------------------------------------------- hash resolution
@@ -2372,6 +2373,111 @@ TEST(DragSteps, HandlesAFastDragInOneReport) {
 TEST(DragSteps, DraggingUpGoesForward) {
   int r = 0;
   EXPECT_EQ(2, riftDragSteps(&r, -32, 16));
+}
+
+// ------------------------------------------------------------ mesh clock sync
+
+static const uint8_t K1[6] = { 1, 1, 1, 1, 1, 1 };
+static const uint8_t K2[6] = { 2, 2, 2, 2, 2, 2 };
+static const uint8_t K3[6] = { 3, 3, 3, 3, 3, 3 };
+static const uint8_t K4[6] = { 4, 4, 4, 4, 4, 4 };
+static const uint32_t OURS = 1757000000u;   // September 2025, plausible
+
+TEST(ClockSync, OneNodeIsNotAConsensus) {
+    RiftClockSync c; riftClockReset(&c);
+    EXPECT_TRUE(riftClockNote(&c, K1, OURS + 600, OURS, 1000));
+    int32_t med = 0; int agree = 0;
+    EXPECT_EQ(1, riftClockConsensus(&c, 1000, &med, &agree));
+    EXPECT_EQ(600, med);
+    EXPECT_EQ(1, agree);
+    EXPECT_FALSE(riftClockShouldStep(agree, med));
+}
+
+TEST(ClockSync, ThreeAgreeingNodesStepAClockThatIsLate) {
+    // The flash case: we came up at the last advert's time, ten minutes late.
+    RiftClockSync c; riftClockReset(&c);
+    riftClockNote(&c, K1, OURS + 600, OURS, 1000);
+    riftClockNote(&c, K2, OURS + 590, OURS, 2000);
+    riftClockNote(&c, K3, OURS + 615, OURS, 3000);
+    int32_t med = 0; int agree = 0;
+    EXPECT_EQ(3, riftClockConsensus(&c, 3000, &med, &agree));
+    EXPECT_EQ(600, med);
+    EXPECT_EQ(3, agree);
+    EXPECT_TRUE(riftClockShouldStep(agree, med));
+    riftClockStepped(&c, med, 3000);
+    EXPECT_EQ(3, riftClockConsensus(&c, 3000, &med, &agree));
+    EXPECT_EQ(0, med);   // the samples were measured against the old clock
+    EXPECT_EQ(1, c.steps);
+    EXPECT_EQ(600, c.last_step);
+}
+
+TEST(ClockSync, OneWrongNodeDoesNotMoveTheMedian) {
+    RiftClockSync c; riftClockReset(&c);
+    riftClockNote(&c, K1, OURS + 2, OURS, 1000);
+    riftClockNote(&c, K2, OURS - 3, OURS, 1000);
+    riftClockNote(&c, K3, OURS + 5, OURS, 1000);
+    riftClockNote(&c, K4, OURS + 86400, OURS, 1000);   // a node a day ahead
+    int32_t med = 0; int agree = 0;
+    EXPECT_EQ(4, riftClockConsensus(&c, 1000, &med, &agree));
+    EXPECT_LE(med, 5); EXPECT_GE(med, -3);
+    EXPECT_EQ(3, agree);
+    EXPECT_FALSE(riftClockShouldStep(agree, med));   // inside the margin
+}
+
+TEST(ClockSync, TheSameNodeTwiceIsOneSample) {
+    RiftClockSync c; riftClockReset(&c);
+    for (int i = 0; i < 5; i++) riftClockNote(&c, K1, OURS + 600, OURS, 1000 + i);
+    int32_t med = 0; int agree = 0;
+    EXPECT_EQ(1, riftClockConsensus(&c, 2000, &med, &agree));
+}
+
+TEST(ClockSync, AnUnsetSenderClockIsRefused) {
+    RiftClockSync c; riftClockReset(&c);
+    EXPECT_FALSE(riftClockNote(&c, K1, 1715770351u, OURS, 1000));   // MeshCore's 2024 default
+    int32_t med = 0; int agree = 0;
+    EXPECT_EQ(0, riftClockConsensus(&c, 1000, &med, &agree));
+}
+
+TEST(ClockSync, OldSamplesAgeOut) {
+    RiftClockSync c; riftClockReset(&c);
+    riftClockNote(&c, K1, OURS + 600, OURS, 1000);
+    int32_t med = 0; int agree = 0;
+    EXPECT_EQ(1, riftClockConsensus(&c, 1000 + RIFT_CLOCK_SAMPLE_MS - 1, &med, &agree));
+    EXPECT_EQ(0, riftClockConsensus(&c, 1000 + RIFT_CLOCK_SAMPLE_MS + 1, &med, &agree));
+}
+
+TEST(ClockSync, ANinthNodeReplacesTheStalest) {
+    RiftClockSync c; riftClockReset(&c);
+    for (int i = 0; i < RIFT_CLOCK_SAMPLES; i++) {
+        uint8_t k[6] = { (uint8_t) (10 + i), 0, 0, 0, 0, 0 };
+        riftClockNote(&c, k, OURS + 100, OURS, 1000 + i * 10);
+    }
+    uint8_t k9[6] = { 99, 0, 0, 0, 0, 0 };
+    riftClockNote(&c, k9, OURS + 100, OURS, 5000);
+    bool first_gone = true;
+    for (int i = 0; i < RIFT_CLOCK_SAMPLES; i++) if (c.s[i].used && c.s[i].key[0] == 10) first_gone = false;
+    EXPECT_TRUE(first_gone);
+}
+
+TEST(ClockSync, OffsetTextIsSignedAndCompact) {
+    char b[12];
+    riftClockOffsetText(180, b, sizeof(b));   EXPECT_STREQ("+3m", b);
+    riftClockOffsetText(-42, b, sizeof(b));   EXPECT_STREQ("-42s", b);
+    riftClockOffsetText(7200, b, sizeof(b));  EXPECT_STREQ("+2h", b);
+    riftClockOffsetText(0, b, sizeof(b));     EXPECT_STREQ("+0s", b);
+}
+
+TEST(Tropo, RemembersTheLastOpeningAfterItCloses) {
+    RiftTropo t; riftTropoReset(&t);
+    uint32_t now = 1000;
+    for (int i = 0; i < RIFT_TROPO_NEEDED; i++) riftTropoStep(&t, now += 100, 25);
+    EXPECT_TRUE(t.active);
+    EXPECT_EQ(1, t.openings);
+    riftTropoStep(&t, now += 100, 31);
+    EXPECT_TRUE(riftTropoTick(&t, now + RIFT_TROPO_HOLD_MS + 1));
+    EXPECT_FALSE(t.active);
+    EXPECT_EQ(31, t.last_peak);
+    EXPECT_EQ(1000 + 100 * RIFT_TROPO_NEEDED, t.last_open_ms);
 }
 
 TEST(DragIsMove, AFingerThatBarelyMovedIsStillATap) {

@@ -5,6 +5,7 @@
 #include "RiftRepeater.h"
 #include "RiftScopes.h"
 #include "RiftScreenDump.h"
+#include "RiftClock.h"
 #include <helpers/sensors/LPPDataHelpers.h>   // LPP_* type codes, for the telemetry labels
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/UTF8Helpers.h>
@@ -745,6 +746,17 @@ static void riftDrawThumb(DisplayDriver& display, int y0, int len, long first, l
   display.fillRect(x_track - 1, y0 + (int) ty, 2, (int) th);
 }
 
+// An upward triangle of height h and base width 2h-1, apex at the top, built
+// from fillRect rows because the driver has no triangle. The tropo mark: the
+// shape says "conditions are up" without a word, and it is drawn filled in the
+// accent while an opening runs and in rule when it is history.
+static void riftDrawTriangle(DisplayDriver& display, int x, int y, int h, uint16_t col) {
+  display.setColor(col);
+  for (int r = 0; r < h; r++) {
+    display.fillRect(x + (h - 1 - r), y + r, 2 * r + 1, 1);
+  }
+}
+
 static void renderNavBar(DisplayDriver& display, int curr_idx) {
   const int y_rule = NAV_RULE_Y;
 
@@ -798,6 +810,13 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   if (msg_unread.any()) {
     display.setColor(rift_pal.fg);
     display.fillRect(240, 231, 3, 3);
+  }
+  // A tropo opening is worth seeing from every screen, not only from the home
+  // row: a small triangle in the accent beside the unread mark while one runs.
+  // Warning is one of the accent's four meanings, and an opening is the one
+  // radio condition worth interrupting for.
+  if (riftTropoState().active) {
+    riftDrawTriangle(display, 228, 230, 5, rift_pal.accent);
   }
 
   // Battery, moved down from the title bar into space that was already here:
@@ -1630,23 +1649,28 @@ public:
     sprintf(tmp, "%.3fMHz SF%d %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
     display.drawTextLeftAlign(2, 148, tmp);
 
-    // Tropo on its own row. It used to replace the radio line while an opening
-    // ran, and a row that changes meaning is a mode the user has to discover.
-    // Open in fg, which is information rather than warning; the detail is on
-    // SYSTEM.
+    // Tropo on its own row, with a triangle in front: filled in the accent while
+    // an opening runs, in rule otherwise, so the state can be read from across
+    // the room before the words can. It used to replace the radio line while an
+    // opening ran, and a row that changes meaning is a mode the user has to
+    // discover. After an opening the row keeps saying when the last one was and
+    // how deep it went; the detail is on SYSTEM.
     {
       RiftTropo& tr = riftTropoState();
+      riftDrawTriangle(display, 2, 160, 4, tr.active ? rift_pal.accent : rift_pal.rule);
       if (tr.active) {
-        display.setColor(rift_pal.fg);
+        display.setColor(rift_pal.accent);
         sprintf(tmp, "TROPO OPEN %s peak %d hops", RIFT_DOT, (int) tr.peak_hops);
-      } else if (tr.peak_hops == 0) {
+      } else if (tr.openings == 0) {
         display.setColor(rift_pal.mid);
         strcpy(tmp, "TROPO none since boot");
       } else {
+        char age[RIFT_AGE_BUF_LEN];
+        riftFormatAge((uint32_t) millis() - tr.last_open_ms, age, sizeof(age));
         display.setColor(rift_pal.mid);
-        sprintf(tmp, "TROPO closed %s peak %d hops", RIFT_DOT, (int) tr.peak_hops);
+        snprintf(tmp, sizeof(tmp), "TROPO last %s ago %s peak %d hops", age, RIFT_DOT, (int) tr.last_peak);
       }
-      display.drawTextLeftAlign(2, 160, tmp);
+      display.drawTextLeftAlign(12, 160, tmp);
     }
 
     // The one action on this screen, drawn as a button because it is one - an
@@ -1793,15 +1817,18 @@ class RiftSystemScreen : public RiftScreen {
   // it leaves the printable keys free for the text fields.
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
               CH_DELETE, CH_DELETE_CONFIRM, LOG, SET_TIME, RXLOG,
-              SCOPE_PICK, SCOPE_ENTRY };
+              SCOPE_PICK, SCOPE_ENTRY, DIAG };
   // The two advert actions used to head this list. They live on the home screen
   // now, as buttons beside DISCOVER - that screen is the one showing how many
   // nodes are stored and heard, so it is where you already are when the answer
-  // is "send an advert". Moved rather than copied: the same action reachable from
-  // two places is two code paths that drift.
+  // is "send an advert". Add and remove channel live in the COMMS conversation
+  // list for the same reason: that is where the channels are. Their flows stay
+  // here and are entered from there. Moved rather than copied: the same action
+  // reachable from two places is two code paths that drift.
   enum Item { IT_NAME, IT_CHANNEL, IT_DELCHANNEL, IT_SCOPE,
-              IT_PATHMODE, IT_SCREEN, IT_SOUND, IT_DAYMODE, IT_SETTIME, IT_LOG, IT_RXLOG,
-              IT_COUNT };
+              IT_PATHMODE, IT_SCREEN, IT_SOUND, IT_DAYMODE, IT_SETTIME, IT_DIAG,
+              IT_LOG, IT_RXLOG, IT_COUNT };
+  bool _return_to_comms = false;   // a channel flow entered from COMMS goes back there
 
   int _log_scroll = 0;   // 0 = pinned to the newest line
   int _drag_residual = 0;   // finger travel not yet worth a row
@@ -1831,7 +1858,7 @@ class RiftSystemScreen : public RiftScreen {
     static const char* LABEL[IT_COUNT] = {
       "Edit node name", "Add channel", "Delete channel", "Channel scope",
       "Path hash size", "Screen", "Alert sound", "Display", "Set time",
-      "View log", "View air log",
+      "Diagnostics", "View log", "View air log",
     };
     return (i >= 0 && i < IT_COUNT) ? LABEL[i] : "";
   }
@@ -1887,10 +1914,28 @@ class RiftSystemScreen : public RiftScreen {
         snprintf(buf, len, "%d byte%s", mode + 1, mode == 0 ? "" : "s");
         break;
       }
+      case IT_DIAG: {
+        // The one diagnostic worth surfacing on the way in: how far the clock
+        // sits from the mesh, when the mesh has an opinion.
+        int32_t median = 0; int agree = 0;
+        if (riftClockConsensus(&riftClockState(), (uint32_t) millis(), &median, &agree) > 0) {
+          char off[12];
+          riftClockOffsetText(median, off, sizeof(off));
+          snprintf(buf, len, "clock %s vs mesh", off);
+        }
+        break;
+      }
       default:
         break;
     }
   }
+
+  // Entered from the COMMS conversation list, where the channels are. The flow
+  // itself is unchanged; only where it starts and where it returns.
+public:
+  void beginAddChannel(bool from_comms)    { _return_to_comms = from_comms; activate(IT_CHANNEL); }
+  void beginDeleteChannel(bool from_comms) { _return_to_comms = from_comms; activate(IT_DELCHANNEL); }
+private:
 
   // shared by render() and handleTouch(), so touch targets follow the layout.
   // Up 14 from 34 when the title bar went: this screen has no heading, because
@@ -1898,7 +1943,7 @@ class RiftSystemScreen : public RiftScreen {
 public:
   // True while a text field is open or a generated key is on screen. A message
   // popup over either of those loses half-typed input or a secret being read.
-  bool isModal() const override { return _mode != MENU; }
+  bool isModal() const override { return _mode != MENU && _mode != DIAG; }
 private:
 
   Mode _mode;
@@ -1985,6 +2030,11 @@ private:
       case IT_LOG:
         _log_scroll = 0;   // open at the newest, which is what you came to see
         _mode = LOG;
+        break;
+
+      case IT_DIAG:
+        _first = 0;
+        _mode = DIAG;
         break;
 
       case IT_RXLOG:
@@ -2663,7 +2713,15 @@ public:
   }
 
   int render(DisplayDriver& display) override {
+    // A channel flow that was entered from COMMS has ended, one way or the other:
+    // back to where it was started from.
+    if (_mode == MENU && _return_to_comms) {
+      _return_to_comms = false;
+      _task->gotoCommsScreen();
+      return 50;
+    }
     switch (_mode) {
+      case DIAG:           return renderList(display, true);
       case EDIT_NAME:      return renderEditName(display);
       case CH_NAME:        return renderChannelName(display);
       case CH_KEY_CHOICE:  return renderKeyChoice(display);
@@ -2741,16 +2799,23 @@ public:
     }
   }
 
-  void buildRows() {
+  void buildRows(bool diag) {
     _row_count = 0;
     char tmp[72];
 
-    // ---- ACTIONS: the settings, each with its current value beside it
-    addRow(ROW_GROUP, -1, "ACTIONS");
-    for (int i = 0; i < IT_LOG; i++) {
-      Row* r = addRow(ROW_ACTION, i, itemLabel(i));
-      itemValue(i, tmp, sizeof(tmp));
-      setValue(r, tmp, rift_pal.mid);
+    if (!diag) {
+      // ---- ACTIONS: the settings, each with its current value beside it. Add
+      // and remove channel are not here: they live in the COMMS conversation
+      // list, beside the channels they act on.
+      addRow(ROW_GROUP, -1, "ACTIONS");
+      for (int i = 0; i < IT_COUNT; i++) {
+        if (i == IT_CHANNEL || i == IT_DELCHANNEL) continue;
+        Row* r = addRow(ROW_ACTION, i, itemLabel(i));
+        itemValue(i, tmp, sizeof(tmp));
+        setValue(r, tmp, rift_pal.mid);
+      }
+      if (!selectable(_sel)) { _sel = 0; moveSel(1, true); }
+      return;
     }
 
     // ---- DEVICE: the hardware, pass or fail where colour carries anything
@@ -2823,13 +2888,38 @@ public:
       // An unset clock silently emptied NODES, RADAR and the HOPS row once, and
       // it is the normal state of a standalone node - no companion app to set it,
       // and no GPS fix. It also explains message timestamps reading 00:00.
+      //
+      // Beside the time, what the mesh thinks of it: the median offset of the
+      // nodes heard recently, how many, and how many times the clock has been
+      // stepped from that since boot. This is the measurement behind "the clock
+      // is often late" - see RiftClock.h - and the row that says whether the
+      // correction is doing its job.
       uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+      int32_t median = 0; int agree = 0;
+      int n = riftClockConsensus(&riftClockState(), (uint32_t) millis(), &median, &agree);
+      char off[12];
+      if (n > 0) riftClockOffsetText(median, off, sizeof(off));
       if (now < 1600000000u) {
         addReading("CLOCK", "not set", rift_pal.accent);
+      } else if (n > 0) {
+        snprintf(tmp, sizeof(tmp), "%02u:%02u %s mesh %s (%d)", (unsigned) ((now / 3600u) % 24u),
+                 (unsigned) ((now / 60u) % 60u), RIFT_DOT, off, n);
+        addReading("CLOCK", tmp, riftClockShouldStep(agree, median) ? rift_pal.accent : rift_pal.fg);
       } else {
-        snprintf(tmp, sizeof(tmp), "%02u:%02u", (unsigned) ((now / 3600u) % 24u),
-                 (unsigned) ((now / 60u) % 60u));
+        snprintf(tmp, sizeof(tmp), "%02u:%02u %s mesh ?", (unsigned) ((now / 3600u) % 24u),
+                 (unsigned) ((now / 60u) % 60u), RIFT_DOT);
         addReading("CLOCK", tmp, rift_pal.fg);
+      }
+      RiftClockSync& cs = riftClockState();
+      if (cs.steps > 0) {
+        char age[RIFT_AGE_BUF_LEN];
+        riftFormatAge((uint32_t) millis() - cs.last_step_ms, age, sizeof(age));
+        riftClockOffsetText(cs.last_step, off, sizeof(off));
+        snprintf(tmp, sizeof(tmp), "%u step%s, last %s %s ago", (unsigned) cs.steps,
+                 cs.steps == 1 ? "" : "s", off, age);
+        addReading("CLOCK SYNC", tmp, rift_pal.fg);
+      } else {
+        addReading("CLOCK SYNC", "no step since boot", rift_pal.fg);
       }
     }
     snprintf(tmp, sizeof(tmp), "%s %umV", board.isExternalPowered() ? "usb" : "none",
@@ -2936,13 +3026,13 @@ public:
       addReading("SLOWEST", tmp, rift_pal.fg);
     }
 
-    // ---- EVENT LOG: the two newest lines, so the log answers its own question
-    // from here in the common case, then the two logs as actions
+    // ---- EVENT LOG: the newest lines, so the log answers its own question from
+    // here in the common case; the full log is an action on the main list
     addRow(ROW_GROUP, -1, "EVENT LOG");
     if (riftLog().count == 0) {
       addReading("no events since boot", "", rift_pal.mid);
     } else {
-      for (int k = 1; k >= 0; k--) {
+      for (int k = 3; k >= 0; k--) {
         const RiftEventLog::Line* l = riftLog().peek(k);
         if (l == NULL) continue;
         char stamp[12];
@@ -2952,21 +3042,13 @@ public:
         if (r != NULL) riftTranslateUTF8(r->value, l->text, sizeof(r->value));
       }
     }
-    for (int i = IT_LOG; i < IT_COUNT; i++) {
-      Row* r = addRow(ROW_ACTION, i, itemLabel(i));
-      itemValue(i, tmp, sizeof(tmp));
-      setValue(r, tmp, rift_pal.mid);
-    }
-
-    if (!selectable(_sel)) {
-      _sel = 0;
-      moveSel(1, true);
-    }
   }
 
-  int renderList(DisplayDriver& display) {
+  // The main list holds the actions; the diagnostics are one level down, where
+  // they can be read at length without the cursor having to step over them.
+  int renderList(DisplayDriver& display, bool diag = false) {
     display.setTextSize(1);
-    buildRows();
+    buildRows(diag);
     char tmp[72];
 
     // The heading: what this is running and for how long, and the one state that
@@ -2974,19 +3056,26 @@ public:
     {
       char up[16];
       riftFormatDuration((uint32_t) (millis() / 1000u), up, sizeof(up));
-      snprintf(tmp, sizeof(tmp), "v%s %s UP %s", RIFT_VERSION, RIFT_DOT, up);
+      if (diag) snprintf(tmp, sizeof(tmp), "DIAGNOSTICS %s UP %s", RIFT_DOT, up);
+      else      snprintf(tmp, sizeof(tmp), "v%s %s UP %s", RIFT_VERSION, RIFT_DOT, up);
       display.setColor(rift_pal.mid);
       display.drawTextLeftAlign(2, 2, tmp);
+      if (diag) {
+        display.drawTextRightAlign(314, 2, "BACKSPACE: back");
+      } else {
 #ifdef ENABLE_PRIVATE_KEY_EXPORT
-      display.drawTextRightAlign(314, 2, "PRIVATE KEY EXPORT: on");
+        display.drawTextRightAlign(314, 2, "PRIVATE KEY EXPORT: on");
 #else
-      display.drawTextRightAlign(314, 2, "PRIVATE KEY EXPORT: off");
+        display.drawTextRightAlign(314, 2, "PRIVATE KEY EXPORT: off");
 #endif
+      }
     }
 
-    // The window follows the cursor.
-    if (_sel < _first) _first = _sel;
-    if (_sel >= _first + LIST_ROWS) _first = _sel - LIST_ROWS + 1;
+    // The window follows the cursor; in the diagnostics it is the thing scrolled.
+    if (!diag) {
+      if (_sel < _first) _first = _sel;
+      if (_sel >= _first + LIST_ROWS) _first = _sel - LIST_ROWS + 1;
+    }
     if (_first > _row_count - LIST_ROWS) _first = _row_count - LIST_ROWS;
     if (_first < 0) _first = 0;
 
@@ -2995,7 +3084,7 @@ public:
     int y = LIST_TOP;
     for (int i = _first; i < _row_count && i < _first + LIST_ROWS; i++, y += RIFT_LINE_H) {
       const Row& r = _rows[i];
-      bool sel = (i == _sel);
+      bool sel = !diag && (i == _sel);
       _row_y[i] = y - 2;
       if (sel) {
         display.setColor(rift_pal.accent);
@@ -3066,6 +3155,13 @@ public:
       int dir = steps > 0 ? 1 : -1;
       for (int n = 0; n < (steps > 0 ? steps : -steps); n++) moveSel(dir, false);
       return _sel != before;
+    }
+    if (_mode == DIAG) {
+      // no cursor here: the window itself moves, clamped in render
+      int before = _first;
+      _first += steps;
+      if (_first < 0) _first = 0;
+      return _first != before;
     }
     return false;
   }
@@ -3224,6 +3320,15 @@ public:
       // Only an explicit back leaves; the other editors swallow stray keys too. A
       // trackball nudge mid-entry used to discard the half-typed time.
       if (c == RIFT_KEY_BACK || c == KEY_CANCEL) _mode = MENU;
+      return true;
+    }
+
+    if (_mode == DIAG) {
+      if (c == KEY_UP)   { if (_first > 0) _first--; return true; }
+      if (c == KEY_DOWN) { _first++; return true; }   // clamped in render
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL || c == KEY_ENTER) { _mode = MENU; return true; }
+      if (c == KEY_NEXT || c == KEY_RIGHT) { _mode = MENU; _task->cycleNavScreen(1); return true; }
+      if (c == KEY_PREV || c == KEY_LEFT) { _mode = MENU; _task->cycleNavScreen(-1); return true; }
       return true;
     }
 
@@ -5281,7 +5386,11 @@ private:
     // and ROOM reach this list at all, because riftCanDirectMessage refuses the
     // rest, so this is the one distinction the column has to carry.
     bool is_room;
+    // 0 for a conversation; 1 and 2 are the two channel actions, drawn as rows at
+    // the end of the CHANNELS section because that is where the channels are.
+    uint8_t action;
   };
+  static const uint8_t PICK_ADD_CHANNEL = 1, PICK_REMOVE_CHANNEL = 2;
   PickEntry _picks[RIFT_PICKER_MAX];
   int _pick_count;
   bool _pick_truncated;
@@ -5518,6 +5627,7 @@ private:
   }
 
   void openPicker() {
+    memset(_picks, 0, sizeof(_picks));   // every field, including action, starts clear
     _pick_count = 0;
     _pick_truncated = false;
     // Left over travel from the last drag would move the cursor the instant this
@@ -5537,6 +5647,16 @@ private:
       e->is_channel = true;
       e->channel_idx = (uint8_t) i;
       memset(e->key, 0, sizeof(e->key));
+    }
+    // The two channel actions close the section. They used to be SYSTEM actions,
+    // two screens away from the list they change; the flows still live there and
+    // come back here when they are done.
+    for (int a = PICK_ADD_CHANNEL; a <= PICK_REMOVE_CHANNEL && _pick_count < RIFT_PICKER_MAX; a++) {
+      PickEntry* e = &_picks[_pick_count++];
+      StrHelper::strncpy(e->name, a == PICK_ADD_CHANNEL ? "+ Add channel" : "- Remove channel", sizeof(e->name));
+      e->is_channel = true;
+      e->channel_idx = 0xFF;
+      e->action = (uint8_t) a;
     }
     int first_dm = _pick_count;
 
@@ -5583,6 +5703,7 @@ private:
     // shares the SPI bus with the radio, so it belongs on the open rather than in
     // every frame.
     for (int i = 0; i < _pick_count; i++) {
+      if (_picks[i].action != 0) continue;   // not a conversation: nothing to look up
       RiftConvKey k = _picks[i].is_channel ? riftChannelConv(_picks[i].channel_idx)
                                            : riftConvDM(_picks[i].key);
       _picks[i].last_ts = newestIn(k, _picks[i].name);
@@ -5620,6 +5741,7 @@ private:
     // asks where you want to go.
     _pick_idx = 0;
     for (int i = 0; i < _pick_count; i++) {
+      if (_picks[i].action != 0) continue;   // not a conversation: nothing to look up
       RiftConvKey k = _picks[i].is_channel ? riftChannelConv(_picks[i].channel_idx)
                                            : riftConvDM(_picks[i].key);
       if (riftConvSame(k, currentConv())) { _pick_idx = i; break; }
@@ -5836,6 +5958,13 @@ private:
         display.setColor(rift_pal.accent);
         display.fillRect(0, y - 2, 316, 12);
       }
+      if (_picks[i].action != 0) {
+        // an action row: the label in mid, nothing else on it
+        display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
+        display.drawTextLeftAlign(11, y, _picks[i].name);
+        y += RIFT_LINE_H;
+        continue;
+      }
       if (_picks[i].unread > 0) renderUnreadDot(display, 2, y + 2, sel);
 
       // The channel's colour, as the 2px chip the strip borders already use, the
@@ -5948,6 +6077,12 @@ private:
     if (i < 0 || i >= _pick_count) return;
     PickEntry* e = &_picks[i];
     _pick_idx = i;
+    if (e->action != 0) {
+      _picking = false;
+      if (e->action == PICK_ADD_CHANNEL) _task->startChannelAdd();
+      else                               _task->startChannelRemove();
+      return;
+    }
     _target_is_channel = e->is_channel;
     if (e->is_channel) {
       _target_channel_idx = e->channel_idx;
@@ -7899,6 +8034,23 @@ void UITask::gotoCommsScreen() {
   dismissOverlay();
   nav_idx = RIFT_NAV_COMMS;
   setCurrScreen(nav_screens[RIFT_NAV_COMMS]);
+}
+
+// The channel flows live on SYSTEM, where they were written; the conversation
+// list is where they are started from now. SYSTEM is shown for the duration and
+// hands the screen back to COMMS when the flow ends.
+void UITask::startChannelAdd() {
+  dismissOverlay();
+  nav_idx = RIFT_NAV_SYSTEM;
+  setCurrScreen(nav_screens[RIFT_NAV_SYSTEM]);
+  ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->beginAddChannel(true);
+}
+
+void UITask::startChannelRemove() {
+  dismissOverlay();
+  nav_idx = RIFT_NAV_SYSTEM;
+  setCurrScreen(nav_screens[RIFT_NAV_SYSTEM]);
+  ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->beginDeleteChannel(true);
 }
 
 /*

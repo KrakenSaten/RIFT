@@ -1824,6 +1824,11 @@ struct RiftTropo {
   uint16_t seen_count;     // packets with a usable path in this window
   bool     active;
   uint32_t opened_at;
+  // The last opening, kept after it closes so the home screen can say "last
+  // opening 2h ago, peak 21" rather than nothing. openings counts them since boot.
+  uint32_t last_open_ms;
+  uint8_t  last_peak;
+  uint16_t openings;
 };
 
 static inline void riftTropoReset(RiftTropo* t) {
@@ -1836,6 +1841,9 @@ static inline void riftTropoReset(RiftTropo* t) {
   t->seen_count = 0;
   t->active = false;
   t->opened_at = 0;
+  t->last_open_ms = 0;
+  t->last_peak = 0;
+  t->openings = 0;
 }
 
 // True if this path byte represents a usable hop count at all.
@@ -1889,8 +1897,11 @@ static inline bool riftTropoStep(RiftTropo* t, uint32_t now, uint8_t path_len) {
   if (!t->active && t->deep_count >= RIFT_TROPO_NEEDED) {
     t->active = true;
     t->opened_at = now;
+    t->last_open_ms = now;
+    if (t->openings < 0xFFFF) t->openings++;
     return true;
   }
+  if (t->active && hops > t->last_peak) t->last_peak = hops;
   return false;
 }
 
@@ -1899,6 +1910,7 @@ static inline bool riftTropoTick(RiftTropo* t, uint32_t now) {
   if (t == NULL || !t->active) return false;
   if (!riftDue(now, t->last_deep + RIFT_TROPO_HOLD_MS)) return false;
   t->active = false;
+  if (t->peak_hops > t->last_peak) t->last_peak = t->peak_hops;
   t->peak_hops = 0;
   t->deep_count = 0;
   t->window_start = 0;

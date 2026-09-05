@@ -127,6 +127,6 @@ inline RiftRxLog& riftRxLog() {
 // riftTropoStep is a mask, a compare and a counter, which is all that belongs on
 // a path with no watchdog behind it. Announcing is the UI's job.
 inline RiftTropo& riftTropoState() {
-  static RiftTropo t = { 0, 0, 0, 0, false, 0 };
+  static RiftTropo t = {};   // every field zero, however many the struct has
   return t;
 }

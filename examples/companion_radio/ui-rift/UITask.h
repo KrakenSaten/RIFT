@@ -293,6 +293,10 @@ public:
   // preview needs it: Enter there means "show me the full history", and the
   // history is COMMS.
   void gotoCommsScreen();
+  // The add and remove channel flows, entered from the COMMS conversation list.
+  // They run on SYSTEM, where they were written, and return to COMMS when done.
+  void startChannelAdd();
+  void startChannelRemove();
   // last key code the UI saw - reading this on screen is what identified the
   // keyboard co-processor repeating held keys
   int lastKeyCode() const { return _last_key; }

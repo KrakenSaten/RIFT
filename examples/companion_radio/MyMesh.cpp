@@ -14,6 +14,7 @@
 #include "ui-rift/RiftRepeater.h"
 #include "ui-rift/RiftScopes.h"
 #include "ui-rift/RiftScreenDump.h"
+#include "ui-rift/RiftClock.h"
 #include <helpers/sensors/LPPDataHelpers.h>   // LPPReader, to decode a telemetry reply
 #endif
 // Channel PSKs are shared between nodes as base64. Declared rather than
@@ -470,6 +471,30 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
   // log - which recorded only the adverts this node sent itself.
   riftLogf("%s %s %s %dh", is_new ? "NEW" : "adv", riftAdvertTypeName(contact.type),
            contact.name, (int) mesh::Packet::pathHashCount(path_len));
+
+  // The sender's clock against ours, one sample per node; when enough of them
+  // agree that we are off by more than the margin, the clock is stepped. See
+  // RiftClock.h for why a standalone node comes up late after a flash and has
+  // nothing else to correct it. A GPS fix outranks the mesh: the location
+  // provider sets the clock itself.
+  {
+    uint32_t ours = getRTCClock()->getCurrentTime();
+    uint32_t now_ms = (uint32_t) millis();
+    RiftClockSync& cs = riftClockState();
+    if (riftClockNote(&cs, contact.id.pub_key, contact.last_advert_timestamp, ours, now_ms)) {
+      int32_t median = 0;
+      int agree = 0;
+      riftClockConsensus(&cs, now_ms, &median, &agree);
+      LocationProvider* gps = sensors.getLocationProvider();
+      bool gps_fix = (gps != NULL && gps->isValid());
+      if (!gps_fix && riftClockShouldStep(agree, median)) {
+        getRTCClock()->setCurrentTime((uint32_t) ((int64_t) ours + median));
+        riftClockStepped(&cs, median, now_ms);
+        riftLogf("clock %s%lds from mesh, %d nodes agree", median < 0 ? "" : "+",
+                 (long) median, agree);
+      }
+    }
+  }
 #endif
   if (_serial->isConnected()) {
     if (is_new) {
