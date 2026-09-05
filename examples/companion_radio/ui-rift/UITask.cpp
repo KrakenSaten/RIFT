@@ -812,17 +812,11 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   // is clamped to 0..100 where it is set. The compiler cannot see that clamp, and
   // said so; a bound that depends on a clamp somewhere else is one edit away from
   // being wrong.
+  // On every screen, SYSTEM included: it used to borrow this slot for its page
+  // number, and it has no pages now.
   char batt[8];
-  if (curr_idx == RIFT_NAV_SYSTEM) {
-    // SYSTEM has two pages and nowhere else to say which one you are on. The
-    // battery is on the other four screens, so nothing is lost by borrowing the
-    // slack here for the page number.
-    snprintf(batt, sizeof(batt), "%d/2", rift_system_page + 1);
-    display.setColor(rift_pal.mid);
-  } else {
-    snprintf(batt, sizeof(batt), "%d%%", rift_nav_batt_pct);
-    display.setColor(rift_nav_batt_pct <= 15 ? rift_pal.accent : rift_pal.mid);
-  }
+  snprintf(batt, sizeof(batt), "%d%%", rift_nav_batt_pct);
+  display.setColor(rift_nav_batt_pct <= 15 ? rift_pal.accent : rift_pal.mid);
   display.drawTextRightAlign(display.width() - 2, 228, batt);
 }
 
@@ -1779,76 +1773,96 @@ class RiftSystemScreen : public RiftScreen {
 
   int _log_scroll = 0;   // 0 = pinned to the newest line
   int _drag_residual = 0;   // finger travel not yet worth a row
-
-  // 0 = actions, 1 = readings. Two pages rather than two columns with scrollbars:
-  // neither column got more room that way, and the right one is the one that grows
-  // every time a diagnostic is added.
-  int _page = 0;
   int _rx_scroll = 0;    // 0 = pinned to the newest packet
 
-  // Where each action row was drawn. The selected row grows a warning line beneath
-  // it, so the rows below it move - a fixed pitch selected the wrong action, which
-  // on this screen means activating Delete channel instead of Add channel.
-  int _item_y[IT_COUNT];
+  // The list model. Every frame builds it from the same sources the two pages
+  // used to read; _sel is a row index and only ROW_ACTION rows can hold it.
+  enum RowKind : uint8_t { ROW_GROUP, ROW_ACTION, ROW_READ, ROW_LOG };
+  struct Row {
+    uint8_t  kind;
+    int8_t   item;        // Item for ROW_ACTION, else -1
+    char     label[26];
+    char     value[40];
+    uint16_t vcol;        // the value's colour on an unselected reading row
+  };
+  static const int MAX_ROWS = 48;
+  static const int LIST_TOP = 16, LIST_ROWS = 17;
+  Row _rows[MAX_ROWS];
+  int _row_count = 0;
+  int _first = 0;                // first row in the window; it follows the cursor
+  int _row_y[MAX_ROWS];          // where each row was drawn, for touch
+  int _confirm_sel = 0;          // delete confirm: 0 = KEEP, 1 = DELETE
 
-  // most labels are fixed; the path-mode row shows its current value
-  void itemLabel(int i, char* buf, size_t len) {
-    static const char* FIXED[] = {
-      "Edit node name",
-      "Add channel",
-      "Delete channel",
-      "Channel scope",
+  // The action's name, fixed; its current value is itemValue(). Splitting the two
+  // is what lets an action row share a reading row's geometry.
+  static const char* itemLabel(int i) {
+    static const char* LABEL[IT_COUNT] = {
+      "Edit node name", "Add channel", "Delete channel", "Channel scope",
+      "Path hash size", "Screen", "Alert sound", "Display", "Set time",
+      "View log", "View air log",
     };
-    if (i == IT_RXLOG) {
-      // Both totals in the label, so the split is visible without opening it. A node
-      // that has heard thousands and sent nothing is a node whose transmit path is
-      // broken, and that was previously indistinguishable from a quiet one.
-      snprintf(buf, len, "View air log (%u rx, %u tx)",
-               (unsigned) riftRxLog().total, (unsigned) riftRxLog().total_tx);
-    } else if (i == IT_SETTIME) {
-      // the current value in the label, so a wrong clock is visible without having
-      // to open the editor to find out
-      uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
-      if (now < 1600000000u) {
-        StrHelper::strncpy(buf, "Set time & date (unset)", len);
-      } else {
-        int y, mo, d, h, mi;
-        riftCivilFromEpoch(now, &y, &mo, &d, &h, &mi);
-        snprintf(buf, len, "Set time (%02d:%02d)", h, mi);
+    return (i >= 0 && i < IT_COUNT) ? LABEL[i] : "";
+  }
+
+  void itemValue(int i, char* buf, size_t len) {
+    buf[0] = 0;
+    switch (i) {
+      case IT_NAME:
+        StrHelper::strncpy(buf, the_mesh.getNodeName(), len < 21 ? len : 21);
+        break;
+      case IT_RXLOG:
+        // Both totals, so the split is visible without opening it. A node that has
+        // heard thousands and sent nothing is a node whose transmit path is broken,
+        // and that was previously indistinguishable from a quiet one.
+        snprintf(buf, len, "%u rx, %u tx", (unsigned) riftRxLog().total, (unsigned) riftRxLog().total_tx);
+        break;
+      case IT_SETTIME: {
+        // the current value beside the action, so a wrong clock is visible without
+        // opening the editor to find out
+        uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+        if (now < 1600000000u) {
+          StrHelper::strncpy(buf, "--:--", len);
+        } else {
+          int y, mo, d, h, mi;
+          riftCivilFromEpoch(now, &y, &mo, &d, &h, &mi);
+          snprintf(buf, len, "%02d:%02d", h, mi);
+        }
+        break;
       }
-    } else if (i == IT_LOG) {
-      snprintf(buf, len, "View log (%d)", riftLog().count);
-    } else if (i == IT_SCREEN) {
-      // A charger that does not enumerate as a USB host reads as battery, so the
-      // display cannot tell it is powered. This is the switch that does not
-      // depend on detecting anything.
-      snprintf(buf, len, "Screen: %s", rift_screen_always_on ? "always on" : "auto");
-    } else if (i == IT_SOUND) {
+      case IT_LOG:
+        snprintf(buf, len, "%d line%s", riftLog().count, riftLog().count == 1 ? "" : "s");
+        break;
+      case IT_SCREEN:
+        // A charger that does not enumerate as a USB host reads as battery, so the
+        // display cannot tell it is powered. This is the switch that does not
+        // depend on detecting anything.
+        StrHelper::strncpy(buf, rift_screen_always_on ? "always on" : "auto", len);
+        break;
+      case IT_SOUND:
 #ifdef RIFT_SPEAKER
-      // Named for what it does rather than for the hardware: there is no buzzer on
-      // this board, the tones come out of the I2S amplifier, and the user does not
-      // need to know that to decide.
-      snprintf(buf, len, "Alert sound: %s", rift_sound_on ? "on" : "off");
+        StrHelper::strncpy(buf, rift_sound_on ? "on" : "off", len);
 #else
-      snprintf(buf, len, "Alert sound: unavailable");
+        StrHelper::strncpy(buf, "unavailable", len);
 #endif
-    } else if (i == IT_DAYMODE) {
-      // the design binds this to backlight level; this panel's backlight is on or
-      // off with no level to read, so it is an explicit choice instead
-      snprintf(buf, len, "Display: %s", rift_day_mode ? "day" : "night");
-    } else if (i == IT_PATHMODE) {
-      uint8_t mode = the_mesh.getNodePrefs()->path_hash_mode;
-      snprintf(buf, len, "Path hash size: %d byte%s", mode + 1, mode == 0 ? "" : "s");
-    } else {
-      StrHelper::strncpy(buf, FIXED[i], len);
+        break;
+      case IT_DAYMODE:
+        // the design binds this to backlight level; this panel's backlight is on or
+        // off with no level to read, so it is an explicit choice instead
+        StrHelper::strncpy(buf, rift_day_mode ? "day" : "night", len);
+        break;
+      case IT_PATHMODE: {
+        uint8_t mode = the_mesh.getNodePrefs()->path_hash_mode;
+        snprintf(buf, len, "%d byte%s", mode + 1, mode == 0 ? "" : "s");
+        break;
+      }
+      default:
+        break;
     }
   }
 
   // shared by render() and handleTouch(), so touch targets follow the layout.
   // Up 14 from 34 when the title bar went: this screen has no heading, because
   // the nav bar already says SYSTEM, and the strip it left behind was empty.
-  static const int MENU_TOP = 20;
-
 public:
   // True while a text field is open or a generated key is on screen. A message
   // popup over either of those loses half-typed input or a secret being read.
@@ -1881,8 +1895,8 @@ public:
 private:
   int _key_choice;         // 0 = generate, 1 = enter existing
 
-  void activate() {
-    switch (_sel) {
+  void activate(int item) {
+    switch (item) {
       case IT_PATHMODE: {
         // 0..2 maps to 1..3 bytes per path hash. Bigger hashes mean fewer
         // collisions in a busy mesh, at slightly larger packets - and only
@@ -2142,9 +2156,9 @@ private:
       display.drawTextLeftAlign(4, y, tmp);
     }
 
-    display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(4, 190, "A scope keeps a channel inside a region.");
-    display.drawTextLeftAlign(4, 202, "ENTER edit   BACKSPACE back");
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(4, 202, "Scope limits a channel to one region.");
+    display.drawTextLeftAlign(4, 214, "ENTER: edit   BACKSPACE: back");
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
   }
@@ -2152,14 +2166,14 @@ private:
   int renderScopeEntry(DisplayDriver& display) {
     renderHeading(display, "CHANNEL SCOPE");
     display.setTextSize(1);
+    // One explaining line, which is the most an explanation gets on this screen
+    // (September design round, 8.5). The four lines about node defaults and
+    // shared names moved to the README; they are reading, not a decision.
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(4, 40, "Region name. Empty clears it back to");
-    display.drawTextLeftAlign(4, 52, "the node default.");
-    display.drawTextLeftAlign(4, 76, "Anyone using the same name reaches the");
-    display.drawTextLeftAlign(4, 88, "same region - the key is the name.");
-    _edit.render(display, 4, 116, display.width() - 8);
-    display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(4, 202, "ENTER save   BACKSPACE delete / back");
+    display.drawTextLeftAlign(4, 40, "Region name - empty means the node default.");
+    _edit.render(display, 4, 64, display.width() - 8);
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(4, 214, "ENTER: save   BACKSPACE: delete / back");
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
   }
@@ -2212,39 +2226,63 @@ private:
     return 1000;
   }
 
+  // The loss warning, in the one form a warning has on this device (September
+  // design round): a box over the list, a frame in accent around lines that
+  // begin "! CANNOT BE UNDONE", and KEEP selected by default so a tap that is
+  // read as ENTER cannot delete. Said as the code behaves - an earlier version
+  // promised the messages would stay while the handler purged them, which is
+  // the one kind of wrong a confirmation must never be.
   int renderDeleteConfirm(DisplayDriver& display) {
-    renderHeading(display, "DELETE CHANNEL");
     display.setTextSize(1);
-
     ChannelDetails ch;
     char nm[sizeof(ch.name)] = "";
+    RiftConvKey conv = riftConvUnknown();
     if (_del_sel < _del_count && the_mesh.getChannel(_del_idx[_del_sel], ch)) {
       riftTranslateUTF8(nm, ch.name, sizeof(nm));
+      conv = riftChannelConv(_del_idx[_del_sel]);
+    }
+    int stored = 0;
+    for (int i = 0; i < msg_log.count; i++) {
+      if (riftConvSame(msg_log.entries[i].conv, conv)) stored++;
     }
 
-    display.setColor(rift_pal.fg);
-    char tmp[64];
-    snprintf(tmp, sizeof(tmp), "Delete \"%s\"?", nm);
-    display.drawTextLeftAlign(4, 44, tmp);
+    const int x = 6, y = 60, w = 308, h = 104;
+    display.setColor(rift_pal.bg);
+    display.fillRect(x, y, w, h);
+    display.setColor(rift_pal.rule);
+    display.drawRect(x, y, w, h);
+    display.drawRect(x + 1, y + 1, w - 2, h - 2);
 
-    display.setColor(rift_pal.mid);
-    // Said as the code behaves. This promised the messages would stay while the
-    // handler purged them, which is the one kind of wrong a confirmation screen
-    // must never be - the user agreed to something else than what happens.
-    //
-    // The purge is kept rather than the promise: entries written before channel
-    // identity existed cannot prove which channel they belong to, and leaving
-    // them would let them attach to whatever occupies the slot next.
-    display.drawTextLeftAlign(4, 70, "This channel's messages are deleted");
-    display.drawTextLeftAlign(4, 82, "too. The key is gone from this device");
-    display.drawTextLeftAlign(4, 94, "- rejoining needs it again.");
+    char tmp[64];
+    display.setColor(rift_pal.fg);
+    snprintf(tmp, sizeof(tmp), "DELETE CHANNEL %s", nm);
+    display.drawTextEllipsized(10, 66, 296, tmp);
 
     display.setColor(rift_pal.accent);
-    display.drawTextLeftAlign(4, 124, "ENTER deletes");
-    display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(4, 140, "BACKSPACE cancels");
+    display.drawRect(10, 80, 300, 40);
+    display.setColor(rift_pal.fg);
+    display.drawTextLeftAlign(14, 84, "! CANNOT BE UNDONE");
+    snprintf(tmp, sizeof(tmp), "The key and %d stored message%s are erased.", stored, stored == 1 ? "" : "s");
+    display.drawTextLeftAlign(14, 96, tmp);
+    display.drawTextLeftAlign(14, 108, "Members keep the channel; you leave it.");
 
-    renderNavBar(display, RIFT_NAV_SYSTEM);
+    // KEEP [10,130,32,14], DELETE [48,130,44,14]
+    for (int b = 0; b < 2; b++) {
+      int bx = b == 0 ? 10 : 48, bw = b == 0 ? 32 : 44;
+      const char* label = b == 0 ? "KEEP" : "DELETE";
+      if (_confirm_sel == b) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(bx, 130, bw, 14);
+        display.setColor(rift_pal.on_accent);
+      } else {
+        display.setColor(rift_pal.rule);
+        display.drawRect(bx, 130, bw, 14);
+        display.setColor(rift_pal.fg);
+      }
+      display.drawTextLeftAlign(bx + 4, 133, label);
+    }
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(10, 150, "RIGHT then ENTER deletes  BACKSPACE: cancel");
     return 1000;
   }
 
@@ -2588,7 +2626,8 @@ public:
     _ch_key[0] = 0;
     // -1 so a tap arriving before the first render hits nothing, rather than
     // matching whatever the uninitialised array happened to contain
-    for (int i = 0; i < IT_COUNT; i++) _item_y[i] = -1;
+    for (int i = 0; i < MAX_ROWS; i++) _row_y[i] = -1;
+    _sel = 1;   // the first action row, under the ACTIONS heading
   }
 
   int render(DisplayDriver& display) override {
@@ -2601,471 +2640,259 @@ public:
       case SCOPE_PICK:     return renderScopeList(display);
       case SCOPE_ENTRY:    return renderScopeEntry(display);
       case CH_DELETE:      return renderDeleteList(display);
-      case CH_DELETE_CONFIRM: return renderDeleteConfirm(display);
+      case CH_DELETE_CONFIRM:
+        // the warning box sits on the list it was raised from
+        renderList(display);
+        return renderDeleteConfirm(display);
       case LOG:            return renderLog(display);
       case SET_TIME:       return renderSetTime(display);
       case RXLOG:          return renderRxLog(display);
       default: break;
     }
-
-    rift_system_page = _page;
-    return (_page == 0) ? renderActions(display) : renderReadings(display);
+    return renderList(display);
   }
 
-  int renderActions(DisplayDriver& display) {
-    display.setTextSize(1);
+  // ---- the list ----
+  //
+  // One list, five groups, seventeen rows in the window, from the September
+  // design round (design/redesign-2026-09/rift-system-spec.md). It was two pages
+  // - actions, then readings in two columns - which was the one place on the
+  // device with a second scroll model, and the page number sat in the nav bar's
+  // battery slot. Now it is the same list every other screen is: a cursor, a
+  // window that follows it, and the thumb saying where you are. Actions and
+  // readings share one geometry, label at x 2 and value right-aligned at 314, so
+  // a setting's current value stands where a reading would.
+  //
+  // The rows are built fresh every frame from the same sources the two pages
+  // read, into a member array rather than the stack: 48 rows of 70 bytes is a
+  // third of the loop task's stack.
 
+  Row* addRow(uint8_t kind, int item, const char* label) {
+    if (_row_count >= MAX_ROWS) return NULL;
+    Row* r = &_rows[_row_count++];
+    r->kind = kind;
+    r->item = (int8_t) item;
+    StrHelper::strncpy(r->label, label, sizeof(r->label));
+    r->value[0] = 0;
+    r->vcol = rift_pal.fg;
+    return r;
+  }
+
+  void setValue(Row* r, const char* v, uint16_t col) {
+    if (r == NULL) return;
+    StrHelper::strncpy(r->value, v, sizeof(r->value));
+    r->vcol = col;
+  }
+
+  Row* addReading(const char* label, const char* value, uint16_t col) {
+    Row* r = addRow(ROW_READ, -1, label);
+    setValue(r, value, col);
+    return r;
+  }
+
+  bool selectable(int i) const {
+    return i >= 0 && i < _row_count && _rows[i].kind == ROW_ACTION;
+  }
+  int selectedItem() const { return selectable(_sel) ? _rows[_sel].item : -1; }
+
+  // The cursor skips group headings and log lines. Keys wrap, a drag does not.
+  void moveSel(int dir, bool wrap) {
+    if (_row_count == 0) return;
+    int i = _sel;
+    for (int n = 0; n < _row_count; n++) {
+      i += dir;
+      if (i < 0 || i >= _row_count) {
+        if (!wrap) return;
+        i = (i < 0) ? _row_count - 1 : 0;
+      }
+      if (selectable(i)) { _sel = i; return; }
+    }
+  }
+
+  void buildRows() {
+    _row_count = 0;
     char tmp[72];
 
-    // Full width now. The actions and the readings used to share the screen as two
-    // columns, which meant neither got more room as the readings grew - and the
-    // readings are the half that grows. They are two pages instead.
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 2, "ACTIONS");
-    display.drawTextRightAlign(318, 2, "PAGE 1/2 - RIGHT: READINGS");
-    display.setColor(rift_pal.rule);
-    display.fillRect(0, 16, display.width(), 1);
-
-    int y = MENU_TOP;
-    for (int i = 0; i < IT_COUNT; i++) {
-      itemLabel(i, tmp, sizeof(tmp));
-      bool sel = (i == _sel);
-      if (sel) {
-        display.setColor(rift_pal.accent);
-        display.fillRect(0, y - 2, display.width(), 12);
-        display.setColor(rift_pal.on_accent);
-      } else {
-        display.setColor(rift_pal.fg);
-      }
-      display.drawTextLeftAlign(4, y, tmp);
-      _item_y[i] = y - 2;              // the fill starts 2px above the text
-      y += RIFT_LINE_H;
-
-      // One line under the selected action, and only for the four that cost
-      // something you cannot get back. These are not descriptions - they are the
-      // warnings that used to be spread over five lines of prose, attached to the
-      // action they belong to and shown only when it is the one selected.
-      if (sel) {
-        const char* note = NULL;
-        switch (i) {
-          case IT_CHANNEL:    note = "#hashtag channels are not secret"; break;
-          case IT_DELCHANNEL: note = "the key is lost with it"; break;
-          default: break;
-        }
-        if (note != NULL) {
-          display.setColor(rift_pal.mid);
-          display.drawTextLeftAlign(4, y, note);
-          y += RIFT_LINE_H;
-        }
-      }
+    // ---- ACTIONS: the settings, each with its current value beside it
+    addRow(ROW_GROUP, -1, "ACTIONS");
+    for (int i = 0; i < IT_LOG; i++) {
+      Row* r = addRow(ROW_ACTION, i, itemLabel(i));
+      itemValue(i, tmp, sizeof(tmp));
+      setValue(r, tmp, rift_pal.mid);
     }
 
-    // The five-line note explaining neighbours-vs-whole-mesh used to sit here.
-    // Removed at the user's request after seeing the screen: it was the largest
-    // block of prose in a UI that is otherwise readings and actions, and the menu
-    // had grown to nine items and needed the room. The explanation is not lost -
-    // it moved to the README, which is where a first-time question gets asked.
-
-    // ---- footer, left column only ----
-    // This was a full-width band with a rule at y=178. The diagnostics column
-    // has grown to fifteen rows, which puts its last row at y=188, so BOOT and
-    // SLOWEST were drawn underneath the footer text and neither was readable.
-    // The footer only ever described the left column, so it moves there, into
-    // the space below the note, and the right column gets the full height.
-    display.setColor(rift_pal.rule);
-    display.fillRect(0, 196, display.width(), 1);
-    // Back to the full name now that the row is 320px wide rather than 158: it was
-    // shortened to "KEY EXPORT" only because that plus "DISABLED" came to 156px in
-    // a 158px column with no gap between them.
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 202, "PRIVATE KEY EXPORT");
-    display.setColor(rift_pal.ok);
-    display.drawTextRightAlign(318, 202, "DISABLED");
-    display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(2, 214, "up/down select, ENTER activates");
-    display.setColor(rift_pal.mid);
-    sprintf(tmp, "v%s", RIFT_VERSION);
-    display.drawTextRightAlign(318, 214, tmp);
-
-    renderNavBar(display, RIFT_NAV_SYSTEM);
-    return 1000;
-  }
-
-  // One group heading: the label, and a rule under it that stops at the column edge
-  // so the two columns read as two lists rather than one wrapped one.
-  void group(DisplayDriver& display, const char* label, int x, int y) {
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(x, y, label);
-    display.setColor(rift_pal.rule);
-    display.fillRect(x, y + 10, (x < 160) ? 154 : 152, 1);
-    // Back to the label colour, because the first row under a heading draws
-    // straight after this and three of them ("NODE", "TROPO", "FREE HEAP") were
-    // coming out in the rule grey.
-    display.setColor(rift_pal.mid);
-  }
-
-  // Page 2 - readings. Grouped rather than one long column: seventeen label/value
-  // rows in a single list is a wall, and the groups say which subsystem a row
-  // belongs to, which is the first thing you want when a value looks wrong.
-  int renderReadings(DisplayDriver& display) {
-    display.setTextSize(1);
-    char tmp[72];
-    static const int GROUP_TOP = 20;
-    int CX = 2, CR = 158;
-    int y = GROUP_TOP;
-
-    display.setColor(rift_pal.rule);
-    display.fillRect(160, 2, 1, 224);
-
-    group(display, "DEVICE", CX, 4);
-
-    
-    // 14px further up than before, which this column can use: it grows downward
-    // as boot timings are appended and was the closest to running out of room.
-    y = GROUP_TOP;
-    display.drawTextLeftAlign(CX, y, "NODE");
-    display.setColor(rift_pal.fg);
-    // Truncated, then right-aligned like every other value on this page. It is the
-    // only row here taking free text - node_name is 32 bytes and the column is 156px
-    // - so a long name ran through its own label and off the left edge. Cut rather
-    // than left-aligned, because a value that changes alignment when it grows reads
-    // as a different kind of row.
-    {
-      char nm[20];
-      StrHelper::strncpy(nm, the_mesh.getNodeName(), sizeof(nm));
-      display.drawTextRightAlign(CR, y, nm);
-    }
-    y += RIFT_LINE_H;
-
+    // ---- DEVICE: the hardware, pass or fail where colour carries anything
+    addRow(ROW_GROUP, -1, "DEVICE");
 #ifdef RIFT_SPEAKER
-    // A verdict, not a number to interpret. It counts the times the DMA engine had
-    // played everything it was given while a tone was still running, which is the
-    // stutter itself rather than a proxy for it.
-    //
-    // The first version of this row showed the gap between speaker passes, and it
-    // read "0ms max" - which it would have read however bad the audio was, because
-    // a queue big enough to take a whole tone in one pass leaves no second pass to
-    // measure against. A measurement that cannot fail is not a measurement.
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "AUDIO");
     {
-      // Worst passes, not the underrun count. A tone written in one pass is one
-      // the DMA engine took whole; anything above that means writes were being
-      // refused, which is what every bad-sounding alert has had in common.
+      // A verdict, not a number to interpret. It counts the times the DMA engine
+      // had played everything it was given while a tone was still running, which
+      // is the stutter itself rather than a proxy for it.
       uint32_t mp = rift_speaker.maxPasses();
       uint32_t un = rift_speaker.underruns();
-      display.setColor((mp > 2 || un > 0) ? rift_pal.accent : rift_pal.ok);
       if (un > 0)      snprintf(tmp, sizeof(tmp), "%u underruns", (unsigned) un);
       else if (mp > 2) snprintf(tmp, sizeof(tmp), "%u passes worst", (unsigned) mp);
       else             snprintf(tmp, sizeof(tmp), "ok, %u pass", (unsigned) mp);
-      display.drawTextRightAlign(CR, y, tmp);
+      addReading("AUDIO", tmp, (mp > 2 || un > 0) ? rift_pal.accent : rift_pal.ok);
+      if (rift_speaker.isPresent()) snprintf(tmp, sizeof(tmp), "%u", (unsigned) rift_speaker.framesWritten());
+      else                          strcpy(tmp, "driver not started");
+      addReading("AUDIO FRAMES", tmp, rift_speaker.isPresent() ? rift_pal.fg : rift_pal.accent);
     }
-    y += RIFT_LINE_H;
-
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "AUDIO FRAMES");
-    display.setColor(rift_speaker.isPresent() ? rift_pal.fg : rift_pal.accent);
-    if (rift_speaker.isPresent()) {
-      snprintf(tmp, sizeof(tmp), "%u", (unsigned) rift_speaker.framesWritten());
-    } else {
-      snprintf(tmp, sizeof(tmp), "driver not started");
-    }
-    display.drawTextRightAlign(CR, y, tmp);
-    y += RIFT_LINE_H;
 #endif
-
 #ifdef RIFT_INPUT_KEYBOARD
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "KEYBOARD");
-    // status is the only thing colour carries here, and only pass or fail
-    // "lost" and "not found" are different faults: one keyboard was never there, the
-    // other stopped answering and is being re-probed every few seconds.
-    display.setColor(rift_keyboard.isPresent() ? rift_pal.ok : rift_pal.accent);
-    display.drawTextRightAlign(CR, y,
-                               rift_keyboard.isPresent() ? "ok"
-                               : (rift_keyboard.wasLost() ? "lost, retrying" : "not found"));
-    y += RIFT_LINE_H;
-
+    // "lost" and "not found" are different faults: one keyboard was never there,
+    // the other stopped answering and is being re-probed every few seconds.
+    addReading("KEYBOARD",
+               rift_keyboard.isPresent() ? "ok" : (rift_keyboard.wasLost() ? "lost, retrying" : "not found"),
+               rift_keyboard.isPresent() ? rift_pal.ok : rift_pal.accent);
     // Two values, because they can differ and the difference is the interesting
-    // part. lastKeyCode() is what the UI received, i.e. after TDeckKeyboard::poll()
-    // discards everything above 127; lastSeen() is the raw byte the co-processor
-    // sent, recorded before that filter. A key that reports "0 / 180" is being
-    // thrown away rather than not existing - which is the case for the arrow keys,
-    // and is how to find out whether SYM emits anything at all.
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "LAST KEY");
-    display.setColor(rift_pal.fg);
-    sprintf(tmp, "%d / %d", _task->lastKeyCode(), (int) rift_keyboard.lastSeen());
-    display.drawTextRightAlign(CR, y, tmp);
-    y += RIFT_LINE_H;
-
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "I2C BUS");
-    display.setColor(rift_pal.fg);
+    // part: what the UI received after the driver's filter, and the raw byte the
+    // co-processor sent. "0 / 180" is a key being thrown away, not one missing.
+    snprintf(tmp, sizeof(tmp), "%d / %d", _task->lastKeyCode(), (int) rift_keyboard.lastSeen());
+    addReading("LAST KEY", tmp, rift_pal.fg);
     tmp[0] = 0;
     for (int i = 0; i < rift_keyboard.seenCount() && i < 4; i++) {
       char hex[6];
-      sprintf(hex, "%s%02X", i ? " " : "", rift_keyboard.seenAddr(i));
+      snprintf(hex, sizeof(hex), "%s%02X", i ? " " : "", rift_keyboard.seenAddr(i));
       strcat(tmp, hex);
     }
     if (rift_keyboard.seenCount() == 0) strcpy(tmp, "empty");
-    display.drawTextRightAlign(CR, y, tmp);
-    y += RIFT_LINE_H;
+    addReading("I2C BUS", tmp, rift_pal.fg);
 #endif
-
 #ifdef RIFT_INPUT_TOUCH
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "TOUCH");
     if (rift_touch.isPresent()) {
-      display.setColor(rift_pal.fg);
       // mapped, then the raw pair it came from. The raw pair is how the
-      // calibration flags in TDeckTouch.h are set: touch each corner and read
-      // it here. A corner that maps to 0/319 and 0/239 is calibrated.
+      // calibration flags in TDeckTouch.h are set: touch each corner and read it
+      // here. A corner that maps to 0/319 and 0/239 is calibrated.
       snprintf(tmp, sizeof(tmp), "%d,%d (%d,%d)", _task->lastTouchX(), _task->lastTouchY(),
                rift_touch.rawX(), rift_touch.rawY());
+      addReading("TOUCH", tmp, rift_pal.fg);
     } else {
-      display.setColor(rift_pal.accent);
-      strcpy(tmp, "not found");
+      addReading("TOUCH", "not found", rift_pal.accent);
     }
-    display.drawTextRightAlign(CR, y, tmp);
-    y += RIFT_LINE_H;
 #endif
-
 #if ENV_INCLUDE_GPS == 1
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "GPS");
-    // accent because GPS varies between units and people ask about it, not
-    // because anything is wrong
     if (_task->hasGPSHardware()) {
       LocationProvider* nmea = sensors.getLocationProvider();
-      display.setColor(rift_pal.fg);
       if (nmea != NULL && nmea->isValid()) {
         snprintf(tmp, sizeof(tmp), "%s, %ld sat", _task->getGPSState() ? "on" : "off",
                  (long) nmea->satellitesCount());
       } else {
-        sprintf(tmp, "%s, no fix", _task->getGPSState() ? "on" : "off");
+        snprintf(tmp, sizeof(tmp), "%s, no fix", _task->getGPSState() ? "on" : "off");
       }
+      addReading("GPS", tmp, rift_pal.fg);
     } else {
-      display.setColor(rift_pal.accent);
-      strcpy(tmp, "not found");
+      // accent because GPS varies between units and people ask about it, not
+      // because anything is wrong
+      addReading("GPS", "not found", rift_pal.accent);
     }
-    display.drawTextRightAlign(CR, y, tmp);
-    y += RIFT_LINE_H;
 #endif
-
-    // Added after an unset clock silently emptied NODES, RADAR and the HOPS row
-    // below: every advert was being cached with recv_timestamp 0, which the readers
-    // took for an empty slot. Nothing on screen said the clock was unset, and it is
-    // the normal state of a standalone node - no companion app to set it, and no GPS
-    // fix. It also explains message timestamps reading 00:00.
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "CLOCK");
     {
+      // An unset clock silently emptied NODES, RADAR and the HOPS row once, and
+      // it is the normal state of a standalone node - no companion app to set it,
+      // and no GPS fix. It also explains message timestamps reading 00:00.
       uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
-      // 1600000000 is September 2020. Anything below it is not a clock that was
-      // ever set, whatever it counted up to since boot.
       if (now < 1600000000u) {
-        display.setColor(rift_pal.accent);
-        strcpy(tmp, "unset");
+        addReading("CLOCK", "not set", rift_pal.accent);
       } else {
-        display.setColor(rift_pal.fg);
         snprintf(tmp, sizeof(tmp), "%02u:%02u", (unsigned) ((now / 3600u) % 24u),
                  (unsigned) ((now / 60u) % 60u));
+        addReading("CLOCK", tmp, rift_pal.fg);
       }
-      display.drawTextRightAlign(CR, y, tmp);
-      y += RIFT_LINE_H;
     }
-
-    // Contacts, with the capacity and whether anything has been turned away.
-    //
-    // Being full is not a state the table reports - allocateContactSlot() returns NULL
-    // and MeshCore told a companion app, which a standalone device does not have. So
-    // this row and the accent on it are the only way the device can say it. FULL rather
-    // than a number, because the count already says the number and what matters is that
-    // adverts are being refused.
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "CONTACTS");
+    snprintf(tmp, sizeof(tmp), "%s %umV", board.isExternalPowered() ? "usb" : "none",
+             (unsigned) _task->getBattMilliVolts());
+    addReading("EXT POWER", tmp, rift_pal.fg);
+    // Two rows that would have named the 0.9.1 fault on sight: the I2S master
+    // clock on GPIO0 made every boot a rescue boot, in which everything on screen
+    // works and the USB companion protocol does not. The raw pin level is shown
+    // rather than the debounced state, because the raw level was what was wrong.
+    if (the_mesh.isCLIRescue()) addReading("USB SERIAL", "RESCUE CLI", rift_pal.accent);
+    else                        addReading("USB SERIAL", "companion", rift_pal.fg);
+#ifdef PIN_USER_BTN
     {
+      int level = digitalRead(PIN_USER_BTN);   // active low: a held (or driven) pin reads 0
+      snprintf(tmp, sizeof(tmp), "%s gpio%d=%d", level == LOW ? "DOWN" : "up", (int) PIN_USER_BTN, level);
+      addReading("BOOT BTN", tmp, level == LOW ? rift_pal.accent : rift_pal.fg);
+    }
+#endif
+
+    // ---- MESH: what the network side of the device is holding
+    addRow(ROW_GROUP, -1, "MESH");
+    {
+      // Being full is not a state the table reports - allocateContactSlot()
+      // returns NULL and MeshCore told a companion app, which a standalone device
+      // does not have - so this row and its accent are the only way to say it.
       int used = the_mesh.getNumContacts(), cap = the_mesh.getContactsCapacity();
       bool full = the_mesh.contactsFullNow();
-      display.setColor(full ? rift_pal.accent : rift_pal.fg);
-      if (full) {
-        snprintf(tmp, sizeof(tmp), "%d/%d FULL", used, cap);
-      } else if (the_mesh.contactsEverRefused()) {
-        // room now, but nodes were turned away earlier - which is why the mesh may
-        // look smaller than it is, and is not the same claim as FULL
-        snprintf(tmp, sizeof(tmp), "%d/%d was full", used, cap);
-      } else {
-        snprintf(tmp, sizeof(tmp), "%d/%d", used, cap);
-      }
-      display.drawTextRightAlign(CR, y, tmp);
-      y += RIFT_LINE_H;
+      if (full)                                  snprintf(tmp, sizeof(tmp), "%d/%d FULL", used, cap);
+      else if (the_mesh.contactsEverRefused())   snprintf(tmp, sizeof(tmp), "%d/%d was full", used, cap);
+      else                                       snprintf(tmp, sizeof(tmp), "%d/%d", used, cap);
+      addReading("CONTACTS", tmp, full ? rift_pal.accent : rift_pal.fg);
     }
-
-    // Occupancy and pressure on the path cache. The size is a guess until it is
-    // measured against a real mesh, and an eviction count is what says whether the
-    // number is too small - a cache at 16/16 with evictions climbing is a mesh this
-    // screen cannot show all of, which is a different problem from a layout that
-    // cannot fit it.
-    display.setColor(rift_pal.mid);
-    group(display, "MESH", CX, y + 4);
-    y += RIFT_LINE_H + 6;
-
-    // Both halves of the tropo signal, so it can be judged rather than trusted.
-    // deep is what the detector counted in the current window; peak is how far
-    // the deepest packet had travelled. A peak that never rises above the local
-    // mesh depth means the threshold is set for a mesh this node is not in.
-    //
-    // In the MESH column rather than beside the hardware readings: it is a
-    // statement about the network, and the left column is one row from its
-    // footer.
-    display.drawTextLeftAlign(CX, y, "TROPO");
     {
-      RiftTropo& tr = riftTropoState();
-      display.setColor(tr.active ? rift_pal.accent : rift_pal.fg);
-      // base is the deepest ordinary path in this window, which is what makes the
-      // peak mean anything: "peak 21, base 6" is an opening, "peak 21, base 19"
-      // is a mesh where 20 was simply the wrong threshold.
-      snprintf(tmp, sizeof(tmp), "%s %ud p%u b%u/%u",
-               tr.active ? "OPEN" : "ok", (unsigned) tr.deep_count,
-               (unsigned) tr.peak_hops, (unsigned) tr.base_hops,
-               (unsigned) tr.seen_count);
-      display.drawTextRightAlign(CR, y, tmp);
-    }
-    y += RIFT_LINE_H;
-    display.setColor(rift_pal.mid);
-
-    display.drawTextLeftAlign(CX, y, "PATH CACHE");
-    {
+      // An eviction count is what says whether the cache is too small: 96/96
+      // with evictions climbing is a mesh this device cannot show all of. It is
+      // events, not nodes - the same node can be evicted, heard, evicted again.
       int used = the_mesh.getPathCacheUsed(), size = the_mesh.getPathCacheSize();
       unsigned evicted = the_mesh.getPathEvictions();
-      display.setColor(evicted > 0 ? rift_pal.accent : rift_pal.fg);
-      // "evict", not "lost". An eviction is an event, not a node: the same node can
-      // be evicted, heard again, and evicted again, so the count exceeds the number
-      // of nodes no longer held. Saying "lost" claimed the second thing while
-      // measuring the first, and only separate identity tracking could say it.
       if (evicted > 0) snprintf(tmp, sizeof(tmp), "%d/%d, %u evict", used, size, evicted);
       else             snprintf(tmp, sizeof(tmp), "%d/%d", used, size);
-      display.drawTextRightAlign(CR, y, tmp);
-      y += RIFT_LINE_H;
+      addReading("PATH CACHE", tmp, evicted > 0 ? rift_pal.accent : rift_pal.fg);
     }
-
-    // How long the last message-log write blocked for, and how many messages it
-    // held. There is no watchdog on the main loop, so a blocking call starves the
-    // radio silently - this is the number that says whether the debounce is
-    // enough or whether the write has to be broken up.
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "MSGLOG");
-    display.setColor(rift_pal.fg);
-    sprintf(tmp, "%d msg %ums", msg_log.count, (unsigned) msg_log.last_save_ms);
-    display.drawTextRightAlign(CR, y, tmp);
-    y += RIFT_LINE_H;
-
-    // open / write / close, so the 553ms can be attributed rather than guessed
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "  phases");
-    display.setColor(rift_pal.fg);
-    sprintf(tmp, "%u %u %u", (unsigned) msg_log.t_open, (unsigned) msg_log.t_write,
-                             (unsigned) msg_log.t_close);
-    display.drawTextRightAlign(CR, y, tmp);
-    y += RIFT_LINE_H;
-
-    display.setColor(rift_pal.mid);
-    // second column. The right one is where new diagnostics land, because it is
-    // the one with room - the left two groups are a fixed set.
-    CX = 166; CR = 318;
-    group(display, "RUNTIME", CX, 4);
-    y = GROUP_TOP;
-
-    display.drawTextLeftAlign(CX, y, "FREE HEAP");
-    display.setColor(rift_pal.fg);
-    sprintf(tmp, "%uK", (unsigned) (ESP.getFreeHeap() / 1024));
-    display.drawTextRightAlign(CR, y, tmp);
-    y += RIFT_LINE_H;
-
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "EXT POWER");
-    display.setColor(rift_pal.fg);
-    sprintf(tmp, "%s %umV", board.isExternalPowered() ? "yes" : "no",
-            (unsigned) _task->getBattMilliVolts());
-    display.drawTextRightAlign(CR, y, tmp);
-    y += RIFT_LINE_H;
-
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "MSG WAKE");
-    display.setColor(rift_pal.fg);
+    {
+      // Both halves of the tropo signal, so it can be judged rather than trusted:
+      // "peak 21, base 6" is an opening, "peak 21, base 19" is a mesh where 20
+      // was simply the wrong threshold.
+      RiftTropo& tr = riftTropoState();
+      snprintf(tmp, sizeof(tmp), "%s %ud p%u b%u/%u", tr.active ? "OPEN" : "ok",
+               (unsigned) tr.deep_count, (unsigned) tr.peak_hops, (unsigned) tr.base_hops,
+               (unsigned) tr.seen_count);
+      addReading("TROPO", tmp, tr.active ? rift_pal.accent : rift_pal.fg);
+    }
     if (rift_msg_wakes == 0) {
       strcpy(tmp, "none yet");
     } else {
-      uint32_t age = (uint32_t) millis() - rift_last_wake_ms;
-      if (age < 60000u)        sprintf(tmp, "%u, %us ago", rift_msg_wakes, (unsigned) (age / 1000u));
-      else if (age < 3600000u) sprintf(tmp, "%u, %um ago", rift_msg_wakes, (unsigned) (age / 60000u));
-      else                     sprintf(tmp, "%u, %uh ago", rift_msg_wakes, (unsigned) (age / 3600000u));
+      char age[RIFT_AGE_BUF_LEN];
+      riftFormatAge((uint32_t) millis() - rift_last_wake_ms, age, sizeof(age));
+      snprintf(tmp, sizeof(tmp), "%u, %s ago", (unsigned) rift_msg_wakes, age);
     }
-    display.drawTextRightAlign(CR, y, tmp);
-    y += RIFT_LINE_H;
+    addReading("MSG WAKE", tmp, rift_pal.fg);
+    // How long the last message-log write blocked for. There is no watchdog on
+    // the main loop, so this is the number that says whether the debounce is
+    // enough or the write has to be broken up; then open / write / close, so a
+    // slow one can be attributed rather than guessed.
+    snprintf(tmp, sizeof(tmp), "%d msg %ums", msg_log.count, (unsigned) msg_log.last_save_ms);
+    addReading("MSGLOG", tmp, rift_pal.fg);
+    snprintf(tmp, sizeof(tmp), "%u %u %u", (unsigned) msg_log.t_open, (unsigned) msg_log.t_write,
+             (unsigned) msg_log.t_close);
+    addReading("  phases", tmp, rift_pal.fg);
 
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "LAST RESET");
-    esp_reset_reason_t reason = esp_reset_reason();
-    const char* rr;
-    switch (reason) {
-      case ESP_RST_POWERON:   rr = "power on"; break;
-      case ESP_RST_SW:        rr = "sw restart"; break;
-      case ESP_RST_PANIC:     rr = "PANIC"; break;
-      case ESP_RST_INT_WDT:   rr = "int wdt"; break;
-      case ESP_RST_TASK_WDT:  rr = "task wdt"; break;
-      case ESP_RST_WDT:       rr = "wdt"; break;
-      case ESP_RST_DEEPSLEEP: rr = "deep sleep"; break;
-      case ESP_RST_EXT:       rr = "ext reset"; break;
-      // The colour test below already named it; the switch did not, so the one
-      // reset a battery device most needs to name read "unknown".
-      case ESP_RST_BROWNOUT:  rr = "BROWNOUT"; break;
-      default:                rr = "unknown"; break;
-    }
-    display.setColor((reason == ESP_RST_PANIC || reason == ESP_RST_BROWNOUT)
-                     ? rift_pal.accent : rift_pal.fg);
-    display.drawTextRightAlign(CR, y, rr);
-    y += RIFT_LINE_H;
-
-    // Two rows that would have named the 0.9.1 fault on sight. The I2S master
-    // clock was routed to GPIO0, so the trackball button read as held from the
-    // first loop and every boot entered CLI rescue - a mode in which everything
-    // on screen works and the USB companion protocol does not. Neither fact was
-    // visible anywhere. The raw pin level is shown rather than the debounced
-    // state, because the raw level is the thing that was wrong.
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "USB SERIAL");
-    if (the_mesh.isCLIRescue()) {
-      display.setColor(rift_pal.accent);
-      display.drawTextRightAlign(CR, y, "RESCUE CLI");
-    } else {
-      display.setColor(rift_pal.fg);
-      display.drawTextRightAlign(CR, y, "companion");
-    }
-    y += RIFT_LINE_H;
-
-#ifdef PIN_USER_BTN
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(CX, y, "BOOT BTN");
+    // ---- RUNTIME
+    addRow(ROW_GROUP, -1, "RUNTIME");
+    snprintf(tmp, sizeof(tmp), "%uK", (unsigned) (ESP.getFreeHeap() / 1024));
+    addReading("FREE HEAP", tmp, rift_pal.fg);
     {
-      int level = digitalRead(PIN_USER_BTN);
-      // active low: a held (or driven) pin reads 0
-      display.setColor(level == LOW ? rift_pal.accent : rift_pal.fg);
-      sprintf(tmp, "%s gpio%d=%d", level == LOW ? "DOWN" : "up", (int) PIN_USER_BTN, level);
-      display.drawTextRightAlign(CR, y, tmp);
+      esp_reset_reason_t reason = esp_reset_reason();
+      const char* rr;
+      switch (reason) {
+        case ESP_RST_POWERON:   rr = "power on"; break;
+        case ESP_RST_SW:        rr = "sw restart"; break;
+        case ESP_RST_PANIC:     rr = "PANIC"; break;
+        case ESP_RST_INT_WDT:   rr = "int wdt"; break;
+        case ESP_RST_TASK_WDT:  rr = "task wdt"; break;
+        case ESP_RST_WDT:       rr = "wdt"; break;
+        case ESP_RST_DEEPSLEEP: rr = "deep sleep"; break;
+        case ESP_RST_EXT:       rr = "ext reset"; break;
+        case ESP_RST_BROWNOUT:  rr = "BROWNOUT"; break;
+        default:                rr = "unknown"; break;
+      }
+      addReading("LAST RESET", rr,
+                 (reason == ESP_RST_PANIC || reason == ESP_RST_BROWNOUT) ? rift_pal.accent : rift_pal.fg);
     }
-    y += RIFT_LINE_H;
-#endif
-
     if (rift_boot_mark_count > 0) {
-      display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(CX, y, "BOOT");
-      display.setColor(rift_pal.fg);
-      sprintf(tmp, "%ums", (unsigned) rift_boot_marks[rift_boot_mark_count - 1].at_ms);
-      display.drawTextRightAlign(CR, y, tmp);
-      y += RIFT_LINE_H;
-
+      snprintf(tmp, sizeof(tmp), "%ums", (unsigned) rift_boot_marks[rift_boot_mark_count - 1].at_ms);
+      addReading("BOOT", tmp, rift_pal.fg);
       int worst = 0;
       uint32_t worst_ms = 0;
       for (int i = 0; i < rift_boot_mark_count; i++) {
@@ -3073,50 +2900,102 @@ public:
         uint32_t gap = rift_boot_marks[i].at_ms - prev;
         if (gap > worst_ms) { worst = i; worst_ms = gap; }
       }
-      display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(CX, y, "SLOWEST");
-      display.setColor(rift_pal.fg);
-      sprintf(tmp, "%s %u", rift_boot_marks[worst].name, (unsigned) worst_ms);
-      display.drawTextRightAlign(CR, y, tmp);
-      y += RIFT_LINE_H;
+      snprintf(tmp, sizeof(tmp), "%s %ums", rift_boot_marks[worst].name, (unsigned) worst_ms);
+      addReading("SLOWEST", tmp, rift_pal.fg);
     }
 
-    // ---- event log, the one group that is not label/value
-    group(display, "EVENT LOG", CX, y + 4);
-    y += RIFT_LINE_H + 6;
-    {
-      display.setColor(rift_pal.fg);
-      snprintf(tmp, sizeof(tmp), "%d lines", riftLog().count);
-      display.drawTextLeftAlign(CX, y, tmp);
-      if (riftLog().dropped > 0) {
-        display.setColor(rift_pal.mid);
-        snprintf(tmp, sizeof(tmp), "+%u lost", (unsigned) riftLog().dropped);
-        display.drawTextRightAlign(CR, y, tmp);
-      }
-      y += RIFT_LINE_H;
-
-      // The two newest lines, so the log answers its own question from here in the
-      // common case and only has to be opened when it does not.
-      display.setColor(rift_pal.dim);
+    // ---- EVENT LOG: the two newest lines, so the log answers its own question
+    // from here in the common case, then the two logs as actions
+    addRow(ROW_GROUP, -1, "EVENT LOG");
+    if (riftLog().count == 0) {
+      addReading("no events since boot", "", rift_pal.mid);
+    } else {
       for (int k = 1; k >= 0; k--) {
         const RiftEventLog::Line* l = riftLog().peek(k);
         if (l == NULL) continue;
-        char shown[RIFT_LOG_TEXT * 2];
-        riftTranslateUTF8(shown, l->text, sizeof(shown));
-        display.drawTextEllipsized(CX, y, CR - CX, shown);
-        y += RIFT_LINE_H;
+        char stamp[12];
+        snprintf(stamp, sizeof(stamp), "%u.%u", (unsigned) (l->at_ms / 1000u),
+                 (unsigned) ((l->at_ms % 1000u) / 100u));
+        Row* r = addRow(ROW_LOG, -1, stamp);
+        if (r != NULL) riftTranslateUTF8(r->value, l->text, sizeof(r->value));
       }
-
-      display.setColor(rift_pal.mid);   // a key hint, not a warning
-      display.drawTextLeftAlign(CX, y, "ENTER: open log");
+    }
+    for (int i = IT_LOG; i < IT_COUNT; i++) {
+      Row* r = addRow(ROW_ACTION, i, itemLabel(i));
+      itemValue(i, tmp, sizeof(tmp));
+      setValue(r, tmp, rift_pal.mid);
     }
 
-    display.setColor(rift_pal.dim);
-    display.drawTextLeftAlign(2, 214, "left: actions");
-    display.setColor(rift_pal.mid);
-    snprintf(tmp, sizeof(tmp), "PAGE 2/2 " "%s" " v%s", RIFT_DOT, RIFT_VERSION);
-    display.drawTextRightAlign(318, 214, tmp);
+    if (!selectable(_sel)) {
+      _sel = 0;
+      moveSel(1, true);
+    }
+  }
 
+  int renderList(DisplayDriver& display) {
+    display.setTextSize(1);
+    buildRows();
+    char tmp[72];
+
+    // The heading: what this is running and for how long, and the one state that
+    // is not a setting on the right. Uptime is always known, whatever the clock.
+    {
+      char up[16];
+      riftFormatDuration((uint32_t) (millis() / 1000u), up, sizeof(up));
+      snprintf(tmp, sizeof(tmp), "v%s %s UP %s", RIFT_VERSION, RIFT_DOT, up);
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(2, 2, tmp);
+#ifdef ENABLE_PRIVATE_KEY_EXPORT
+      display.drawTextRightAlign(314, 2, "PRIVATE KEY EXPORT: on");
+#else
+      display.drawTextRightAlign(314, 2, "PRIVATE KEY EXPORT: off");
+#endif
+    }
+
+    // The window follows the cursor.
+    if (_sel < _first) _first = _sel;
+    if (_sel >= _first + LIST_ROWS) _first = _sel - LIST_ROWS + 1;
+    if (_first > _row_count - LIST_ROWS) _first = _row_count - LIST_ROWS;
+    if (_first < 0) _first = 0;
+
+    for (int i = 0; i < MAX_ROWS; i++) _row_y[i] = -1;
+
+    int y = LIST_TOP;
+    for (int i = _first; i < _row_count && i < _first + LIST_ROWS; i++, y += RIFT_LINE_H) {
+      const Row& r = _rows[i];
+      bool sel = (i == _sel);
+      _row_y[i] = y - 2;
+      if (sel) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y - 2, 316, 12);
+      }
+      switch (r.kind) {
+        case ROW_GROUP:
+          display.setColor(rift_pal.mid);
+          display.drawTextLeftAlign(2, y, r.label);
+          break;
+        case ROW_LOG:
+          display.setColor(rift_pal.dim);
+          display.drawTextLeftAlign(2, y, r.label);
+          display.setColor(rift_pal.fg);
+          display.drawTextEllipsized(40, y, 274, r.value);
+          break;
+        case ROW_ACTION:
+          display.setColor(sel ? rift_pal.on_accent : rift_pal.fg);
+          display.drawTextLeftAlign(2, y, r.label);
+          display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
+          display.drawTextRightAlign(314, y, r.value);
+          break;
+        default:
+          display.setColor(rift_pal.mid);
+          display.drawTextLeftAlign(2, y, r.label);
+          display.setColor(r.vcol);
+          display.drawTextRightAlign(314, y, r.value);
+          break;
+      }
+    }
+
+    riftDrawThumb(display, LIST_TOP - 2, LIST_ROWS * RIFT_LINE_H, _first, _row_count, LIST_ROWS);
     renderNavBar(display, RIFT_NAV_SYSTEM);
     return 1000;
   }
@@ -3149,13 +3028,12 @@ public:
       return true;
     }
 
-    if (_mode == MENU && _page == 0) {
-      int n = _sel + steps;
-      if (n < 0) n = 0;
-      if (n >= IT_COUNT) n = IT_COUNT - 1;
-      if (n == _sel) return false;
-      _sel = n;
-      return true;
+    if (_mode == MENU) {
+      // The cursor over the selectable rows, one per step, without wrapping.
+      int before = _sel;
+      int dir = steps > 0 ? 1 : -1;
+      for (int n = 0; n < (steps > 0 ? steps : -steps); n++) moveSel(dir, false);
+      return _sel != before;
     }
     return false;
   }
@@ -3163,21 +3041,15 @@ public:
   bool handleTouch(int x, int y) override {
     (void) x;
     if (_mode != MENU) return false;
-    // Page 2 has no actions. Without this a tap on the readings page was mapped to
-    // an action row and activated - and depending on where the finger landed that
-    // was Delete channel or an advert to the whole mesh, from a screen that gives
-    // no sign of being interactive at all.
-    if (_page != 0) return false;
-
-    // Hit-tested against where the rows were actually drawn. The full width now,
-    // because the rows are 320px wide: the old x > 158 bound was left over from the
-    // two-column layout and made the right half of every row - the half showing the
-    // setting's current value - dead to touch.
-    for (int i = 0; i < IT_COUNT; i++) {
-      if (_item_y[i] < 0) continue;
-      if (y >= _item_y[i] && y < _item_y[i] + 12) {
+    // Hit-tested against where the rows were actually drawn, and only an action
+    // row answers: a tap on a reading or a heading selects nothing, which is the
+    // guard that once kept a tap on the readings page from deleting a channel.
+    for (int i = 0; i < _row_count; i++) {
+      if (_row_y[i] < 0) continue;
+      if (y >= _row_y[i] && y < _row_y[i] + 12) {
+        if (!selectable(i)) return false;
         _sel = i;
-        activate();
+        activate(_rows[i].item);
         return true;
       }
     }
@@ -3293,9 +3165,9 @@ public:
       if (_del_count == 0) return true;
       if (c == KEY_UP)   { _del_sel = (_del_sel + _del_count - 1) % _del_count; return true; }
       if (c == KEY_DOWN) { _del_sel = (_del_sel + 1) % _del_count; return true; }
-      // deliberately a second screen rather than an immediate delete: the key is
+      // deliberately a second step rather than an immediate delete: the key is
       // not recoverable from here and the list is one keypress from the menu
-      if (c == KEY_ENTER) { _mode = CH_DELETE_CONFIRM; return true; }
+      if (c == KEY_ENTER) { _confirm_sel = 0; _mode = CH_DELETE_CONFIRM; return true; }
       return true;
     }
 
@@ -3352,6 +3224,11 @@ public:
     }
 
     if (_mode == CH_DELETE_CONFIRM) {
+      // Two buttons, KEEP first and selected on entry. Left and right move between
+      // them inside the box; they are not the screen change while a warning is up.
+      if (c == KEY_LEFT)  { _confirm_sel = 0; return true; }
+      if (c == KEY_RIGHT) { _confirm_sel = 1; return true; }
+      if (c == KEY_ENTER && _confirm_sel == 0) { _mode = CH_DELETE; return true; }
       if (c == KEY_ENTER) {
         // The conversation key is taken BEFORE the channel goes, because
         // riftChannelConv() reads the channel table and a blanked slot answers
@@ -3397,29 +3274,12 @@ public:
       return true;   // keep the key on screen until acknowledged
     }
 
-    // The pages sit inside SYSTEM, and the edges still navigate out of it - so
-    // right from page 1 is the readings, right from page 2 leaves, and the trackball
-    // never becomes the only way out of a screen.
-    if (c == KEY_NEXT || c == KEY_RIGHT) {
-      if (_mode == MENU && _page == 0) { _page = 1; return true; }
-      _task->cycleNavScreen(1);
-      return true;
-    }
-    if (c == KEY_PREV || c == KEY_LEFT) {
-      if (_mode == MENU && _page == 1) { _page = 0; return true; }
-      _task->cycleNavScreen(-1);
-      return true;
-    }
-    // Page 2 has nothing to select, so up and down are consumed rather than moving
-    // a cursor the user cannot see, and ENTER opens the log the page is summarising.
-    if (_page == 1) {
-      if (c == KEY_ENTER) { _log_scroll = 0; _mode = LOG; return true; }
-      if (c == KEY_UP || c == KEY_DOWN) return true;
-      return false;
-    }
-    if (c == KEY_UP) { _sel = (_sel + IT_COUNT - 1) % IT_COUNT; return true; }
-    if (c == KEY_DOWN) { _sel = (_sel + 1) % IT_COUNT; return true; }
-    if (c == KEY_ENTER) { activate(); return true; }
+    // Left and right are the screen change, as on every screen.
+    if (c == KEY_NEXT || c == KEY_RIGHT) { _task->cycleNavScreen(1); return true; }
+    if (c == KEY_PREV || c == KEY_LEFT) { _task->cycleNavScreen(-1); return true; }
+    if (c == KEY_UP)   { moveSel(-1, true); return true; }
+    if (c == KEY_DOWN) { moveSel(1, true); return true; }
+    if (c == KEY_ENTER) { int item = selectedItem(); if (item >= 0) activate(item); return true; }
     return false;
   }
 };
