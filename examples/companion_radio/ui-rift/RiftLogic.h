@@ -586,6 +586,19 @@ static inline const char* riftEmojiToText(uint32_t cp) {
     { 0x01F62D, 0x01F62D, ":("   },   // loudly crying
     { 0x01F923, 0x01F923, ":D"   },   // rolling on the floor
 
+    // Typographic punctuation, which phones insert on their own. A curly
+    // apostrophe drew as a block in the middle of a sender's name on the first
+    // screenshot taken from the device ("Tommsen's T-Deck"), and the ASCII form
+    // is not a lossy substitute - it is the same character as far as anyone
+    // reading a 6x8 cell is concerned.
+    { 0x002018, 0x002019, "'"    },   // left/right single quotation mark
+    { 0x00201A, 0x00201A, "'"    },   // single low-9 quotation mark
+    { 0x00201C, 0x00201D, "\""   },   // left/right double quotation mark
+    { 0x00201E, 0x00201E, "\""   },   // double low-9 quotation mark
+    { 0x002013, 0x002014, "-"    },   // en dash, em dash
+    { 0x002026, 0x002026, "..."  },   // horizontal ellipsis
+    { 0x0000A0, 0x0000A0, " "    },   // no-break space
+
     { 0x002665, 0x002665, "\x03" },   // heart suit
     { 0x002764, 0x002764, "\x03" },   // heavy black heart
     { 0x01F493, 0x01F49F, "\x03" },   // beating/sparkling/coloured hearts

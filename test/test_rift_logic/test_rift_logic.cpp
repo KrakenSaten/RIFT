@@ -919,6 +919,22 @@ TEST(TranslateUTF8, ARunOfBreaksIsOneSpaceAndNeverDoublesAnExistingOne) {
     EXPECT_STREQ("x", out);
 }
 
+TEST(TranslateUTF8, TypographicPunctuationBecomesItsAsciiSelf) {
+    // Phones insert these on their own. The curly apostrophe drew as a block in
+    // the middle of a sender's name on the first screenshot from the device.
+    static const unsigned char apos[] = { 'T','o','m',0xE2,0x80,0x99,'s',0 };        // U+2019
+    static const unsigned char dq[]   = { 0xE2,0x80,0x9C,'h','i',0xE2,0x80,0x9D,0 }; // U+201C/D
+    static const unsigned char dash[] = { 'a',0xE2,0x80,0x93,'b',0xE2,0x80,0x94,'c',0 }; // U+2013/4
+    static const unsigned char ell[]  = { 'x',0xE2,0x80,0xA6,0 };                    // U+2026
+    static const unsigned char nbsp[] = { 'a',0xC2,0xA0,'b',0 };                     // U+00A0
+    char out[32];
+    riftTranslateUTF8(out, (const char*) apos, sizeof(out)); EXPECT_STREQ("Tom's", out);
+    riftTranslateUTF8(out, (const char*) dq, sizeof(out));   EXPECT_STREQ("\"hi\"", out);
+    riftTranslateUTF8(out, (const char*) dash, sizeof(out)); EXPECT_STREQ("a-b-c", out);
+    riftTranslateUTF8(out, (const char*) ell, sizeof(out));  EXPECT_STREQ("x...", out);
+    riftTranslateUTF8(out, (const char*) nbsp, sizeof(out)); EXPECT_STREQ("a b", out);
+}
+
 TEST(TranslateUTF8, OtherControlsStillVanish) {
     char out[32];
     riftTranslateUTF8(out, "a\x07" "b\x1f" "c\x7f" "d", sizeof(out));
