@@ -149,14 +149,41 @@ made it obvious in one line. The tests had passed throughout, because they asser
 a bare name for incoming entries — they were testing the same wrong assumption the
 code was built on. They now use the strings the device printed.
 
-Two limits remain and are accepted: a direct message from a contact whose name
-equals a channel name picks up that colour, and a channel named longer than the tab
-cache's 20 bytes gets no colour rather than the wrong one.
+**Both limits are gone, and the robust alternative is what runs now.** They were: a
+direct message from a contact whose name equalled a channel name picked up that
+channel's colour, and a channel named longer than the tab cache's 20 bytes got no
+colour rather than the wrong one. The fix named here — record the channel slot in
+each log entry — was left waiting for a file format version to travel with, and the
+v2 format that put a `RiftConvKey` on every entry is that version. `riftEntryColour`
+reads the slot off the entry, and only falls back to matching the origin string
+against the channel table for an entry loaded from a v1 file, which has no key to
+read.
 
-The robust alternative is to record the channel slot in each log entry, which would
-make the match exact and survive both a rename and any future change to the display
-format. It costs a file format version, so it is worth doing the next time that
-format changes for another reason rather than on its own.
+Matching by name is therefore still here, and still has to be right — it is just no
+longer the path any message written by this firmware takes.
+
+One thing the slot did not settle. Slot 0 and anything past the fourth have no
+assigned colour, and the history has always hashed the name there rather than
+drawing grey — so Public *is* coloured, by its name, which is not what "slot 0 gets
+none" above intends. That is what the device has shown since these colours were
+built, and it is left alone: changing it is a decision about Public, and the change
+that retired the limits above was a decision about where the colour is looked up.
+
+**The message preview draws from the same helper.** It was the last surface with
+none of this — every row in `mid`, so six messages from six places read as one
+undifferentiated block — and it is the surface that can least afford it: COMMS says
+which conversation a row belongs to with its tab strip, and a popup raised over
+RADAR has no tab strip to say it with.
+
+So a channel row in the popup names the channel in the channel's colour and leaves
+the sender at the head of the body in the sender's own. COMMS lifts that sender onto
+the name line instead, and is right to: its strip is already naming the channel.
+Doing the same here would trade one identity for the other and leave the row unable
+to say where the message came from.
+
+The hop marker keeps the metadata colour. `riftOriginDecorLen` reports where "(2) "
+ends so the name can be drawn separately from it — a hop count is not part of
+anyone's name, and giving it their colour would claim that it was.
 
 ---
 

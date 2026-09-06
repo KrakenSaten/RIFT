@@ -162,17 +162,36 @@ static inline int riftChannelCapacity(int max_text_len, const char* sender_name)
 // decoration with nothing inside it, and a name too long for the buffer. Both mean
 // "do not claim to know which conversation this is", the safe answer for a caller
 // choosing an identity colour.
-static inline bool riftOriginName(const char* origin, char* out, size_t out_size) {
-  if (origin == NULL || out == NULL || out_size == 0) return false;
-  const char* p = origin;
+// Where the decoration on an origin string ends and the name begins.
+//
+// The same two prefixes riftOriginName strips - "(2) " or "(D) " on an incoming
+// entry, "to " on an outgoing one - reported as a length rather than consumed,
+// because a caller that draws the string needs both halves and not just the name.
+// The message preview colours the name by its conversation and leaves the
+// decoration in the metadata colour: a hop count is not part of anyone's name and
+// has no business taking their colour.
+//
+// Here rather than beside that caller so the two answers cannot drift. A row
+// coloured by one name and printing another is worse than either mistake alone.
+static inline size_t riftOriginDecorLen(const char* origin) {
+  if (origin == NULL) return 0;
 
   // the hop marker, whatever is inside the brackets - a count, or D for direct
-  if (*p == '(') {
-    const char* close = strchr(p, ')');
-    if (close != NULL && close[1] == ' ') p = close + 2;
-  } else if (strncmp(p, "to ", 3) == 0) {
-    p += 3;
+  if (origin[0] == '(') {
+    const char* close = strchr(origin, ')');
+    // Only when the bracket closes and a space follows it. "(unclosed" is a name
+    // that starts with a bracket, not decoration, and a length into the middle of
+    // it would cut the name rather than uncover it.
+    if (close != NULL && close[1] == ' ') return (size_t) (close + 2 - origin);
+    return 0;
   }
+  if (strncmp(origin, "to ", 3) == 0) return 3;
+  return 0;
+}
+
+static inline bool riftOriginName(const char* origin, char* out, size_t out_size) {
+  if (origin == NULL || out == NULL || out_size == 0) return false;
+  const char* p = origin + riftOriginDecorLen(origin);
 
   // Trailing spaces as well as colons: the separator is written as ":" today, and
   // a name is never meaningfully distinguished by whitespace at its end.
@@ -367,6 +386,117 @@ static inline bool riftParseCivil(const char* text, uint32_t* out) {
   return riftEpochFromCivil(v[0], v[1], v[2], v[3], v[4], out);
 }
 
+// ---------------------------------------------------------------- local time
+//
+// A display offset from UTC, in quarter hours. Display only: the RTC keeps UTC and
+// nothing else changes.
+//
+// That division is the whole design and it is not negotiable. The clock is set from
+// mesh consensus, which compares this node's reading against the timestamps in other
+// nodes' adverts - and those are UTC. Storing local time would make this node
+// disagree with the mesh by exactly the offset, and the consensus would either fight
+// the setting or, worse, drag every neighbour's opinion of the time towards it. Every
+// stored epoch - message logs, advert timestamps, ack deadlines - stays UTC too, so a
+// log file carried to another machine still means what it says.
+//
+// Quarter hours rather than whole ones because half a dozen real zones are not on an
+// hour boundary: India is +5:30, Nepal +5:45, the Chatham Islands +12:45.
+//
+// No daylight saving, and that is a deliberate refusal rather than an omission. DST
+// needs a timezone database and a notion of "which rules apply here", neither of
+// which this firmware has any way to obtain - it has no network, no location it
+// trusts, and no way to be updated when a government changes the rule. A device that
+// quietly went an hour wrong twice a year would be worse than one that never claims
+// to know: this is a number the user sets, and in spring they set it again.
+#define RIFT_TZ_MIN (-48)    // UTC-12:00
+#define RIFT_TZ_MAX  (56)    // UTC+14:00
+
+static inline bool riftTzValid(int quarters) {
+  return quarters >= RIFT_TZ_MIN && quarters <= RIFT_TZ_MAX;
+}
+
+// "UTC" at zero, otherwise "UTC+02:00" / "UTC-03:30". Always signed and always with
+// minutes: "UTC+2" invites the reading that the other zones are whole hours too.
+static inline void riftTzFormat(int quarters, char* buf, size_t sz) {
+  if (buf == NULL || sz == 0) return;
+  if (!riftTzValid(quarters)) quarters = 0;
+  if (quarters == 0) { snprintf(buf, sz, "UTC"); return; }
+  int mag = quarters < 0 ? -quarters : quarters;
+  snprintf(buf, sz, "UTC%c%02d:%02d", quarters < 0 ? '-' : '+', mag / 4, (mag % 4) * 15);
+}
+
+// The same without the "UTC" prefix, for a row that has already said what it is:
+// "UTC" at zero, else "+02:00".
+static inline void riftTzShort(int quarters, char* buf, size_t sz) {
+  if (buf == NULL || sz == 0) return;
+  if (!riftTzValid(quarters)) quarters = 0;
+  if (quarters == 0) { snprintf(buf, sz, "UTC"); return; }
+  int mag = quarters < 0 ? -quarters : quarters;
+  snprintf(buf, sz, "%c%02d:%02d", quarters < 0 ? '-' : '+', mag / 4, (mag % 4) * 15);
+}
+
+// Accepts "+2", "2", "-3", "+02:00", "-03:30", "0". Minutes must be a quarter hour,
+// because anything else cannot be stored and silently rounding a typed number is how
+// a field lies to the person using it.
+//
+// Refuses everything else, including trailing rubbish: "+2x" is a typo, and a parser
+// that takes the part it recognises turns a typo into a setting.
+static inline bool riftTzParse(const char* str, int* quarters) {
+  if (str == NULL) return false;
+  const char* p = str;
+  while (*p == ' ') p++;
+  int sign = 1;
+  if (*p == '+') p++;
+  else if (*p == '-') { sign = -1; p++; }
+
+  int h = 0, digits = 0;
+  while (*p >= '0' && *p <= '9') {
+    h = h * 10 + (*p - '0');
+    p++;
+    if (++digits > 2) return false;
+  }
+  if (digits == 0) return false;
+
+  int m = 0;
+  if (*p == ':') {
+    p++;
+    int md = 0;
+    while (*p >= '0' && *p <= '9') {
+      m = m * 10 + (*p - '0');
+      p++;
+      md++;
+    }
+    if (md != 2) return false;
+    if (m != 0 && m != 15 && m != 30 && m != 45) return false;
+  }
+  while (*p == ' ') p++;
+  if (*p != 0) return false;
+
+  int q = sign * (h * 4 + m / 15);
+  if (!riftTzValid(q)) return false;
+  if (quarters) *quarters = q;
+  return true;
+}
+
+// Display only. A negative offset near the epoch would underflow into a date in
+// 2106, so it clamps at zero instead - which reads as "not set" everywhere that
+// checks, and is the one honest answer for a time that would be before time.
+static inline uint32_t riftLocalFromUtc(uint32_t utc, int quarters) {
+  if (!riftTzValid(quarters)) return utc;
+  int32_t off = (int32_t) quarters * 900;
+  if (off < 0 && (uint32_t) (-off) > utc) return 0;
+  return (uint32_t) ((int64_t) utc + (int64_t) off);
+}
+
+// The inverse, for the one field where a typed local time has to become the UTC the
+// RTC keeps. Same clamp, same reason.
+static inline uint32_t riftUtcFromLocal(uint32_t local, int quarters) {
+  if (!riftTzValid(quarters)) return local;
+  int32_t off = (int32_t) quarters * 900;
+  if (off > 0 && (uint32_t) off > local) return 0;
+  return (uint32_t) ((int64_t) local - (int64_t) off);
+}
+
 // ------------------------------------------------------------- packet decoding
 //
 // The names for a raw packet header, for the RX log. Kept here rather than beside
@@ -408,6 +538,130 @@ static inline const char* riftRouteTypeName(uint8_t route_type) {
 }
 
 static inline uint8_t riftHeaderPayloadType(uint8_t header) { return (header >> 2) & 0x0F; }
+
+// ------------------------------------------------ the twenty-minute activity strip
+//
+// Twenty minutes of receive counts, in three classes, kept as counters rather than
+// recovered from the air log.
+//
+// It used to be derived: the home screen walked RiftRxLog every frame and bucketed
+// what it found by age. That reads well until the log turns over. The ring holds 64
+// entries for both directions, so twenty minutes of evidence exists only while
+// traffic stays under 3.2 packets a minute - measured full at 62 rx + 2 tx on a mesh
+// doing about two. Above that the oldest bars lose their evidence one eviction at a
+// time and shrink, which looks exactly like the mesh having gone quiet in the past.
+// A history that rewrites itself is worse than a shorter one.
+//
+// 120 bytes of counters, and they cannot be evicted by anything.
+#define RIFT_ACT_MINUTES  20
+#define RIFT_ACT_CLASSES  3
+#define RIFT_ACT_TALK     0
+#define RIFT_ACT_ADVERT   1
+#define RIFT_ACT_DRIFT    2
+#define RIFT_ACT_LEVELS   5
+
+struct RiftActivity {
+  uint16_t bins[RIFT_ACT_MINUTES][RIFT_ACT_CLASSES];
+  uint32_t last_min;   // absolute minute number of the newest bin
+  bool     started;
+};
+
+// Somebody spoke, somebody announced themselves, or the mesh kept itself running.
+// Three rather than the air log's eight, because the strip is 8 pixels tall with no
+// word beside it - the log one screen down is where the detail is.
+static inline int riftActivityClass(uint8_t payload_type) {
+  if (payload_type == 0x02 || payload_type == 0x05 || payload_type == 0x06) return RIFT_ACT_TALK;
+  if (payload_type == 0x04) return RIFT_ACT_ADVERT;
+  return RIFT_ACT_DRIFT;
+}
+
+// Advance to the current minute, clearing whatever it passed over.
+//
+// Clearing on advance is the whole correctness of a ring of bins: without it a bin
+// twenty minutes stale is indistinguishable from the minute in progress, and the
+// strip would show an hour-old burst as if it were happening now.
+//
+// millis() wraps every 49.7 days, and 2^32 is not a whole number of minutes - so the
+// minute counter does not wrap cleanly with it. The unsigned difference then reads as
+// enormous, which lands in the clear-everything branch: twenty minutes of history is
+// lost once every seven weeks, and nothing is ever shown in the wrong bin. That is the
+// right way round for a wrap that cannot be made exact.
+static inline void riftActivityRoll(RiftActivity* a, uint32_t now_ms) {
+  if (a == NULL) return;
+  uint32_t m = now_ms / 60000u;
+  if (!a->started) {
+    memset(a->bins, 0, sizeof(a->bins));
+    a->last_min = m;
+    a->started = true;
+    return;
+  }
+  uint32_t advanced = m - a->last_min;
+  if (advanced == 0) return;
+  if (advanced >= RIFT_ACT_MINUTES) {
+    memset(a->bins, 0, sizeof(a->bins));
+  } else {
+    for (uint32_t i = 1; i <= advanced; i++) {
+      memset(a->bins[(a->last_min + i) % RIFT_ACT_MINUTES], 0, sizeof(a->bins[0]));
+    }
+  }
+  a->last_min = m;
+}
+
+static inline void riftActivityNote(RiftActivity* a, uint32_t now_ms, uint8_t payload_type) {
+  if (a == NULL) return;
+  riftActivityRoll(a, now_ms);
+  uint16_t* bin = a->bins[a->last_min % RIFT_ACT_MINUTES];
+  int k = riftActivityClass(payload_type);
+  if (bin[k] < 0xFFFF) bin[k]++;   // saturate rather than wrap to nothing
+}
+
+// The counts for one position on the strip: 0 is the oldest of the twenty, 19 the
+// minute in progress. Roll first, or the newest bin is wherever the last packet
+// happened to land.
+//
+// A whole window is ADDED before subtracting, and that is not defensive style - it
+// is the fix for a bug this had on its first run. Written as last_min - back, the
+// subtraction underflows for the first twenty minutes after boot, when last_min is
+// still a small number. Unsigned underflow would be harmless if the modulus divided
+// 2^32, and 20 does not: 2^32 % 20 == 16, so (m - 16) computed in uint32 lands on
+// exactly the same bin as m. Two minutes after a flash the device drew one packet
+// as two bars, sixteen places apart, and the second was the first one again.
+//
+// back is at most RIFT_ACT_MINUTES - 1, so adding RIFT_ACT_MINUTES cannot underflow,
+// and adding a whole multiple of the modulus cannot change which bin is chosen.
+static inline const uint16_t* riftActivityAt(const RiftActivity* a, int pos) {
+  if (a == NULL || pos < 0 || pos >= RIFT_ACT_MINUTES) return NULL;
+  uint32_t back = (uint32_t) (RIFT_ACT_MINUTES - 1 - pos);
+  uint32_t m = a->last_min + (uint32_t) RIFT_ACT_MINUTES - back;
+  return a->bins[m % RIFT_ACT_MINUTES];
+}
+
+// Bar height for a minute's packet count, on a fixed ladder.
+//
+// Fixed is the entire point. The previous version scaled every bar to the busiest
+// minute in the window, so one busy minute redrew the whole graph: at a peak of 2/min
+// a one-packet minute stood 8px, and the moment a 3-packet minute arrived that same
+// minute redrew at 6px with nothing about it having changed. Watching the screen, the
+// past moved - which is the one thing a history must not do. It moved the other way
+// too, every time a busy minute aged out of the window and the peak fell.
+//
+// Doubling steps rather than linear, because that is how traffic actually falls: a
+// mesh idles at one or two packets a minute and bursts to dozens, and a linear scale
+// wide enough for the burst leaves idle indistinguishable from silence. Five levels,
+// so nothing ever clips - 16+ is simply the top step - and the exact figure for the
+// busiest minute is printed in the label beside the strip.
+//
+//   count   1   2-3   4-7   8-15   16+
+//   px      3    6     10    13     16      (at band 16)
+static inline int riftActivityHeight(uint32_t count, int band) {
+  if (count == 0 || band <= 0) return 0;
+  int level = 1;
+  while (level < RIFT_ACT_LEVELS && count >= (uint32_t) (1u << level)) level++;
+  int h = (level * band + RIFT_ACT_LEVELS / 2) / RIFT_ACT_LEVELS;
+  if (h < 1) h = 1;
+  if (h > band) h = band;
+  return h;
+}
 static inline uint8_t riftHeaderRouteType(uint8_t header)   { return header & 0x03; }
 
 // Where path_len sits in a raw frame. Packet::readFrom puts four transport bytes
@@ -876,6 +1130,55 @@ static inline bool riftCanDirectMessage(uint8_t advert_type) {
 
 // What to call it on screen when it cannot. A missing affordance with no reason
 // reads as a bug, and the type is information the screen does not otherwise show.
+// ---- contact table reserve -------------------------------------------------
+//
+// Past this many stored contacts, only repeaters and room servers are taken.
+//
+// The table holds 350 here and a busy mesh fills it with chat nodes, because chat
+// nodes are what a mesh is mostly made of. Past the cap they stop being stored and
+// the remaining slots stay open for repeaters and room servers.
+//
+// What a refused node actually costs, stated exactly, because the tempting version
+// of this sentence is wrong. It is NOT that a chat contact comes back by itself
+// when its owner messages you: MeshCore needs the sender's public key to decrypt a
+// direct message, and that key arrived in the advert that was turned away, so a
+// refused node cannot reach this one either. Nor can it be added from the device -
+// RIFT has no add-contact action, only the companion app does. A node refused here
+// is gone until the stored count falls back under the cap and its next advert is
+// taken.
+//
+// The trade is made anyway, and this is the argument for it: past the cap SOMETHING
+// is going to be refused, and without the reserve it is whatever adverts happen to
+// arrive after the 350th - which on a mesh made mostly of chat nodes means the
+// repeaters. A repeater is the worse loss of the two. NODES draws no route through
+// one it has never heard, so losing it degrades every hop count and every path on
+// the screen, not just one conversation.
+//
+// A reserve, not a quota: nothing already stored is evicted, chat nodes over the
+// line still reach the air log and the UI as discovered-but-not-added exactly as
+// they do when auto-add is off, and repeaters keep being taken until the table is
+// genuinely full - which is a different refusal, made by allocateContactSlot.
+#define RIFT_CHAT_CONTACT_CAP  200
+
+// Takes the advert type, not a flag the caller worked out. Which types count as
+// infrastructure is half the rule and belongs under test with the other half -
+// RIFT_ADV_* are already here, and UITask.cpp static_asserts them against
+// MeshCore's ADV_TYPE_* so the two cannot drift apart unnoticed.
+//
+// Sensors are not infrastructure here. They are not routed through, so a sensor
+// this node never stored costs a reading rather than a path.
+//
+// capacity clamps the cap. A build with a table no larger than the cap gets no
+// reserve rather than one it has no room to honour, and that is worth stating
+// because it means the rule is silently absent below 200 contacts. RIFT ships on
+// one board, with 350.
+static inline bool riftShouldStoreContact(uint8_t adv_type, int stored, int capacity) {
+  if (adv_type == RIFT_ADV_REPEATER || adv_type == RIFT_ADV_ROOM) return true;
+  int cap = RIFT_CHAT_CONTACT_CAP;
+  if (capacity > 0 && capacity < cap) cap = capacity;
+  return stored < cap;
+}
+
 static inline const char* riftAdvertTypeName(uint8_t advert_type) {
   switch (advert_type) {
     case RIFT_ADV_CHAT:     return "chat";

@@ -640,6 +640,291 @@ TEST(FormatAgeSecs, TheMillisWrapperStillAgrees) {
     }
 }
 
+// ---- local time -------------------------------------------------------------
+
+TEST(TimeZone, FormatsZeroAsUTCAndTheRestSigned) {
+    char b[16];
+    riftTzFormat(0, b, sizeof(b));   EXPECT_STREQ("UTC", b);
+    riftTzFormat(8, b, sizeof(b));   EXPECT_STREQ("UTC+02:00", b);
+    riftTzFormat(4, b, sizeof(b));   EXPECT_STREQ("UTC+01:00", b);
+    riftTzFormat(22, b, sizeof(b));  EXPECT_STREQ("UTC+05:30", b);
+    riftTzFormat(-14, b, sizeof(b)); EXPECT_STREQ("UTC-03:30", b);
+    riftTzFormat(-48, b, sizeof(b)); EXPECT_STREQ("UTC-12:00", b);
+    riftTzFormat(56, b, sizeof(b));  EXPECT_STREQ("UTC+14:00", b);
+    riftTzShort(0, b, sizeof(b));    EXPECT_STREQ("UTC", b);
+    riftTzShort(8, b, sizeof(b));    EXPECT_STREQ("+02:00", b);
+}
+
+TEST(TimeZone, ParsesTheFormsSomebodyWouldActuallyType) {
+    int q = -999;
+    ASSERT_TRUE(riftTzParse("+2", &q));      EXPECT_EQ(8, q);
+    ASSERT_TRUE(riftTzParse("2", &q));       EXPECT_EQ(8, q);
+    ASSERT_TRUE(riftTzParse("+02:00", &q));  EXPECT_EQ(8, q);
+    ASSERT_TRUE(riftTzParse("-3", &q));      EXPECT_EQ(-12, q);
+    ASSERT_TRUE(riftTzParse("-03:30", &q));  EXPECT_EQ(-14, q);
+    ASSERT_TRUE(riftTzParse("+05:45", &q));  EXPECT_EQ(23, q);
+    ASSERT_TRUE(riftTzParse("0", &q));       EXPECT_EQ(0, q);
+    ASSERT_TRUE(riftTzParse(" +2 ", &q));    EXPECT_EQ(8, q);
+}
+
+TEST(TimeZone, RefusesWhatItCannotStoreRatherThanRounding) {
+    int q = 0;
+    EXPECT_FALSE(riftTzParse("+02:10", &q));   // not a quarter hour
+    EXPECT_FALSE(riftTzParse("+02:0", &q));    // minutes must be two digits
+    EXPECT_FALSE(riftTzParse("+2x", &q));      // trailing rubbish is a typo
+    EXPECT_FALSE(riftTzParse("", &q));
+    EXPECT_FALSE(riftTzParse("+", &q));
+    EXPECT_FALSE(riftTzParse("abc", &q));
+    EXPECT_FALSE(riftTzParse("+15", &q));      // past UTC+14
+    EXPECT_FALSE(riftTzParse("-13", &q));      // past UTC-12
+    EXPECT_FALSE(riftTzParse("+123", &q));
+    EXPECT_FALSE(riftTzParse(NULL, &q));
+}
+
+TEST(TimeZone, ShiftsForDisplayAndBackAgain) {
+    const uint32_t utc = 1789000000u;
+    EXPECT_EQ(utc + 7200u, riftLocalFromUtc(utc, 8));
+    EXPECT_EQ(utc - 12600u, riftLocalFromUtc(utc, -14));
+    EXPECT_EQ(utc, riftLocalFromUtc(utc, 0));
+    // Round trip, every quarter in range: what the field shows is what it stores.
+    for (int q = RIFT_TZ_MIN; q <= RIFT_TZ_MAX; q++) {
+        EXPECT_EQ(utc, riftUtcFromLocal(riftLocalFromUtc(utc, q), q)) << "q " << q;
+    }
+}
+
+TEST(TimeZone, ClampsRatherThanWrappingNearTheEpoch) {
+    // A negative offset on a small epoch would underflow into 2106, which renders as
+    // a perfectly plausible date. Zero reads as "not set" everywhere that checks.
+    EXPECT_EQ(0u, riftLocalFromUtc(100u, -48));
+    EXPECT_EQ(0u, riftUtcFromLocal(100u, 56));
+    // and an out-of-range offset changes nothing rather than inventing a shift
+    EXPECT_EQ(1789000000u, riftLocalFromUtc(1789000000u, 999));
+}
+
+// ---- the twenty-minute activity strip --------------------------------------
+
+static uint32_t minute(uint32_t m) { return m * 60000u + 1234u; }   // mid-minute
+
+TEST(ActivityStrip, PositionsNeverShareABin) {
+    // The bug the device found within two minutes of being flashed, as a property.
+    // 2^32 % 20 == 16, so a position whose minute went below zero used to alias onto
+    // another position's bin - and every test here used minute(100), where nothing
+    // underflows. Small values of last_min are exactly the first twenty minutes
+    // after a boot, which is when somebody is most likely to be looking.
+    for (uint32_t m = 0; m < 64; m++) {
+        RiftActivity a; memset(&a, 0, sizeof(a));
+        riftActivityRoll(&a, minute(m));
+        const uint16_t* seen[RIFT_ACT_MINUTES];
+        for (int pos = 0; pos < RIFT_ACT_MINUTES; pos++) seen[pos] = riftActivityAt(&a, pos);
+        for (int i = 0; i < RIFT_ACT_MINUTES; i++) {
+            ASSERT_NE((const uint16_t*) NULL, seen[i]);
+            for (int j = i + 1; j < RIFT_ACT_MINUTES; j++) {
+                EXPECT_NE(seen[i], seen[j]) << "last_min " << m << ": pos " << i << " and " << j;
+            }
+        }
+    }
+}
+
+TEST(ActivityStrip, OnePacketIsOneBarInTheFirstMinutesAfterBoot) {
+    // The symptom itself, at the boot-time minute numbers that produced it.
+    for (uint32_t m = 0; m < 24; m++) {
+        RiftActivity a; memset(&a, 0, sizeof(a));
+        riftActivityNote(&a, minute(m), 0x03);
+        int bars = 0;
+        for (int pos = 0; pos < RIFT_ACT_MINUTES; pos++) {
+            const uint16_t* bin = riftActivityAt(&a, pos);
+            if (bin[RIFT_ACT_TALK] + bin[RIFT_ACT_ADVERT] + bin[RIFT_ACT_DRIFT] > 0) bars++;
+        }
+        EXPECT_EQ(1, bars) << "one packet at minute " << m;
+    }
+}
+
+TEST(ActivityStrip, CountsLandInTheMinuteInProgress) {
+    RiftActivity a; memset(&a, 0, sizeof(a));
+    riftActivityNote(&a, minute(100), 0x04);   // advert
+    riftActivityNote(&a, minute(100), 0x02);   // text
+    riftActivityNote(&a, minute(100), 0x03);   // ack -> drift
+    const uint16_t* now = riftActivityAt(&a, RIFT_ACT_MINUTES - 1);
+    ASSERT_NE((const uint16_t*) NULL, now);
+    EXPECT_EQ(1, now[RIFT_ACT_TALK]);
+    EXPECT_EQ(1, now[RIFT_ACT_ADVERT]);
+    EXPECT_EQ(1, now[RIFT_ACT_DRIFT]);
+}
+
+TEST(ActivityStrip, AMinuteMovesLeftAsTimePasses) {
+    RiftActivity a; memset(&a, 0, sizeof(a));
+    riftActivityNote(&a, minute(100), 0x04);
+    riftActivityRoll(&a, minute(105));
+    // five minutes on, that minute is five places left of the newest
+    EXPECT_EQ(1, riftActivityAt(&a, RIFT_ACT_MINUTES - 1 - 5)[RIFT_ACT_ADVERT]);
+    EXPECT_EQ(0, riftActivityAt(&a, RIFT_ACT_MINUTES - 1)[RIFT_ACT_ADVERT]);
+}
+
+TEST(ActivityStrip, AStaleBinIsClearedRatherThanReappearing) {
+    // The property the whole ring exists for. Twenty minutes on, the bin that held
+    // that advert is the minute in progress again - and if the roll did not clear
+    // it, an hour-old burst would be drawn as if it were happening now.
+    RiftActivity a; memset(&a, 0, sizeof(a));
+    riftActivityNote(&a, minute(100), 0x04);
+    riftActivityRoll(&a, minute(100 + RIFT_ACT_MINUTES));
+    for (int pos = 0; pos < RIFT_ACT_MINUTES; pos++) {
+        const uint16_t* bin = riftActivityAt(&a, pos);
+        for (int k = 0; k < RIFT_ACT_CLASSES; k++) EXPECT_EQ(0, bin[k]) << "pos " << pos;
+    }
+}
+
+TEST(ActivityStrip, EveryGapLengthClearsExactlyWhatItPassedOver) {
+    // One packet a minute for a long run, then a gap of every possible length. What
+    // survives must be exactly the minutes the gap did not cover.
+    for (uint32_t gap = 1; gap <= RIFT_ACT_MINUTES + 3; gap++) {
+        RiftActivity a; memset(&a, 0, sizeof(a));
+        for (uint32_t m = 0; m < RIFT_ACT_MINUTES; m++) riftActivityNote(&a, minute(100 + m), 0x04);
+        riftActivityRoll(&a, minute(100 + RIFT_ACT_MINUTES - 1 + gap));
+        int survivors = 0;
+        for (int pos = 0; pos < RIFT_ACT_MINUTES; pos++) survivors += riftActivityAt(&a, pos)[RIFT_ACT_ADVERT];
+        int expect = (int) (gap >= RIFT_ACT_MINUTES ? 0 : RIFT_ACT_MINUTES - gap);
+        EXPECT_EQ(expect, survivors) << "gap " << gap;
+    }
+}
+
+TEST(ActivityStrip, TheMillisWrapLosesHistoryRatherThanMisplacingIt) {
+    // 2^32 ms is not a whole number of minutes, so the minute counter cannot wrap
+    // cleanly. The unsigned difference reads as enormous and lands in the
+    // clear-everything branch - which is the right way to be wrong: twenty minutes
+    // are lost once every seven weeks, and nothing is ever drawn in the wrong bin.
+    RiftActivity a; memset(&a, 0, sizeof(a));
+    riftActivityNote(&a, 0xFFFFFF00u, 0x04);
+    riftActivityRoll(&a, 1000u);   // millis() has wrapped
+    for (int pos = 0; pos < RIFT_ACT_MINUTES; pos++) {
+        EXPECT_EQ(0, riftActivityAt(&a, pos)[RIFT_ACT_ADVERT]) << "pos " << pos;
+    }
+}
+
+TEST(ActivityStrip, ClassesFollowTheAirLogsMainTypes) {
+    EXPECT_EQ(RIFT_ACT_TALK,   riftActivityClass(0x02));   // TXT
+    EXPECT_EQ(RIFT_ACT_TALK,   riftActivityClass(0x05));   // GRP TXT
+    EXPECT_EQ(RIFT_ACT_TALK,   riftActivityClass(0x06));   // GRP DAT
+    EXPECT_EQ(RIFT_ACT_ADVERT, riftActivityClass(0x04));
+    EXPECT_EQ(RIFT_ACT_DRIFT,  riftActivityClass(0x03));   // ACK
+    EXPECT_EQ(RIFT_ACT_DRIFT,  riftActivityClass(0x08));   // PATH
+    EXPECT_EQ(RIFT_ACT_DRIFT,  riftActivityClass(0x0B));   // CONTROL
+}
+
+TEST(ActivityHeight, IsFixedSoABarMovesOnlyWhenItsOwnMinuteDoes) {
+    // The regression this replaces, stated as a test: under the old peak-relative
+    // scaling a one-packet minute stood 8px at a peak of 2 and 6px at a peak of 3,
+    // having not changed. Here its height is a function of its own count alone.
+    EXPECT_EQ(riftActivityHeight(1, 16), riftActivityHeight(1, 16));
+    EXPECT_EQ(3,  riftActivityHeight(1, 16));
+    EXPECT_EQ(6,  riftActivityHeight(2, 16));
+    EXPECT_EQ(6,  riftActivityHeight(3, 16));
+    EXPECT_EQ(10, riftActivityHeight(4, 16));
+    EXPECT_EQ(10, riftActivityHeight(7, 16));
+    EXPECT_EQ(13, riftActivityHeight(8, 16));
+    EXPECT_EQ(13, riftActivityHeight(15, 16));
+    EXPECT_EQ(16, riftActivityHeight(16, 16));
+}
+
+TEST(ActivityHeight, NeverClipsAndNeverVanishes) {
+    // Nothing heard draws nothing; anything heard draws at least a pixel; and no
+    // count, however large, exceeds the band - so there is no burst that overflows
+    // the strip and none that is rounded away to silence.
+    EXPECT_EQ(0, riftActivityHeight(0, 16));
+    uint32_t counts[] = { 1, 2, 17, 100, 1000, 65535 };
+    for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+        for (int band = 1; band <= 32; band++) {
+            int h = riftActivityHeight(counts[i], band);
+            EXPECT_GE(h, 1) << counts[i] << " at band " << band;
+            EXPECT_LE(h, band) << counts[i] << " at band " << band;
+        }
+    }
+}
+
+TEST(ActivityHeight, NeverShrinksAsTheCountGrows) {
+    int prev = 0;
+    for (uint32_t c = 0; c <= 300; c++) {
+        int h = riftActivityHeight(c, 16);
+        EXPECT_GE(h, prev) << "at " << c;
+        prev = h;
+    }
+}
+
+TEST(ContactReserve, ChatStopsAtTheCapAndInfraDoesNot) {
+    // The line itself: 199 chat nodes still fit, the 200th does not, and a repeater
+    // is unaffected at either point.
+    EXPECT_TRUE (riftShouldStoreContact(RIFT_ADV_CHAT, 199, 350));
+    EXPECT_FALSE(riftShouldStoreContact(RIFT_ADV_CHAT, 200, 350));
+    EXPECT_FALSE(riftShouldStoreContact(RIFT_ADV_CHAT, 349, 350));
+    EXPECT_TRUE (riftShouldStoreContact(RIFT_ADV_REPEATER,  200, 350));
+    EXPECT_TRUE (riftShouldStoreContact(RIFT_ADV_REPEATER,  349, 350));
+}
+
+TEST(ContactReserve, LeavesTheRestOfTheTableForInfrastructure) {
+    // What the reserve is for, as an arithmetic claim rather than a description:
+    // with chat capped, the slots between the cap and capacity can only be filled
+    // by a repeater or a room server.
+    for (int stored = RIFT_CHAT_CONTACT_CAP; stored < 350; stored++) {
+        EXPECT_FALSE(riftShouldStoreContact(RIFT_ADV_CHAT, stored, 350)) << "chat at " << stored;
+        EXPECT_TRUE (riftShouldStoreContact(RIFT_ADV_REPEATER,  stored, 350)) << "infra at " << stored;
+    }
+}
+
+TEST(ContactReserve, RoomServersCountAsInfrastructureAndSensorsDoNot) {
+    // The half of the rule that used to be a bare line in MyMesh.cpp. A room server
+    // is reached over the radio and cannot be asked for on demand, so it is kept;
+    // a sensor is neither routed through nor logged into, so it goes with chat.
+    EXPECT_TRUE (riftShouldStoreContact(RIFT_ADV_ROOM,     300, 350));
+    EXPECT_TRUE (riftShouldStoreContact(RIFT_ADV_REPEATER, 300, 350));
+    EXPECT_FALSE(riftShouldStoreContact(RIFT_ADV_CHAT,     300, 350));
+    EXPECT_FALSE(riftShouldStoreContact(RIFT_ADV_SENSOR,   300, 350));
+    EXPECT_FALSE(riftShouldStoreContact(RIFT_ADV_NONE,     300, 350));
+}
+
+TEST(ContactReserve, ATableNoLargerThanTheCapReservesNothing) {
+    // Stated because it is a real behaviour difference and not an edge case that
+    // cannot happen: a 100-contact build has no reserve, and its table fills the
+    // way it always did.
+    EXPECT_TRUE(riftShouldStoreContact(RIFT_ADV_CHAT, 99, 100));
+    EXPECT_FALSE(riftShouldStoreContact(RIFT_ADV_CHAT, 100, 100));
+    EXPECT_TRUE(riftShouldStoreContact(RIFT_ADV_CHAT, 150, 0));   // capacity unknown: cap alone
+    EXPECT_FALSE(riftShouldStoreContact(RIFT_ADV_CHAT, 200, 0));
+}
+
+TEST(OriginDecorLen, MeasuresWhatOriginNameStrips) {
+    // The preview panel draws these two halves in two colours, so the boundary has
+    // to be the same one riftOriginName consumes - a length that landed one byte
+    // out would colour a bracket as part of a name, or eat the name's first letter.
+    EXPECT_EQ((size_t) 4, riftOriginDecorLen("(0) #test:"));
+    EXPECT_EQ((size_t) 4, riftOriginDecorLen("(D) Bob:"));
+    EXPECT_EQ((size_t) 5, riftOriginDecorLen("(12) lillemesh:"));
+    EXPECT_EQ((size_t) 3, riftOriginDecorLen("to #test:"));
+}
+
+TEST(OriginDecorLen, IsZeroWhenThereIsNoDecoration) {
+    // Same malformed cases OriginSkipHops refuses: a name that merely starts with a
+    // bracket keeps all of it, because a length into the middle would cut the name.
+    EXPECT_EQ((size_t) 0, riftOriginDecorLen("Public"));
+    EXPECT_EQ((size_t) 0, riftOriginDecorLen("(oops"));
+    EXPECT_EQ((size_t) 0, riftOriginDecorLen("(2)nospace:"));
+    EXPECT_EQ((size_t) 0, riftOriginDecorLen(""));
+    EXPECT_EQ((size_t) 0, riftOriginDecorLen(NULL));
+    // "tomorrow:" begins with the letters of the outgoing marker and is not one.
+    EXPECT_EQ((size_t) 0, riftOriginDecorLen("tomorrow:"));
+}
+
+TEST(OriginDecorLen, AgreesWithOriginName) {
+    // The property that matters: skipping the reported length lands on the name
+    // riftOriginName extracts, up to the trailing colon it also drops.
+    const char* cases[] = { "(0) #test:", "(D) Bob:", "(12) lillemesh:",
+                            "to #test:", "to Bob:", "Public", "(oops" };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char out[64];
+        if (!riftOriginName(cases[i], out, sizeof(out))) continue;
+        const char* rest = cases[i] + riftOriginDecorLen(cases[i]);
+        EXPECT_EQ(0, strncmp(rest, out, strlen(out))) << "for " << cases[i];
+    }
+}
+
 TEST(OriginSkipHops, DropsTheMarkerAndNothingElse) {
     // What COMMS draws now: the marker goes, the name and its colon stay, because
     // the right-hand slot of the row prints the hop count in words instead.

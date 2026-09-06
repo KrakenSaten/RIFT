@@ -164,6 +164,21 @@ public:
   bool     contactsEverRefused() const { return _contacts_refused; }
   uint32_t contactsRefusedAt() const { return _contacts_refused_at; }
 
+#ifdef RIFT_VERSION
+  // Whether the chat reserve is in force right now, and whether it has ever turned
+  // a node away. Two questions again, for the reason the pair above documents: the
+  // first decides what SYSTEM should say, the second is history that stays true
+  // after contacts are deleted and the count drops back under the line.
+  //
+  // The rule is riftShouldStoreContact in ui-rift/RiftLogic.h, which has the tests.
+  // Asked here with the same arguments the advert path passes it, so the row cannot
+  // claim a state the decision does not actually have.
+  // Out of line: the rule lives in ui-rift/RiftLogic.h, and this header is included
+  // far too widely to start pulling that in for one predicate.
+  bool     chatReserveActive() const;
+  bool     chatEverRefused() const { return _chat_refused; }
+#endif
+
   // Resolve a path hash to a node, against every identity this node knows.
   //
   // Lives here rather than in the UI because this is the layer that has both sets.
@@ -207,6 +222,23 @@ public:
   bool riftStatusReq(const ContactInfo& contact, uint32_t& est_timeout);
   bool riftTelemetryReq(const ContactInfo& contact, uint32_t& est_timeout);
   bool riftCliCommand(const ContactInfo& contact, const char* text, uint32_t& est_timeout);
+
+  // ------------------------------------------------- factory reset
+  //
+  // Erase the device back to first boot, for SYSTEM's reset action. The same call
+  // CMD_FACTORY_RESET makes from a phone, and deliberately so: a second way to
+  // erase a device is a second thing that can be wrong about what it erased.
+  //
+  // On ESP32 that is a SPIFFS format plus an NVS erase, so it takes the node's
+  // identity with it and the next boot comes up with a new public key. Every node
+  // that holds us as a contact then holds one that no longer resolves. The
+  // confirmation on SYSTEM says that in those words - a reset that quietly changed
+  // this node's address on the mesh would be the one kind of wrong a confirmation
+  // must never be.
+  //
+  // Returns false only if the format itself failed. The serial interface is down
+  // by then either way, so the caller reboots on both paths: see the handler.
+  bool riftFactoryReset();
 
   // Ask a repeater which regions it will flood for.
   //
@@ -345,6 +377,15 @@ protected:
   // first millisecond after boot would have read as "never happened".
   bool     _contacts_refused = false;
   uint32_t _contacts_refused_at = 0;
+#ifdef RIFT_VERSION
+  // mutable because shouldAutoAddContactType() is const and is the only place that
+  // can see the refusal happen. The alternative was to drop the const, which is a
+  // signature MeshCore owns; recording that something was turned away does not make
+  // the decision itself any less of a pure question about the table.
+  mutable bool     _chat_refused = false;
+  mutable uint32_t _chat_refused_logged = 0;
+  mutable bool     _chat_ever_logged = false;
+#endif
   void onContactOverwrite(const uint8_t* pub_key) override;
   bool onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_t in_path_len, uint8_t* out_path, uint8_t out_path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;

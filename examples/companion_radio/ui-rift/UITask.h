@@ -45,6 +45,11 @@ struct RiftPalette {
 extern RiftPalette rift_pal;
 extern bool rift_day_mode;
 
+// Display offset from UTC in quarter hours; 0 is UTC. Display only - the RTC and
+// every stored timestamp stay UTC, because mesh clock consensus is defined against
+// other nodes' advert timestamps and those are UTC.
+extern int rift_tz_quarters;
+
 // Keeps the display up regardless of the auto-off timer. A charger that does not
 // enumerate as a USB host reads as battery through isExternalPowered(), so
 // KEEP_DISPLAY_ON_USB cannot see it - this is the switch that needs no detection.
@@ -303,6 +308,9 @@ public:
   void startChannelAdd();
   void startChannelRemove();
   void startChannelScope();
+
+  // Open the set-time field on SYSTEM, from the home screen clock row.
+  void startSetTime();
   // last key code the UI saw - reading this on screen is what identified the
   // keyboard co-processor repeating held keys
   int lastKeyCode() const { return _last_key; }

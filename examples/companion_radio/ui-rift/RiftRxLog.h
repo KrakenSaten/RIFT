@@ -34,6 +34,13 @@
 // forty-eight bytes to the whole message: the ring is about ten kilobytes either
 // way, and a message the screen can show in full is worth more than another
 // thirty rows of adverts nobody scrolls back to.
+// The activity counters the home screen's strip is drawn from. Declared here and
+// defined below, so RiftRxLog::add() can feed them: the strip used to be derived by
+// walking this ring, and deriving it is what made it wrong once the ring turned over.
+// Feeding it from inside add() rather than beside the one call site means a second
+// call site cannot be added that forgets to.
+inline RiftActivity& riftActivity();
+
 #define RIFT_RX_LOG_LINES 64
 #define RIFT_AIR_TEXT_MAX 144   // MAX_TEXT_LEN is 160; a channel message also carries "sender: "
 #define RIFT_AIR_SCOPE_MAX 12
@@ -165,6 +172,11 @@ struct RiftRxLog {
   }
 
   void add(float snr, float rssi, uint8_t header, uint8_t path_len, int len) {
+    // Counted before the entry is filled in, and counted whatever happens to the
+    // entry afterwards: this number is the twenty-minute strip, and it must not
+    // depend on the row surviving in the ring.
+    riftActivityNote(&riftActivity(), (uint32_t) millis(), riftHeaderPayloadType(header));
+
     Entry* e = alloc(RIFT_AIR_RX, header, path_len, len);
     // clamped rather than cast: a bad reading should not wrap into a plausible one
     int s4 = (int) (snr * 4.0f);
@@ -195,6 +207,13 @@ struct RiftRxLog {
 inline RiftRxLog& riftRxLog() {
   static RiftRxLog log;
   return log;
+}
+
+// Same reasoning as riftRxLog(): the packet path writes it, the UI reads it, and a
+// function-local static in an inline function is one object across both.
+inline RiftActivity& riftActivity() {
+  static RiftActivity act;
+  return act;
 }
 
 // Tropo state lives beside the RX log because it is derived from the same thing:

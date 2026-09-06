@@ -259,6 +259,17 @@ struct RiftMsgLog {
   // in a 48-entry log that live conversations need. Called when a channel is deleted
   // from this device; a companion app overwriting a slot behind our back is handled by
   // the fingerprint instead, which is why that had to be the primary mechanism.
+  // Drop everything, without writing anything.
+  //
+  // For the factory reset, and the "without writing" is the whole point: dirty is
+  // cleared rather than left for the flush, so the timer in UITask::loop and the
+  // save in UITask::shutdown both find nothing to do. A log saved after the format
+  // would put the file straight back onto the filesystem that had just erased it.
+  void clearAll() {
+    count = 0;
+    dirty = false;
+  }
+
   int purgeConversation(const RiftConvKey& k) {
     int removed = 0;
     for (int i = 0; i < count; ) {
@@ -1017,6 +1028,21 @@ static void riftStreamFrame() {
 }
 bool rift_screen_always_on = false;
 
+// Display offset from UTC, in quarter hours. See riftLocalFromUtc in RiftLogic.h for
+// why this is display-only and never reaches the RTC: mesh consensus compares this
+// node's clock against other nodes' advert timestamps, which are UTC, so a stored
+// local time would make the node argue with the mesh by exactly this number.
+int rift_tz_quarters = 0;
+
+// Every displayed time goes through this, and every stored one does not. Written as a
+// function rather than the addition it wraps so that the difference between the two
+// is visible at each site: riftLocal(x) is a reading for a person, a bare epoch is
+// data. The one exception is the repeater clock-sync confirmation, which shows what
+// is about to go on the air and says UTC on its face.
+static inline uint32_t riftLocal(uint32_t utc) {
+  return riftLocalFromUtc(utc, rift_tz_quarters);
+}
+
 #ifdef RIFT_RADAR
 // Which radios RADAR sweeps. Three states rather than two switches: with both off
 // the screen has nothing to do, and leaving RADAR already powers everything down -
@@ -1209,6 +1235,15 @@ void riftLoadSettings() {
         }
       }
     }
+
+    // Absent in a file written before this existed, and absent is UTC - which is
+    // what those files meant. Validated rather than trusted: a truncated or
+    // hand-edited byte must not shift every clock on the device by nine hours.
+    {
+      int8_t tz = 0;
+      rift_tz_quarters = 0;
+      if (f.read((uint8_t*) &tz, 1) == 1 && riftTzValid((int) tz)) rift_tz_quarters = (int) tz;
+    }
   }
   f.close();
 
@@ -1289,6 +1324,15 @@ void riftSaveSettings() {
       ok = ok && (f.write((const uint8_t*) sc.at(i).name, RIFT_SCOPE_NAME_MAX)
                     == RIFT_SCOPE_NAME_MAX);
     }
+  }
+
+  // The timezone, appended last for the reason the scope table gives above: the
+  // reader stops when the file runs out, so a file written before this existed
+  // still loads everything ahead of it and simply keeps UTC - which is exactly the
+  // behaviour that file had. No version bump buys anything here.
+  {
+    int8_t tz = (int8_t) rift_tz_quarters;
+    ok = ok && (f.write((const uint8_t*) &tz, 1) == 1);
   }
 
   f.close();
@@ -1520,8 +1564,13 @@ public:
         // state, not an edge case.
         uint32_t clk = the_mesh.getRTCClock()->getCurrentTime();
         if (clk < 1600000000u) riftLogf("clock unset (%u)", (unsigned) clk);
-        else                   riftLogf("clock %02u:%02u", (unsigned) ((clk / 3600u) % 24u),
-                                        (unsigned) ((clk / 60u) % 60u));
+        else {
+          // Local, like every other clock reading on the device. riftLoadSettings
+          // runs in begin(), which is before this poll(), so the offset is known.
+          uint32_t loc = riftLocal(clk);
+          riftLogf("clock %02u:%02u", (unsigned) ((loc / 3600u) % 24u),
+                                      (unsigned) ((loc / 60u) % 60u));
+        }
       }
       _task->gotoHomeScreen();
     }
@@ -1536,9 +1585,14 @@ class RiftMeshScreen : public RiftScreen {
   // Three actions on this screen now, so their hit boxes are an array and the
   // selected one is tracked for the trackball. Discovery stays index 0, which is
   // what Enter does with nothing selected - the behaviour this screen already had.
-  enum HomeBtn { BTN_DISCOVER, BTN_ADVERT_NEAR, BTN_ADVERT_MESH, BTN_COUNT };
-  int _btn_x0[BTN_COUNT] = { 0, 0, 0 };
-  int _btn_x1[BTN_COUNT] = { 0, 0, 0 };
+  // SET is a button like the others so that one rule reaches it - up/down selects,
+  // ENTER presses, a tap does both - but it is drawn on the clock row rather than in
+  // the action strip. A control belongs beside the thing it changes, and the three
+  // above it are all "put something on the air", which setting a clock is not.
+  enum HomeBtn { BTN_DISCOVER, BTN_ADVERT_NEAR, BTN_ADVERT_MESH, BTN_SETTIME, BTN_COUNT };
+  int _btn_x0[BTN_COUNT] = { 0, 0, 0, 0 };
+  int _btn_x1[BTN_COUNT] = { 0, 0, 0, 0 };
+  int _btn_y[BTN_COUNT]  = { 0, 0, 0, 0 };   // two rows now, so touch cannot assume one
   int _btn_sel = BTN_DISCOVER;
 
 public:
@@ -1686,31 +1740,35 @@ public:
     display.setTextSize(1);
     {
       const int GX = 2, GY = 110, GH = 16;   // bars grow upward from y GY+GH
-      enum { K_TALK = 0, K_ADVERT = 1, K_DRIFT = 2, K_COUNT = 3 };
-      uint16_t per_min[20][K_COUNT];
-      memset(per_min, 0, sizeof(per_min));
-      uint32_t now_ms = (uint32_t) millis();
-      RiftRxLog& log = riftRxLog();
-      for (int i = 0; i < log.count; i++) {
-        const RiftRxLog::Entry* e = log.peek(i);
-        if (e == NULL) break;
-        if (e->dir != RIFT_AIR_RX) continue;
-        uint32_t back = (now_ms - e->at_ms) / 60000u;
-        if (back >= 20) continue;
-        uint8_t pt = riftHeaderPayloadType(e->header);
-        int k = (pt == 0x02 || pt == 0x05 || pt == 0x06) ? K_TALK
-              : (pt == 0x04) ? K_ADVERT : K_DRIFT;
-        if (per_min[19 - back][k] < 0xFFFF) per_min[19 - back][k]++;
-      }
-      uint16_t total[20];
+      enum { K_TALK = RIFT_ACT_TALK, K_ADVERT = RIFT_ACT_ADVERT,
+             K_DRIFT = RIFT_ACT_DRIFT, K_COUNT = RIFT_ACT_CLASSES };
+
+      // From the counters, not from the air log. That ring holds 64 entries for both
+      // directions, so it carries twenty minutes only while traffic stays under 3.2
+      // packets a minute - and it was measured exactly full, 62 rx + 2 tx, on a mesh
+      // doing about two. Past that the oldest bars used to lose their evidence to
+      // eviction and shrink, which reads as the mesh having gone quiet in the past.
+      //
+      // Rolled here as well as on the packet path. Nothing arriving is exactly when
+      // the strip has to keep emptying, and a roll that only happened on receive
+      // would freeze the last burst on screen for as long as the silence lasted.
+      RiftActivity& act = riftActivity();
+      riftActivityRoll(&act, (uint32_t) millis());
+
+      uint16_t per_min[RIFT_ACT_MINUTES][K_COUNT];
+      uint16_t total[RIFT_ACT_MINUTES];
       uint16_t peak = 0;
-      for (int i = 0; i < 20; i++) {
-        uint32_t t = (uint32_t) per_min[i][0] + per_min[i][1] + per_min[i][2];
+      for (int i = 0; i < RIFT_ACT_MINUTES; i++) {
+        const uint16_t* bin = riftActivityAt(&act, i);
+        uint32_t t = 0;
+        for (int k = 0; k < K_COUNT; k++) {
+          per_min[i][k] = (bin != NULL) ? bin[k] : 0;
+          t += per_min[i][k];
+        }
         total[i] = (uint16_t) (t > 0xFFFF ? 0xFFFF : t);
         if (total[i] > peak) peak = total[i];
       }
       bool any = peak > 0;
-      if (peak == 0) peak = 1;   // no division by zero; no bars are drawn anyway
 
       // Named for what it measures. This screen has three sources for "did we
       // hear anything": the headline and LAST RX from the mesh's clock, the
@@ -1726,13 +1784,15 @@ public:
       display.drawTextLeftAlign(2, 100, tmp);
 
       display.setColor(rift_pal.rule);
-      for (int i = 0; i < 20; i++) display.fillRect(GX + 12 * i, GY + GH, 8, 1);
+      for (int i = 0; i < RIFT_ACT_MINUTES; i++) display.fillRect(GX + 12 * i, GY + GH, 8, 1);
 
       const uint16_t kcol[K_COUNT] = { rift_pal.ok, riftNameColourAt(4), rift_pal.mid };
-      for (int i = 0; i < 20; i++) {
+      for (int i = 0; i < RIFT_ACT_MINUTES; i++) {
         if (total[i] == 0) continue;
-        int h = 1 + (int) (((long) total[i] * (GH - 1) + peak / 2) / peak);
-        if (h > GH) h = GH;
+        // A fixed ladder, so a bar moves only when its own minute changes. peak is
+        // now only the number in the label; it is no longer the denominator, which
+        // is what used to redraw every bar whenever the busiest minute did.
+        int h = riftActivityHeight(total[i], GH);
 
         // Split h by count, then make sure every class present has a pixel
         // while there are pixels to give, taking them from the largest.
@@ -1757,6 +1817,37 @@ public:
           y0 -= px[k];
           display.setColor(kcol[k]);
           display.fillRect(GX + 12 * i, y0, 8, px[k]);
+        }
+      }
+
+      // The key, in the colours, following the air log footer's idiom: a key is
+      // shorter than a legend, and TALK and ADV are drawn in the exact values
+      // airTypeColour() gives 0x02 and 0x04 - so a colour here and the same colour
+      // one screen down mean the same traffic, and the air log is the detail this
+      // deliberately does not have room for.
+      //
+      // OTHER is mid, which is also the colour of ordinary label text. That is not
+      // a collision to fix: the third class IS "everything the mesh does to keep
+      // itself running", and drawing it in a colour of its own would claim it is a
+      // category somebody chose rather than the remainder.
+      //
+      // On the storage row's line rather than a line of its own, because every y
+      // below the strip is fixed by rift-home-spec.md rows 10-14 and there is no
+      // gap to take. The right half of that line is empty in every state the row
+      // has: its longest form ends near x 200 and this begins at 232. Right-aligned,
+      // so it reads as a key to the thing above it rather than as more of the
+      // sentence beside it.
+      //
+      // Only when there are bars. A key to an empty graph is furniture.
+      if (any) {
+        static const char* KLAB[K_COUNT] = { "TALK", "ADV", "OTHER" };
+        int kw = 0;
+        for (int k = 0; k < K_COUNT; k++) kw += ((int) strlen(KLAB[k]) + 1) * RIFT_CHAR_W;
+        int kx = 316 - kw + RIFT_CHAR_W;   // the last label has no trailing space to pay for
+        for (int k = 0; k < K_COUNT; k++) {
+          display.setColor(kcol[k]);
+          display.drawTextLeftAlign(kx, 136, KLAB[k]);
+          kx += ((int) strlen(KLAB[k]) + 1) * RIFT_CHAR_W;
         }
       }
     }
@@ -1852,6 +1943,7 @@ public:
       labels[BTN_DISCOVER]    = the_mesh.isDiscovering() ? "DISCOVERING..." : "DISCOVER 0-HOP";
       labels[BTN_ADVERT_NEAR] = "ADVERT NEAR";
       labels[BTN_ADVERT_MESH] = "ADVERT MESH";
+      labels[BTN_SETTIME]     = "SET";
 
       int w[BTN_COUNT], total = 0;
       for (int i = 0; i < BTN_COUNT; i++) {
@@ -1865,7 +1957,7 @@ public:
       int bx = 2;
       (void) total;
 
-      for (int i = 0; i < BTN_COUNT; i++) {
+      for (int i = 0; i <= BTN_ADVERT_MESH; i++) {
         bool sel = (i == _btn_sel);
         bool busy = (i == BTN_DISCOVER && the_mesh.isDiscovering());
         // The selected button is filled rather than only outlined: in sunlight the
@@ -1888,6 +1980,7 @@ public:
         display.drawTextCentered(bx + w[i] / 2, DISCOVER_BTN_Y + 3, labels[i]);
         _btn_x0[i] = bx;
         _btn_x1[i] = bx + w[i];
+        _btn_y[i]  = DISCOVER_BTN_Y;
         bx += w[i] + gap;
       }
 
@@ -1899,10 +1992,64 @@ public:
       switch (_btn_sel) {
         case BTN_ADVERT_NEAR: note = "direct RF only - use MESH before a first DM"; break;
         case BTN_ADVERT_MESH: note = "reaches nodes past direct range - more airtime"; break;
+        case BTN_SETTIME:     note = "stored as UTC, shown in the zone on this row"; break;
         default:              note = "asks direct neighbours only"; break;
       }
       display.setColor(rift_pal.mid);
       display.drawTextLeftAlign(2, DISCOVER_BTN_Y + 20, note);
+
+      // ---- the clock row, y 210-224
+      //
+      // In the band rift-home-spec.md kept empty below the note. All three readings
+      // were on SYSTEM, one level down, and all three are things you want at a
+      // glance rather than by navigating: what time this node thinks it is, what day
+      // it thinks it is, and how long it has been up. Uptime especially - it is the
+      // one reading that is true whatever the clock says, and it is what tells you
+      // the device has rebooted since you last looked.
+      //
+      // Labelled UTC, and that label is load-bearing. The clock is set from mesh
+      // consensus and the mesh keeps UTC, while this firmware establishes no
+      // timezone at all - so a reading shown as local time would be a guess dressed
+      // up as a measurement. Two hours off in Norwegian summer reads as a broken
+      // clock; "18:31 UTC" reads as the truth it is.
+      {
+        char up[16];
+        riftFormatDuration((uint32_t) (millis() / 1000u), up, sizeof(up));
+        uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+        char row[64];
+        if (now < 1600000000u) {
+          // The same threshold the set-time field uses to decide whether to prefill.
+          // An unset epoch renders as a perfectly plausible 01:37, which is a reading
+          // somebody would act on.
+          snprintf(row, sizeof(row), "--:-- %s clock not set %s UP %s", RIFT_DOT, RIFT_DOT, up);
+        } else {
+          int cy, cmo, cd, ch, cmi;
+          riftCivilFromEpoch(riftLocal(now), &cy, &cmo, &cd, &ch, &cmi);
+          // The zone is named on the row, not assumed. "20:47" alone is a number
+          // somebody has to already know the meaning of; "20:47 +02:00" is a reading.
+          char zone[12];
+          riftTzShort(rift_tz_quarters, zone, sizeof(zone));
+          snprintf(row, sizeof(row), "%02d:%02d %s %s %04d-%02d-%02d %s UP %s",
+                   ch, cmi, zone, RIFT_DOT, cy, cmo, cd, RIFT_DOT, up);
+        }
+        display.setColor(rift_pal.mid);
+        display.drawTextLeftAlign(2, CLOCK_ROW_Y + 3, row);
+
+        int sw = w[BTN_SETTIME], sx = 316 - sw;
+        bool sel = (_btn_sel == BTN_SETTIME);
+        if (sel) {
+          display.setColor(rift_pal.accent);
+          display.fillRect(sx, CLOCK_ROW_Y, sw, 14);
+        } else {
+          display.setColor(rift_pal.rule);
+          display.drawRect(sx, CLOCK_ROW_Y, sw, 14);
+        }
+        display.setColor(sel ? rift_pal.on_accent : rift_pal.fg);
+        display.drawTextCentered(sx + sw / 2, CLOCK_ROW_Y + 3, labels[BTN_SETTIME]);
+        _btn_x0[BTN_SETTIME] = sx;
+        _btn_x1[BTN_SETTIME] = sx + sw;
+        _btn_y[BTN_SETTIME]  = CLOCK_ROW_Y;
+      }
     }
 
     renderNavBar(display, RIFT_NAV_MESH);
@@ -1915,6 +2062,8 @@ public:
   // Up from 198: the fourteen pixels above the nav bar are empty now, and the
   // bottom third of the screen has air again (September design round, 8.2).
   static const int DISCOVER_BTN_Y = 180;
+  // Below the note row (200, eight pixels tall) and above the nav rule at 226.
+  static const int CLOCK_ROW_Y = 210;
 
   // Left and right already move between screens, so the row of buttons is walked
   // with up and down. They did nothing here before.
@@ -1928,9 +2077,11 @@ public:
   }
 
   bool handleTouch(int x, int y) override {
-    if (y < DISCOVER_BTN_Y - 2 || y > DISCOVER_BTN_Y + 14) return false;
     for (int i = 0; i < BTN_COUNT; i++) {
       if (_btn_x0[i] <= 0) continue;                     // not drawn yet
+      // Per button, because SET sits on the clock row: one band for all of them
+      // would either make it untappable or make the strip above it tappable.
+      if (y < _btn_y[i] - 2 || y > _btn_y[i] + 14) continue;
       if (x < _btn_x0[i] || x > _btn_x1[i]) continue;
       _btn_sel = i;      // a tap also moves the selection, so Enter repeats it
       press(i);
@@ -1951,6 +2102,12 @@ public:
         _task->showAlert(ok ? "Advert sent (direct)" : "Advert failed", 1200);
         break;
       }
+      case BTN_SETTIME:
+        // Straight into the field on SYSTEM, prefilled with the current reading -
+        // the same flow the list row opens, reached from where the clock is shown.
+        _task->startSetTime();
+        break;
+
       case BTN_ADVERT_MESH: {
         // reaches nodes beyond direct RF range, which is what they need before
         // they can decrypt a DM from us
@@ -2014,7 +2171,7 @@ class RiftSystemScreen : public RiftScreen {
   // it leaves the printable keys free for the text fields.
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
               CH_DELETE, CH_DELETE_CONFIRM, LOG, SET_TIME, RXLOG,
-              SCOPE_PICK, SCOPE_ENTRY, DIAG };
+              SCOPE_PICK, SCOPE_ENTRY, DIAG, RESET_CONFIRM, TZ_ENTRY };
   // The two advert actions used to head this list. They live on the home screen
   // now, as buttons beside DISCOVER - that screen is the one showing how many
   // nodes are stored and heard, so it is where you already are when the answer
@@ -2023,8 +2180,8 @@ class RiftSystemScreen : public RiftScreen {
   // here and are entered from there. Moved rather than copied: the same action
   // reachable from two places is two code paths that drift.
   enum Item { IT_NAME, IT_CHANNEL, IT_DELCHANNEL, IT_SCOPE,
-              IT_PATHMODE, IT_SCREEN, IT_SOUND, IT_DAYMODE, IT_SETTIME, IT_DIAG,
-              IT_LOG, IT_RXLOG, IT_COUNT };
+              IT_PATHMODE, IT_SCREEN, IT_SOUND, IT_DAYMODE, IT_SETTIME, IT_TIMEZONE,
+              IT_DIAG, IT_LOG, IT_RXLOG, IT_RESET, IT_COUNT };
   bool _return_to_comms = false;   // a channel flow entered from COMMS goes back there
 
   int _log_scroll = 0;   // 0 = pinned to the newest line
@@ -2054,8 +2211,8 @@ class RiftSystemScreen : public RiftScreen {
   static const char* itemLabel(int i) {
     static const char* LABEL[IT_COUNT] = {
       "Edit node name", "Add channel", "Delete channel", "Channel scope",
-      "Path hash size", "Screen", "Alert sound", "Display", "Set time",
-      "Diagnostics", "View log", "View air log",
+      "Path hash size", "Screen", "Alert sound", "Display", "Set time", "Time zone",
+      "Diagnostics", "View log", "View air log", "Factory reset",
     };
     return (i >= 0 && i < IT_COUNT) ? LABEL[i] : "";
   }
@@ -2065,6 +2222,15 @@ class RiftSystemScreen : public RiftScreen {
     switch (i) {
       case IT_NAME:
         StrHelper::strncpy(buf, the_mesh.getNodeName(), len < 21 ? len : 21);
+        break;
+      case IT_RESET:
+        // The two counts this reset will take, rather than a word like "all". A
+        // number is what makes a warning checkable before it is acted on, and the
+        // delete-channel confirmation already counts stored messages for the same
+        // reason. Contacts covers repeaters and room servers: MeshCore stores all
+        // three in one table, distinguished only by their advert type.
+        snprintf(buf, len, "%d contacts, %d msgs",
+                 the_mesh.getNumContacts(), msg_log.count);
         break;
       case IT_RXLOG:
         // Both totals, so the split is visible without opening it. A node that has
@@ -2080,11 +2246,14 @@ class RiftSystemScreen : public RiftScreen {
           StrHelper::strncpy(buf, "--:--", len);
         } else {
           int y, mo, d, h, mi;
-          riftCivilFromEpoch(now, &y, &mo, &d, &h, &mi);
+          riftCivilFromEpoch(riftLocal(now), &y, &mo, &d, &h, &mi);
           snprintf(buf, len, "%02d:%02d", h, mi);
         }
         break;
       }
+      case IT_TIMEZONE:
+        riftTzFormat(rift_tz_quarters, buf, len);
+        break;
       case IT_LOG:
         snprintf(buf, len, "%d line%s", riftLog().count, riftLog().count == 1 ? "" : "s");
         break;
@@ -2133,6 +2302,9 @@ public:
   void beginAddChannel(bool from_comms)    { _return_to_comms = from_comms; activate(IT_CHANNEL); }
   void beginDeleteChannel(bool from_comms) { _return_to_comms = from_comms; activate(IT_DELCHANNEL); }
   void beginChannelScope(bool from_comms)  { _return_to_comms = from_comms; activate(IT_SCOPE); }
+  // Reached from the home screen clock row. No from_comms: BACKSPACE out of the
+  // field lands on the SYSTEM list, which is where the same action lives.
+  void beginSetTime()                      { _return_to_comms = false; activate(IT_SETTIME); }
 
   // For the screen dump: put one of the sub-screens up as if it had been chosen
   // from the list, so a capture can be taken of it without a hand on the device.
@@ -2230,11 +2402,31 @@ private:
         _mode = CH_DELETE;
         break;
 
+      case IT_RESET:
+        // KEEP, every time. Not remembered between visits: the safe button being
+        // where it was last left is a property somebody could come to rely on, and
+        // this is the one list where that reliance is expensive.
+        _confirm_sel = 0;
+        _mode = RESET_CONFIRM;
+        break;
+
       case IT_SCOPE:
         collectScopable();
         _del_sel = 0;
         _mode = SCOPE_PICK;
         break;
+
+      case IT_TIMEZONE: {
+        // Prefilled with what is set, in the shape the parser accepts, so the format
+        // is shown by example rather than only described. "UTC" is not that shape -
+        // at zero the field opens on "+00:00", which can be edited into anything.
+        char initial[12];
+        if (rift_tz_quarters == 0) StrHelper::strncpy(initial, "+00:00", sizeof(initial));
+        else                       riftTzShort(rift_tz_quarters, initial, sizeof(initial));
+        _edit.begin(initial, 6);
+        _mode = TZ_ENTRY;
+        break;
+      }
 
       case IT_LOG:
         _log_scroll = 0;   // open at the newest, which is what you came to see
@@ -2260,8 +2452,10 @@ private:
         if (now < 1600000000u) {
           StrHelper::strncpy(initial, "2026-01-01 12:00", sizeof(initial));
         } else {
+          // Local at both ends: the field's own hint has said "local time" since it
+          // was written, and until there was a timezone that hint was not true.
           int y, mo, d, h, mi;
-          riftCivilFromEpoch(now, &y, &mo, &d, &h, &mi);
+          riftCivilFromEpoch(riftLocal(now), &y, &mo, &d, &h, &mi);
           snprintf(initial, sizeof(initial), "%04d-%02d-%02d %02d:%02d", y, mo, d, h, mi);
         }
         _edit.begin(initial, 16);
@@ -2575,6 +2769,94 @@ private:
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(10, 150, "RIGHT then ENTER deletes  BACKSPACE: cancel");
     return 1000;
+  }
+
+  // The same warning shape as DELETE CHANNEL, because it is the same kind of
+  // moment and a second idiom for "you are about to lose something" would only
+  // make both of them weaker: a box over the list, an accent frame around lines
+  // that begin "! CANNOT BE UNDONE", KEEP selected on entry so a tap read as
+  // ENTER cannot fire, and RIGHT before ENTER to reach the other button.
+  //
+  // Taller than that one because it has more to be honest about. Three of these
+  // six lines are about the identity, and they are the reason this screen exists
+  // rather than a one-line "are you sure": a reset that erases contacts is a
+  // nuisance, and one that changes the node's public key is a different event -
+  // every node out there keeps a contact for us that will no longer resolve, and
+  // no amount of re-adding channels here repairs that. Somebody who knows only
+  // the first meaning would press ENTER; the wording is what makes the second
+  // one visible before the press rather than after it.
+  int renderResetConfirm(DisplayDriver& display) {
+    display.setTextSize(1);
+
+    const int x = 6, y = 40, w = 308, h = 152;
+    display.setColor(rift_pal.bg);
+    display.fillRect(x, y, w, h);
+    display.setColor(rift_pal.rule);
+    display.drawRect(x, y, w, h);
+    display.drawRect(x + 1, y + 1, w - 2, h - 2);
+
+    display.setColor(rift_pal.fg);
+    display.drawTextLeftAlign(10, 46, "FACTORY RESET");
+
+    display.setColor(rift_pal.accent);
+    display.drawRect(10, 60, 300, 84);
+    display.setColor(rift_pal.fg);
+    display.drawTextLeftAlign(14, 64, "! CANNOT BE UNDONE");
+
+    // Counted, not described. "all your data" is a phrase; "293 contacts" is a
+    // number the reader can check against what they think is on the device.
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "Erases %d contacts, %d messages, all channels,",
+             the_mesh.getNumContacts(), msg_log.count);
+    display.drawTextLeftAlign(14, 76, tmp);
+    display.drawTextLeftAlign(14, 88, "repeaters, room servers and the node name.");
+    display.drawTextLeftAlign(14, 104, "The identity goes too. This node comes back");
+    display.drawTextLeftAlign(14, 116, "with a new public key, and every node that");
+    display.drawTextLeftAlign(14, 128, "holds you as a contact must add you again.");
+
+    // KEEP [10,152,32,14], RESET [48,152,40,14] - the geometry DELETE CHANNEL uses,
+    // so the hand that has cancelled one of these knows where the safe button is.
+    for (int b = 0; b < 2; b++) {
+      int bx = b == 0 ? 10 : 48, bw = b == 0 ? 32 : 40;
+      const char* label = b == 0 ? "KEEP" : "RESET";
+      if (_confirm_sel == b) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(bx, 152, bw, 14);
+        display.setColor(rift_pal.on_accent);
+      } else {
+        display.setColor(rift_pal.rule);
+        display.drawRect(bx, 152, bw, 14);
+        display.setColor(rift_pal.fg);
+      }
+      display.drawTextLeftAlign(bx + 4, 155, label);
+    }
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(10, 172, "RIGHT then ENTER erases  BACKSPACE: cancel");
+    return 1000;
+  }
+
+  // Erase, then restart. Nothing is drawn afterwards: the device is gone by the
+  // time this returns, or it failed and said so.
+  //
+  // The order matters and is not obvious. The message log is emptied in RAM
+  // first, which clears its dirty flag - so neither the flush timer nor
+  // UITask::shutdown writes /rift_msgs.dat back onto the filesystem that was
+  // just formatted. Getting this backwards would leave the one file RIFT owns
+  // as the sole survivor of a factory reset.
+  void fireFactoryReset() {
+    riftLogf("factory reset: %d contacts, %d msgs",
+             the_mesh.getNumContacts(), msg_log.count);
+    msg_log.clearAll();
+
+    if (!the_mesh.riftFactoryReset()) {
+      // Nothing was erased, and the serial link is down regardless - riftFactoryReset
+      // takes it down before it tries. A reboot is the only way back to a working
+      // device, so this says what happened and then does that anyway rather than
+      // leaving a half-connected node on a screen that cannot explain itself.
+      riftLogf("factory reset FAILED - format refused");
+      _task->showAlert("Reset failed - rebooting", 2000);
+    }
+    _task->shutdown(true);
   }
 
   int renderShowKey(DisplayDriver& display) {
@@ -3035,6 +3317,28 @@ private:
     return 1000;
   }
 
+  int renderTimeZone(DisplayDriver& display) {
+    renderHeading(display, "TIME ZONE");
+    display.setTextSize(1);
+
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 34, "+HH:MM from UTC   e.g. +02:00");
+
+    _edit.render(display, 4, 62, display.width() - 8);
+
+    // Both of these are facts somebody will otherwise learn by being surprised. The
+    // first: this shifts what is shown and nothing else, so a log carried to another
+    // machine still means what it says. The second: there is no daylight saving here
+    // and there cannot be, so this is a number to come back to in spring.
+    display.setColor(UIColor::secondary_txt);
+    display.drawTextLeftAlign(4, 94, "Shown only - stored times stay UTC");
+    display.drawTextLeftAlign(4, 106, "No daylight saving - set it again in spring");
+    display.drawTextLeftAlign(4, 126, "ENTER set   BACKSPACE delete / back");
+
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
+  }
+
   int renderEditName(DisplayDriver& display) {
     renderHeading(display, "NODE NAME");
     display.setTextSize(1);
@@ -3080,8 +3384,12 @@ public:
         // the warning box sits on the list it was raised from
         renderList(display);
         return renderDeleteConfirm(display);
+      case RESET_CONFIRM:
+        renderList(display);
+        return renderResetConfirm(display);
       case LOG:            return renderLog(display);
       case SET_TIME:       return renderSetTime(display);
+      case TZ_ENTRY:       return renderTimeZone(display);
       case RXLOG:          return renderRxLog(display);
       default: break;
     }
@@ -3156,8 +3464,24 @@ public:
       addRow(ROW_GROUP, -1, "ACTIONS");
       for (int i = 0; i < IT_COUNT; i++) {
         if (i == IT_CHANNEL || i == IT_DELCHANNEL || i == IT_SCOPE) continue;   // in COMMS
+        if (i == IT_RESET) continue;                                            // its own group, below
         Row* r = addRow(ROW_ACTION, i, itemLabel(i));
         itemValue(i, tmp, sizeof(tmp));
+        setValue(r, tmp, rift_pal.mid);
+      }
+
+      // ---- RESET: alone, under a heading of its own, at the foot of the list.
+      //
+      // Not a row in ACTIONS. The cursor wraps and this list is scrolled by a
+      // trackball, so a row that erases the device sitting between "Set time" and
+      // "Diagnostics" is one overshoot away from being selected by somebody
+      // adjusting the clock. A heading is a stop sign the eye reads before the
+      // hand arrives, and the position - last, after the read-only rows have
+      // already been passed - costs a deliberate scroll to reach.
+      addRow(ROW_GROUP, -1, "RESET");
+      {
+        Row* r = addRow(ROW_ACTION, IT_RESET, itemLabel(IT_RESET));
+        itemValue(IT_RESET, tmp, sizeof(tmp));
         setValue(r, tmp, rift_pal.mid);
       }
       if (!selectable(_sel)) { _sel = 0; moveSel(1, true); }
@@ -3241,6 +3565,7 @@ public:
       // is often late" - see RiftClock.h - and the row that says whether the
       // correction is doing its job.
       uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+      uint32_t now_local = riftLocal(now);
       int32_t median = 0; int agree = 0;
       int n = riftClockConsensus(&riftClockState(), (uint32_t) millis(), &median, &agree);
       char off[12];
@@ -3248,12 +3573,14 @@ public:
       if (now < 1600000000u) {
         addReading("CLOCK", "not set", rift_pal.accent);
       } else if (n > 0) {
-        snprintf(tmp, sizeof(tmp), "%02u:%02u %s mesh %s (%d)", (unsigned) ((now / 3600u) % 24u),
-                 (unsigned) ((now / 60u) % 60u), RIFT_DOT, off, n);
+        snprintf(tmp, sizeof(tmp), "%02u:%02u %s mesh %s (%d)",
+                 (unsigned) ((now_local / 3600u) % 24u),
+                 (unsigned) ((now_local / 60u) % 60u), RIFT_DOT, off, n);
         addReading("CLOCK", tmp, riftClockShouldStep(agree, median) ? rift_pal.accent : rift_pal.fg);
       } else {
-        snprintf(tmp, sizeof(tmp), "%02u:%02u %s mesh ?", (unsigned) ((now / 3600u) % 24u),
-                 (unsigned) ((now / 60u) % 60u), RIFT_DOT);
+        snprintf(tmp, sizeof(tmp), "%02u:%02u %s mesh ?",
+                 (unsigned) ((now_local / 3600u) % 24u),
+                 (unsigned) ((now_local / 60u) % 60u), RIFT_DOT);
         addReading("CLOCK", tmp, rift_pal.fg);
       }
       RiftClockSync& cs = riftClockState();
@@ -3293,8 +3620,16 @@ public:
       // does not have - so this row and its accent are the only way to say it.
       int used = the_mesh.getNumContacts(), cap = the_mesh.getContactsCapacity();
       bool full = the_mesh.contactsFullNow();
+      // The chat reserve is a third state and belongs here rather than in a row of
+      // its own: from where the user is standing, "why has this stopped picking up
+      // new nodes" has one answer at a time, and it is either the table being full
+      // or the reserve holding the rest back. Not accent - the reserve is the table
+      // doing what it was configured to do, and colouring it as a fault would be the
+      // second time this screen cried wolf about a working device.
       if (full)                                  snprintf(tmp, sizeof(tmp), "%d/%d FULL", used, cap);
+      else if (the_mesh.chatReserveActive())     snprintf(tmp, sizeof(tmp), "%d/%d repeaters only", used, cap);
       else if (the_mesh.contactsEverRefused())   snprintf(tmp, sizeof(tmp), "%d/%d was full", used, cap);
+      else if (the_mesh.chatEverRefused())       snprintf(tmp, sizeof(tmp), "%d/%d was capped", used, cap);
       else                                       snprintf(tmp, sizeof(tmp), "%d/%d", used, cap);
       addReading("CONTACTS", tmp, full ? rift_pal.accent : rift_pal.fg);
     }
@@ -3656,8 +3991,10 @@ public:
         // earlier than the current one, which is right for an automatic sync and
         // wrong here: correcting a clock that is running ahead is the main reason
         // to type one in by hand.
-        the_mesh.getRTCClock()->setCurrentTime(epoch);
-        riftLogf("clock set to %s", _edit.buf);
+        // Typed local, stored UTC. The RTC is what mesh consensus compares against
+        // other nodes' adverts, so it can only ever hold UTC.
+        the_mesh.getRTCClock()->setCurrentTime(riftUtcFromLocal(epoch, rift_tz_quarters));
+        riftLogf("clock set to %s local", _edit.buf);
         _task->showAlert("Clock set", 1500);
         _mode = MENU;
         return true;
@@ -3667,6 +4004,31 @@ public:
       // trackball nudge mid-entry used to discard the half-typed time.
       if (c == RIFT_KEY_BACK || c == KEY_CANCEL) _mode = MENU;
       return true;
+    }
+
+    if (_mode == TZ_ENTRY) {
+      if (c == KEY_ENTER) {
+        int q = 0;
+        if (!riftTzParse(_edit.buf, &q)) {
+          // Names the rule that was broken rather than saying "invalid": a quarter
+          // hour is the one constraint nobody guesses.
+          _task->showAlert("Need +HH:MM, minutes 00/15/30/45", 2200);
+          return true;
+        }
+        rift_tz_quarters = q;
+        riftSaveSettings();
+        char shown[16];
+        riftTzFormat(q, shown, sizeof(shown));
+        riftLogf("timezone %s", shown);
+        char msg[32];
+        snprintf(msg, sizeof(msg), "Times shown %s", shown);
+        _task->showAlert(msg, 1600);
+        _mode = MENU;
+        return true;
+      }
+      if (_edit.handleKey(c)) return true;
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) _mode = MENU;
+      return true;   // no stray key navigates away mid-edit
     }
 
     if (_mode == DIAG) {
@@ -3703,6 +4065,21 @@ public:
       if (c == KEY_LEFT)  { _log_scroll += 14; return true; }
       if (c == KEY_RIGHT) { _log_scroll = _log_scroll > 14 ? _log_scroll - 14 : 0; return true; }
       _mode = MENU;
+      return true;
+    }
+
+    if (_mode == RESET_CONFIRM) {
+      // Deliberately the same four keys as the delete confirmation, in the same
+      // roles. Backspace and anything unrecognised back out; only ENTER on the
+      // right-hand button fires, which takes two presses from where this opens.
+      if (c == KEY_LEFT)  { _confirm_sel = 0; return true; }
+      if (c == KEY_RIGHT) { _confirm_sel = 1; return true; }
+      if (c == KEY_ENTER) {
+        if (_confirm_sel == 0) { _mode = MENU; return true; }
+        fireFactoryReset();   // does not return
+        return true;
+      }
+      _mode = MENU;   // backspace, or any other key: nothing is erased
       return true;
     }
 
@@ -4207,7 +4584,7 @@ class RiftConstellationScreen : public RiftScreen {
         char detail[48];
         if (clk >= 1600000000u && p->recv_timestamp >= 1600000000u) {
           int hh, mm;
-          riftCivilFromEpoch(p->recv_timestamp, NULL, NULL, NULL, &hh, &mm);
+          riftCivilFromEpoch(riftLocal(p->recv_timestamp), NULL, NULL, NULL, &hh, &mm);
           snprintf(detail, sizeof(detail), "%s %s %02d:%02d", type, RIFT_DOT, hh, mm);
         } else {
           StrHelper::strncpy(detail, type, sizeof(detail));   // no invented time
@@ -5502,6 +5879,100 @@ public:
 
 #endif   // RIFT_RADAR
 
+// ---- who a row belongs to, as a colour -------------------------------------
+//
+// Two screens draw the same message log, and until now only one of them coloured
+// it. These are the pieces they had to stop disagreeing about.
+
+// The sender named at the head of a channel message, resolved against the contact
+// book wherever the split is ambiguous.
+//
+// A node whose own name contains ": " sends "Ops: North: hello", and the first
+// delimiter reads that as Ops saying "North: hello". riftChannelSenderNth offers
+// the alternatives; this takes the first that names a contact we have actually
+// heard an advert from, and falls back to the first delimiter for a stranger.
+//
+// A free function because there are two readers now. It was a COMMS member while
+// COMMS was the only screen that split a sender out, and leaving it there would
+// have let the preview panel resolve "Ops: North: hello" to a different person
+// than the history does - the same message naming two senders on one device.
+static int riftSenderSplit(const char* text, char* out, int out_sz) {
+  int first = riftChannelSenderNth(text, 0, out, out_sz);
+  if (first <= 0) return 0;
+  if (riftChannelSenderNth(text, 1, NULL, 0) <= 0) return first;   // unambiguous
+
+  for (int nth = 0; nth < 3; nth++) {
+    char cand[RIFT_SENDER_MAX];
+    int skip = riftChannelSenderNth(text, nth, cand, sizeof(cand));
+    if (skip <= 0) break;
+    ContactInfo* known = the_mesh.searchContactsByPrefix(cand);
+    if (known != NULL && strcmp(known->name, cand) == 0) {
+      if (out != NULL && out_sz > 0) {
+        memcpy(out, cand, (size_t) (out_sz < (int) sizeof(cand) ? out_sz : (int) sizeof(cand)));
+        out[out_sz - 1] = 0;
+      }
+      return skip;
+    }
+  }
+  return first;   // nobody we know: the first delimiter is the best guess
+}
+
+// A channel slot by name, or -1.
+//
+// Only reached for a log entry with no conversation key, which since the v2 file
+// format means one loaded from a v1 file - so the cost of walking the table is
+// paid on legacy entries rather than on every row. getChannel() is a struct copy
+// out of RAM, not a read from flash.
+static int riftChannelSlotByName(const char* name) {
+  if (name == NULL || name[0] == 0) return -1;
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails ch;
+    if (!the_mesh.getChannel(i, ch) || ch.name[0] == 0) continue;
+    if (strcmp(ch.name, name) == 0) return i;
+  }
+  return -1;
+}
+
+// The identity colour for a log entry: the channel's colour for a channel message,
+// the sender's own colour otherwise, and RIFT_CHAN_COL_NONE when there is no name
+// left to hash. The caller picks the grey to fall back to, because the history and
+// the preview do not use the same one.
+//
+// Keyed on the conversation rather than on the origin string, which is what
+// design/channel-colours.md said to do "the next time that format changes for
+// another reason". It has: the entry gained a RiftConvKey, so the slot is already
+// recorded and the name match is no longer the only thing available. That retires
+// both limits the note accepted - a contact named the same as a channel no longer
+// borrows the channel's colour, and a channel name longer than the old 20-byte tab
+// cache is coloured rather than dropped to grey.
+//
+// The hash fallback under a channel is deliberate and predates this: slot 0 and
+// anything past the fourth have no assigned colour, and the history has always
+// hashed the name there rather than going grey. Public is therefore coloured, by
+// its name, on both screens - which is not what channel-colours.md intends for it,
+// but it is what the device has shown since the colours were built, and matching
+// the two screens is this change; deciding Public's colour is not.
+static uint16_t riftEntryColour(const RiftMsgLog::Entry* p) {
+  if (p == NULL) return RIFT_CHAN_COL_NONE;
+
+  if (p->conv.kind == RIFT_CONV_CHANNEL) {
+    uint16_t c = riftChannelColour(p->conv.channel_idx);
+    if (c != RIFT_CHAN_COL_NONE) return c;
+  }
+
+  char name[64];
+  if (!riftOriginName(p->origin, name, sizeof(name))) return RIFT_CHAN_COL_NONE;
+
+  if (p->conv.kind == RIFT_CONV_UNKNOWN) {
+    int slot = riftChannelSlotByName(name);
+    if (slot >= 0) {
+      uint16_t c = riftChannelColour((uint8_t) slot);
+      if (c != RIFT_CHAN_COL_NONE) return c;
+    }
+  }
+  return riftNameColour(name);
+}
+
 // How many messages the popup lists. Two rows each at RIFT_LINE_H in the 154px
 // between the header and the hint row is six, with 10px to spare.
 #define RIFT_PREVIEW_ROWS  6
@@ -5561,23 +6032,90 @@ public:
       auto p = msg_log.peek(back);
       if (p == NULL) break;
 
+      // The sender is split off the RAW text, before translation, for the reason
+      // COMMS records at the same call: the translator emits 0x01/0x02 for o-slash
+      // and 0x03..0x1B for mapped emoji, and the split refuses any byte under 32 in
+      // a name - so "Bjorn: hei" split after translation finds no sender at all.
+      // Incoming channel rows only. A direct message carries no such prefix, and
+      // taking the first word off "hei: noe" would name someone who never spoke.
+      char raw_sender[RIFT_SENDER_MAX];
+      const char* raw_body = p->msg;
+      bool have_sender = false;
+      if (!p->outgoing && p->conv.kind == RIFT_CONV_CHANNEL) {
+        int skip = riftSenderSplit(p->msg, raw_sender, sizeof(raw_sender));
+        if (skip > 0) { raw_body = p->msg + skip; have_sender = true; }
+      }
+
+      // The decoration is kept and translated separately, so the name can be
+      // coloured without the hop count in front of it taking the same colour.
+      // riftOriginSkipHops says why the marker is still here at all: this panel has
+      // no right-hand slot to move it to, the way the history moved it off the name.
+      int decor = (int) riftOriginDecorLen(p->origin);
       char filtered_origin[sizeof(p->origin)];
-      riftTranslateUTF8(filtered_origin, p->origin, sizeof(filtered_origin));
+      riftTranslateUTF8(filtered_origin, p->origin + decor, sizeof(filtered_origin));
       char filtered_msg[sizeof(p->msg)];
-      riftTranslateUTF8(filtered_msg, p->msg, sizeof(filtered_msg));
+      riftTranslateUTF8(filtered_msg, raw_body, sizeof(filtered_msg));
 
       // same sender line as COMMS: time, then the origin, ellipsized rather than
       // hard-cut so a long name reads as truncated instead of as a shorter name
       char tbuf[8];
-      sprintf(tbuf, "%02d:%02d", (int) ((p->timestamp / 3600) % 24),
-                                 (int) ((p->timestamp / 60) % 60));
+      uint32_t tloc = riftLocal(p->timestamp);
+      sprintf(tbuf, "%02d:%02d", (int) ((tloc / 3600) % 24), (int) ((tloc / 60) % 60));
       display.setColor(rift_pal.dim);
       display.drawTextLeftAlign(x + 6, row_y, tbuf);
-      display.setColor(rift_pal.mid);
-      display.drawTextEllipsized(x + 42, row_y, inner - 36, filtered_origin);
 
-      display.setColor(rift_pal.fg);
-      display.drawTextEllipsized(x + 6, row_y + RIFT_LINE_H, inner, filtered_msg);
+      // The name in its conversation's own colour, which is the whole of what this
+      // panel was missing. Every row was mid, so six messages from six places read
+      // as one block, and the colour that tells channels apart in COMMS stopped at
+      // the popup's edge - the one screen where the reader has no tab strip to
+      // identify a conversation by. Same helper as the history, so a channel is the
+      // colour of its tab and a person is the colour of their name there.
+      int name_x = x + 42, name_w = inner - 36;
+      if (decor > 0) {
+        // Drawn from the raw origin: the decoration newMsg writes is ASCII, and the
+        // longest of them is "(63) ".
+        char lead[8];
+        int n = decor < (int) sizeof(lead) - 1 ? decor : (int) sizeof(lead) - 1;
+        memcpy(lead, p->origin, (size_t) n);
+        lead[n] = 0;
+        display.setColor(rift_pal.dim);
+        display.drawTextLeftAlign(name_x, row_y, lead);
+        name_x += n * RIFT_CHAR_W;
+        name_w -= n * RIFT_CHAR_W;
+      }
+      uint16_t id_col = riftEntryColour(p);
+      display.setColor(id_col != RIFT_CHAN_COL_NONE ? id_col : rift_pal.mid);
+      display.drawTextEllipsized(name_x, row_y, name_w, filtered_origin);
+
+      // On a channel row the name above is the channel, so the person who spoke is
+      // still at the head of the body - and gets their own colour there rather than
+      // being lifted onto the line above. Lifting is what COMMS does, because its
+      // tab strip is already naming the channel; here that would trade one identity
+      // for the other and the row could no longer say where the message came from.
+      //
+      // Hashed over the raw bytes, which is what the history hashes, so the two
+      // agree on a person's colour without either knowing about the other.
+      int body_x = x + 6, body_w = inner;
+      if (have_sender) {
+        char sender[RIFT_SENDER_MAX * 2];
+        riftTranslateUTF8(sender, raw_sender, sizeof(sender));
+        char lead[sizeof(sender) + 2];
+        snprintf(lead, sizeof(lead), "%s:", sender);
+        uint16_t sc = riftNameColour(raw_sender);
+        display.setColor(sc != RIFT_CHAN_COL_NONE ? sc : rift_pal.mid);
+        display.drawTextEllipsized(body_x, row_y + RIFT_LINE_H, body_w, lead);
+        // One cell past the colon, which is the space riftChannelSender consumed
+        // when it reported where the body starts. Clamped, so a name wide enough to
+        // fill the row leaves the body nothing rather than a negative width.
+        int used = ((int) strlen(lead) + 1) * RIFT_CHAR_W;
+        if (used > body_w) used = body_w;
+        body_x += used;
+        body_w -= used;
+      }
+      if (body_w > 0) {
+        display.setColor(rift_pal.fg);
+        display.drawTextEllipsized(body_x, row_y + RIFT_LINE_H, body_w, filtered_msg);
+      }
 
       row_y += RIFT_LINE_H * 2;
       shown++;
@@ -6622,31 +7160,6 @@ public:
   bool acceptsText() const { return !_picking; }
 
 
-  // A history entry's channel, as a colour. Channel messages carry the channel
-  // name as their origin - MeshCore prepends the sender to the text itself - so
-  // the tab cache, which already maps name to slot, is the whole lookup and no
-  // new field is needed in the log or its file format.
-  //
-  // Two honest limits. A direct message from a contact whose name happens to equal
-  // a channel name picks up that channel's colour; recording the slot in every
-  // entry would disambiguate it, at the cost of a file format version, to fix a
-  // collision the user created. And ChanTab::name is 20 bytes, so a channel named
-  // longer than that is cached truncated and never matches - it gets no colour
-  // rather than the wrong one.
-  uint16_t originColour(const char* origin) const {
-    if (origin == NULL || origin[0] == 0) return RIFT_CHAN_COL_NONE;
-
-    // riftOriginName strips the "to <name>:" an outgoing entry carries; it is in
-    // RiftLogic.h so the edge cases have tests rather than an argument
-    char name[64];
-    if (!riftOriginName(origin, name, sizeof(name))) return RIFT_CHAN_COL_NONE;
-
-    for (int i = 0; i < _tab_count; i++) {
-      if (strcmp(_tabs[i].name, name) == 0) return riftChannelColour(_tabs[i].idx);
-    }
-    return RIFT_CHAN_COL_NONE;
-  }
-
   void onDelivered(uint32_t ack_hash, uint32_t trip_ms) {
     msg_log.markDelivered(ack_hash, trip_ms);
   }
@@ -6749,7 +7262,7 @@ public:
       // render - see there for why the order matters.
       const char* raw_body = q->msg;
       if (!q->outgoing && q->conv.kind == RIFT_CONV_CHANNEL) {
-        raw_body += senderSplit(q->msg, NULL, 0);
+        raw_body += riftSenderSplit(q->msg, NULL, 0);
       }
       char m[sizeof(q->msg)];
       riftTranslateUTF8(m, raw_body, sizeof(m));
@@ -6784,7 +7297,7 @@ public:
       const char* raw_body = p->msg;
       bool have_sender = false;
       if (!p->outgoing && p->conv.kind == RIFT_CONV_CHANNEL) {
-        int skip = senderSplit(p->msg, raw_sender, sizeof(raw_sender));
+        int skip = riftSenderSplit(p->msg, raw_sender, sizeof(raw_sender));
         if (skip > 0) { raw_body = p->msg + skip; have_sender = true; }
       }
 
@@ -6801,8 +7314,9 @@ public:
       char filtered_origin[sizeof(p->origin)];
       riftTranslateUTF8(filtered_origin, riftOriginSkipHops(p->origin),
                         sizeof(filtered_origin));
-      int hh = (p->timestamp / 3600) % 24;
-      int mm = (p->timestamp / 60) % 60;
+      uint32_t tloc = riftLocal(p->timestamp);
+      int hh = (tloc / 3600) % 24;
+      int mm = (tloc / 60) % 60;
 
       char ack_buf[16];
       const char* ack = deliveryLabel(p, ack_buf, sizeof(ack_buf));
@@ -6872,11 +7386,17 @@ public:
         name_col = riftNameColour(raw_sender);
       } else {
         shown_name = filtered_origin;
-        name_col = originColour(p->origin);
-        if (name_col == RIFT_CHAN_COL_NONE) {
-          char who[64];
-          if (riftOriginName(p->origin, who, sizeof(who))) name_col = riftNameColour(who);
-        }
+        // The channel's colour for a channel row and the sender's for anything
+        // else, which is what the two branches here used to work out between them.
+        // Moved out to riftEntryColour so the preview panel can reach the same
+        // answer: a conversation that is one colour in the history and another in
+        // the popup is worse than one with no colour at all.
+        //
+        // It also reads the slot off the entry rather than matching the origin
+        // string against the tab cache, which retires the two limits the old
+        // lookup documented - a contact sharing a channel's name, and a channel
+        // name longer than that cache's 20 bytes.
+        name_col = riftEntryColour(p);
       }
       display.setColor(name_col != RIFT_CHAN_COL_NONE ? name_col : rift_pal.mid);
       // 220px, to x 260. The widest right-hand slot is a delivered mark with a
@@ -7072,27 +7592,6 @@ public:
   // The first delimiter is the answer for every ordinary name. Only when the
   // message offers a second candidate is the contact list consulted, which keeps
   // an O(contacts) lookup off the common path entirely.
-  int senderSplit(const char* text, char* out, int out_sz) {
-    int first = riftChannelSenderNth(text, 0, out, out_sz);
-    if (first <= 0) return 0;
-    if (riftChannelSenderNth(text, 1, NULL, 0) <= 0) return first;   // unambiguous
-
-    for (int nth = 0; nth < 3; nth++) {
-      char cand[RIFT_SENDER_MAX];
-      int skip = riftChannelSenderNth(text, nth, cand, sizeof(cand));
-      if (skip <= 0) break;
-      ContactInfo* known = the_mesh.searchContactsByPrefix(cand);
-      if (known != NULL && strcmp(known->name, cand) == 0) {
-        if (out != NULL && out_sz > 0) {
-          memcpy(out, cand, (size_t) (out_sz < (int) sizeof(cand) ? out_sz : (int) sizeof(cand)));
-          out[out_sz - 1] = 0;
-        }
-        return skip;
-      }
-    }
-    return first;   // nobody we know: the first delimiter is the best guess
-  }
-
   bool handleDrag(int dy) override {
     // The picker moves its cursor and lets ensurePickVisible follow, which is what
     // the arrow keys already do - so a finger and the trackball mean the same
@@ -7621,6 +8120,10 @@ public:
           // The value itself, because a clock can only be pushed forwards and a
           // wrong one cannot be taken back. Seeing 2031 here is the only warning
           // that exists.
+          // The one clock reading on the device that is deliberately NOT local, and
+          // it says UTC on its face. This is not a time for the reader - it is the
+          // value about to be transmitted to another node, and what goes on the air
+          // is UTC. Showing it shifted would misreport the packet.
           uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
           int yy, mo, dd, hh, mi;
           riftCivilFromEpoch(now, &yy, &mo, &dd, &hh, &mi);
@@ -8602,6 +9105,13 @@ void UITask::startChannelRemove() {
   nav_idx = RIFT_NAV_SYSTEM;
   setCurrScreen(nav_screens[RIFT_NAV_SYSTEM]);
   ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->beginDeleteChannel(true);
+}
+
+void UITask::startSetTime() {
+  dismissOverlay();
+  nav_idx = RIFT_NAV_SYSTEM;
+  setCurrScreen(nav_screens[RIFT_NAV_SYSTEM]);
+  ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->beginSetTime();
 }
 
 void UITask::startChannelScope() {

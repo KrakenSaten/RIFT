@@ -443,7 +443,45 @@ bool MyMesh::isAutoAddEnabled() const {
   return (_prefs.manual_add_contacts & 1) == 0;
 }
 
+#ifdef RIFT_VERSION
+bool MyMesh::chatReserveActive() const {
+  // Asked with the same arguments the advert path passes, so the row on SYSTEM
+  // cannot report a state the decision does not have.
+  return !riftShouldStoreContact(RIFT_ADV_CHAT, getNumContacts(), getContactsCapacity());
+}
+#endif
+
 bool MyMesh::shouldAutoAddContactType(uint8_t contact_type) const {
+#ifdef RIFT_VERSION
+  // Ahead of the auto-add preferences, because it answers a different question.
+  // Those say which kinds of node this operator wants stored; this says what is
+  // left to store them in. A preference for chat nodes cannot be honoured once
+  // there is no room for the repeaters that carry them, so the reserve wins - and
+  // it has to be checked before the early return above, which grants everything.
+  //
+  // Which types are kept is riftShouldStoreContact's business, not this function's:
+  // it is half the rule, and splitting it across two files is how the two halves
+  // start disagreeing. UITask.cpp static_asserts RIFT_ADV_* against ADV_TYPE_*.
+  if (!riftShouldStoreContact(contact_type, getNumContacts(), getContactsCapacity())) {
+    // Recorded and said, for the reason onContactsFull() sets out at length: a
+    // device that quietly stops accepting nodes looks like a radio fault. The
+    // difference here is that it is not a fault at all - the table is doing what
+    // it was asked to - so it has to be even easier to find out about.
+    _chat_refused = true;
+
+    // One line an hour. The caller is the advert path, and on a busy mesh past the
+    // cap this fires every few seconds; the event log holds 128 lines.
+    uint32_t now = (uint32_t) millis();
+    if (!_chat_ever_logged || (uint32_t) (now - _chat_refused_logged) > 3600000u) {
+      riftLogf("chat reserve: %d/%d, repeaters and rooms only",
+               getNumContacts(), getContactsCapacity());
+      _chat_refused_logged = now;
+      _chat_ever_logged = true;
+    }
+    return false;
+  }
+#endif
+
   if ((_prefs.manual_add_contacts & 1) == 0) {
     return true;
   }
@@ -880,6 +918,17 @@ bool MyMesh::riftCliCommand(const ContactInfo& contact, const char* text, uint32
   verb[vn] = 0;
   riftLogf("CLI %s: %s%s", contact.name, verb, text[vn] ? " ..." : "");
   return true;
+}
+
+bool MyMesh::riftFactoryReset() {
+  // Serial goes down first, which is the companion path's reasoning and applies
+  // here for a second reason. There it is that a phone app reconnects during the
+  // format and can write contacts back into a filesystem that was just emptied.
+  // Here the link is also how this session is being watched over USB, and a host
+  // that keeps writing frames into a formatting filesystem is the same hazard
+  // wearing different clothes.
+  if (_serial) _serial->disable();
+  return _store->formatFileSystem();
 }
 #endif
 

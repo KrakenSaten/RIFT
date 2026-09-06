@@ -348,7 +348,7 @@ Boot is now 5.1 seconds. Why the probe does that is still not established — se
 
 ## Status
 
-**Current release: 0.9.3** — set by the `RIFT_VERSION` build flag and shown on the
+**Current release: 0.9.4** — set by the `RIFT_VERSION` build flag and shown on the
 boot screen and SYSTEM, alongside the MeshCore version it is built on. Deliberately
 0.x: it works and is verified on hardware, but it has had no external users and the
 limitations above are real.
@@ -358,13 +358,28 @@ over the companion protocol next to `FIRMWARE_VER_CODE`.
 
 Every screen from the original design concept is implemented and verified on
 physical hardware. Resource use: ~61 % of internal static RAM, ~26 % of the 6.5 MB
-app partition. 284 native tests across eight suites.
+app partition. 307 native tests across eight suites.
 
 Worth knowing where that RAM goes: MeshCore's contact table is `MAX_CONTACTS` 350
 plus 8 anonymous slots at 184 bytes each — 65.7 KB, or a fifth of the chip's 320 KB,
 statically allocated whether it holds one contact or all of them. It is the single
 largest
 item in the firmware.
+
+**0.9.4** is what a session of actually using the device asked for. The new-message
+popup carries the colours the rest of COMMS uses - a channel in its channel's colour,
+a person in the one their name hashes to - resolved by the same helper the history
+uses, so a conversation cannot be one colour in the popup and another in the record.
+The contact table keeps its last slots for infrastructure: past 200 stored contacts a
+chat node is no longer added, because a person can be re-added on demand and a
+repeater is a route that cannot. The home screen's activity strip is drawn from its
+own per-minute counters on a fixed ladder, replacing one derived from a 64-entry ring
+and scaled to the busiest minute in the window - that version redrew every bar
+whenever the peak moved, and lost its oldest bars to eviction above 3.2 packets a
+minute. Clock, date and uptime moved onto the home screen with a SET button beside
+them, and every displayed time now carries a settable UTC offset while every stored
+one stays UTC. SYSTEM gained a factory reset, behind the same confirmation shape as
+deleting a channel.
 
 **0.9.3** is the September review and redesign round, and what the device asked
 for once it was in use again. Room servers work from the device: a room is named
