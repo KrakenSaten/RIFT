@@ -16,6 +16,17 @@ mkdir -p "$OUT"
 SRC="src/Utils.cpp src/Packet.cpp src/helpers/ConfigSerializer.cpp"
 total=0
 fail=0
+# Two passes: every suite is built first, then every suite is run. A freshly
+# linked binary on Windows 11 can be refused with "Permission denied" (exit
+# 126) for a while after the linker closes it: PowerShell names the cause as
+# "An Application Control policy has blocked this file" - Smart App Control
+# asking the cloud about an unsigned binary it has not seen before, which for
+# a different suite each run took anywhere from a second to never. Building
+# all eight first puts the later suites' link time between the first one's
+# link and its run, and the retry below covers the rest. A suite still refused
+# after that is reported as NO RESULT, not counted, and the run fails - the
+# policy is the machine's to change, not this script's.
+built=""
 for dir in test/test_*; do
   name=$(basename "$dir")
   srcs=$(find "$dir" -name '*.cpp' | tr '\n' ' ')
@@ -33,17 +44,24 @@ for dir in test/test_*; do
       $srcs $srcfiles "$GT/src/gtest-all.cc" -o "$OUT/$name.exe" >"$OUT/$name.log" 2>&1; then
     echo "$name: BUILD FAILED"; tail -15 "$OUT/$name.log"; fail=1; continue
   fi
-  # Run, and give a silent run one more go. A freshly linked binary on Windows is
-  # sometimes still locked when it is invoked and produces nothing at all; a real
-  # crash reproduces on the retry, so this cannot hide one. Without it the total
-  # was intermittently short by whole suites.
+  built="$built $name"
+done
+
+for name in $built; do
+  # Up to ten goes, two seconds apart, while the policy still refuses the
+  # file. A suite that really fails does so with a googletest FAILED line, not
+  # with exit 126, so anything but 126 gets one retry and then stands - a real
+  # crash reproduces on the retry, so this cannot hide one.
   out=$("$OUT/$name.exe" 2>&1)
   rc=$?
-  if [ $rc -ne 0 ] || ! echo "$out" | grep -q 'PASSED  \]'; then
-    sleep 1
+  tries=0
+  while { [ $rc -ne 0 ] || ! echo "$out" | grep -q 'PASSED  \]'; } && [ $tries -lt 10 ]; do
+    if [ $rc -ne 126 ] && [ $tries -ge 1 ]; then break; fi
+    sleep 2
     out=$("$OUT/$name.exe" 2>&1)
     rc=$?
-  fi
+    tries=$((tries + 1))
+  done
   # the PASSED line is written last, so it cannot be cut short by interleaving
   n=$(echo "$out" | grep -Eo 'PASSED  \] [0-9]+ test' | tail -1 | grep -Eo '[0-9]+')
   if echo "$out" | grep -q '\[  FAILED  \]'; then
