@@ -759,6 +759,46 @@ static void riftDrawTriangle(DisplayDriver& display, int x, int y, int h, uint16
   }
 }
 
+// A warning in words.
+//
+// Night mode says it in the accent, which is 6.01:1 on black. Day mode cannot:
+// the accent is 3.50:1 on white, under the 4.5:1 floor for 8px text, and the
+// palette's acc_tx role - near-black, 16:1 - is legible but no longer a warning,
+// being 1.29:1 from fg. So in day mode the words are drawn in fg and the accent
+// is a 2px stroke under them, the nav marker's own idiom: the colour still says
+// "attend to this" and the text stays readable. The September 0.9.3 review found
+// nine surfaces drawing accent text on white - NO SIGNAL, no ack, the battery
+// under 15% among them - the same failure 0.9.2 closed on thirteen selected rows.
+// The warnings go through here now; the accent-as-identity uses (the prompt,
+// the DM mark) take acc_tx, which is what that role was made for.
+static void riftWarnText(DisplayDriver& display, int x, int y, const char* text, int size, bool right) {
+  int w = (int) strlen(text) * RIFT_CHAR_W * size;
+  int x0 = right ? x - w : x;
+  display.setTextSize(size);
+  display.setColor(rift_day_mode ? rift_pal.fg : rift_pal.accent);
+  if (right) display.drawTextRightAlign(x, y, text);
+  else       display.drawTextLeftAlign(x, y, text);
+  if (rift_day_mode) {
+    display.setColor(rift_pal.accent);
+    display.fillRect(x0, y + 8 * size + 1, w, 2);
+  }
+}
+
+// A warning as a chip: accent fill, on_accent ink. Works in both modes, since
+// on_accent is 6.01:1 on the accent whatever the field around it. For a value
+// that is the warning - a contact table reading 350/350 - where a stroke under
+// a number would read as an underline rather than a state. Returns the width
+// drawn, so what follows on the row can start after it.
+static int riftWarnChip(DisplayDriver& display, int x, int y, const char* text) {
+  int w = (int) strlen(text) * RIFT_CHAR_W + 4;
+  display.setTextSize(1);
+  display.setColor(rift_pal.accent);
+  display.fillRect(x - 2, y - 2, w, 12);
+  display.setColor(rift_pal.on_accent);
+  display.drawTextLeftAlign(x, y, text);
+  return w;
+}
+
 static void renderNavBar(DisplayDriver& display, int curr_idx) {
   const int y_rule = NAV_RULE_Y;
 
@@ -837,8 +877,12 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   // number, and it has no pages now.
   char batt[8];
   snprintf(batt, sizeof(batt), "%d%%", rift_nav_batt_pct);
-  display.setColor(rift_nav_batt_pct <= 15 ? rift_pal.accent : rift_pal.mid);
-  display.drawTextRightAlign(display.width() - 2, 228, batt);
+  if (rift_nav_batt_pct <= 15) {
+    riftWarnText(display, display.width() - 2, 228, batt, 1, true);
+  } else {
+    display.setColor(rift_pal.mid);
+    display.drawTextRightAlign(display.width() - 2, 228, batt);
+  }
 }
 
 #ifndef BATT_MIN_MILLIVOLTS
@@ -1545,9 +1589,15 @@ public:
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
     display.drawTextLeftAlign(2, 2, "meshcore.io");
-    display.setTextSize(3);
-    display.setColor(activity == RIFT_MESH_QUIET ? rift_pal.dim : state_col);
-    display.drawTextLeftAlign(2, 20, state);
+    if (activity == RIFT_MESH_NEVER) {
+      // the one warning state: accent text at night, fg with an accent stroke
+      // under it by day - see riftWarnText
+      riftWarnText(display, 2, 20, state, 3, false);
+    } else {
+      display.setTextSize(3);
+      display.setColor(activity == RIFT_MESH_QUIET ? rift_pal.dim : state_col);
+      display.drawTextLeftAlign(2, 20, state);
+    }
 
     // The wordmark, top right, on the same baseline as the state headline.
     //
@@ -1569,7 +1619,7 @@ public:
     // in mid-air would be the arbitrary choice. It begins in mid-air on the left at
     // x=196 rather than crossing the screen, because continuing would put a diagonal
     // through the headline and then the LAST RX row.
-    riftDrawWordmark(display, 244, 20, rift_pal.fg, 176, 316);
+    riftDrawWordmark(display, 244, 20, rift_pal.fg, 196, 316);   // 196: the brief's seam start, and what the comment above always said; the call passed 176
 
     // Show the age and the count, not just the verdict. Every hardware problem
     // on this project was settled by putting the real value on screen, and a
@@ -1613,10 +1663,8 @@ public:
     // In the accent, at the owner's request. The design round reserved the
     // accent for active tab, selection, warning and wordmark; this is a fifth
     // use, stated here so it is a decision and not a drift.
-    char tmp[40];
+    char tmp[48];
     display.setTextSize(1);
-    display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 100, "HEARD, LAST 20 MIN");
     {
       const int GX = 2, GY = 110, GH = 16;   // bars grow upward from y GY+GH
       uint16_t per_min[20];
@@ -1635,6 +1683,19 @@ public:
       bool any = peak > 0;
       if (peak == 0) peak = 1;   // no division by zero; no bars are drawn anyway
 
+      // Named for what it measures. This screen has three sources for "did we
+      // hear anything": the headline and LAST RX from the mesh's clock, the
+      // packet count from the mesh's counter, and this graph from the air log,
+      // which counts everything the radio decoded - including what the mesh
+      // then discarded. They can disagree, and on a capture they did: NO SIGNAL
+      // and "none since boot" beside a graph scaled to 1/min. Each was true of
+      // its own source; the graph now says which. The scale sits in the label
+      // too, on the label row where it belongs, rather than inside the bar band.
+      if (any) snprintf(tmp, sizeof(tmp), "HEARD ON AIR, 20 MIN %s %u/min", RIFT_DOT, (unsigned) peak);
+      else     snprintf(tmp, sizeof(tmp), "HEARD ON AIR, 20 MIN %s --/min", RIFT_DOT);
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(2, 100, tmp);
+
       display.setColor(rift_pal.rule);
       display.fillRect(GX, GY + GH, 20 * 12 - 4, 1);
       display.setColor(rift_pal.accent);
@@ -1644,12 +1705,6 @@ public:
         if (h > GH) h = GH;
         display.fillRect(GX + 12 * i, GY + GH - h, 8, h);
       }
-      // the busiest minute, so the bars have a scale; "--" while there is nothing
-      // to scale, rather than a 1 that was never measured
-      if (any) snprintf(tmp, sizeof(tmp), "%u/min", (unsigned) peak);
-      else     strcpy(tmp, "--/min");
-      display.setColor(rift_pal.mid);
-      display.drawTextRightAlign(316, 112, tmp);
     }
 
     // Two numbers with their names, on the strip's label row. "LINK -80 / -4"
@@ -1675,10 +1730,20 @@ public:
     // Accent while the table is actually full, which is the state you can act on by
     // deleting a contact. Having once been full is history and does not belong in a
     // colour that means "attend to this".
-    sprintf(tmp, "%d/%d STORED %s %d HEARD", the_mesh.getNumContacts(),
-            the_mesh.getContactsCapacity(), RIFT_DOT, the_mesh.getPathCacheUsed());
-    if (the_mesh.contactsFullNow()) display.setColor(rift_pal.accent);
-    display.drawTextLeftAlign(2, 136, tmp);
+    // As a chip rather than accent text, which day mode cannot read: the
+    // number is the warning, and the accent fill with on_accent ink is the one
+    // form that holds in both modes. The rest of the row follows in mid.
+    if (the_mesh.contactsFullNow()) {
+      sprintf(tmp, "%d/%d STORED", the_mesh.getNumContacts(), the_mesh.getContactsCapacity());
+      int w = riftWarnChip(display, 2, 136, tmp);
+      sprintf(tmp, "%s %d HEARD", RIFT_DOT, the_mesh.getPathCacheUsed());
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(2 + w + 4, 136, tmp);
+    } else {
+      sprintf(tmp, "%d/%d STORED %s %d HEARD", the_mesh.getNumContacts(),
+              the_mesh.getContactsCapacity(), RIFT_DOT, the_mesh.getPathCacheUsed());
+      display.drawTextLeftAlign(2, 136, tmp);
+    }
 
     display.setColor(rift_pal.mid);
     sprintf(tmp, "%.3fMHz SF%d %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
@@ -1692,9 +1757,13 @@ public:
     // how deep it went; the detail is on SYSTEM.
     {
       RiftTropo& tr = riftTropoState();
-      riftDrawTriangle(display, 2, 160, 4, tr.active ? rift_pal.accent : rift_pal.rule);
+      // y 162: four rows tall in an eight-row line, so centred on it rather
+      // than sitting on the cap line. The triangle carries the state in the
+      // accent; the words take acc_tx, which is the accent at night and
+      // readable by day - the mark is the warning, the text says what it is.
+      riftDrawTriangle(display, 2, 162, 4, tr.active ? rift_pal.accent : rift_pal.rule);
       if (tr.active) {
-        display.setColor(rift_pal.accent);
+        display.setColor(rift_pal.accent_txt);
         sprintf(tmp, "TROPO OPEN %s peak %d hops", RIFT_DOT, (int) tr.peak_hops);
       } else if (tr.openings == 0) {
         display.setColor(rift_pal.mid);
@@ -1732,7 +1801,7 @@ public:
 
       int w[BTN_COUNT], total = 0;
       for (int i = 0; i < BTN_COUNT; i++) {
-        w[i] = (int) strlen(labels[i]) * RIFT_CHAR_W + 12;
+        w[i] = (int) strlen(labels[i]) * RIFT_CHAR_W + 8;   // 4px each side, per 00-SYSTEM.md
         total += w[i];
       }
       // From the left margin, like every other row on the screen, rather than
@@ -1760,7 +1829,8 @@ public:
           display.setColor(rift_pal.rule);
           display.drawRect(bx, DISCOVER_BTN_Y, w[i], 14);
         }
-        display.setColor(sel ? rift_pal.on_accent : (busy ? rift_pal.accent : rift_pal.fg));
+        // acc_tx for the busy label: the accent at night, readable by day
+        display.setColor(sel ? rift_pal.on_accent : (busy ? rift_pal.accent_txt : rift_pal.fg));
         display.drawTextCentered(bx + w[i] / 2, DISCOVER_BTN_Y + 3, labels[i]);
         _btn_x0[i] = bx;
         _btn_x1[i] = bx + w[i];
@@ -5764,7 +5834,7 @@ private:
     // a contact target is not in the strip, so say so rather than showing no
     // selection at all
     if (!_target_is_channel) {
-      display.setColor(rift_pal.accent);
+      display.setColor(rift_pal.accent_txt);   // identity, not a warning: readable in both modes
       display.drawTextRightAlign(display.width() - 2, _tabs_y, "DM");
     }
 
@@ -6523,7 +6593,12 @@ public:
     // Indexing the log directly meant a scroll step through a run of other
     // conversations moved the counter without moving the view, and coming back then
     // cost one press per entry that had never been shown.
-    int avail_px = display.width() - 8;
+    // 306px, 51 characters, from x 4. It was width - 8 from x 6: 52 characters
+    // whose last glyph ended at x 317, inside the four pixels the window thumb
+    // owns, so a full line met the thumb and the thumb, drawn after, won. 314 is
+    // where text stops everywhere else, and x 4 is where the clock starts, so
+    // the left edge is one edge now rather than two pixels apart.
+    int avail_px = display.width() - 14;
     int y = BODY_BOTTOM;
 
     // Eviction can take the entry the scroll position was counted against, and a
@@ -6681,7 +6756,10 @@ public:
         }
       }
       display.setColor(name_col != RIFT_CHAN_COL_NONE ? name_col : rift_pal.mid);
-      display.drawTextEllipsized(40, y, 230, shown_name);
+      // 220px, to x 260. The widest right-hand slot is a delivered mark with a
+      // three-digit trip time - nine characters back from 314, so from x 260 -
+      // and a name that filled 230 reached 270, under it.
+      display.drawTextEllipsized(40, y, 220, shown_name);
 
       // The right end of this row answers "what happened to this packet", and the
       // hop count is the same kind of answer as the delivery state - so it goes
@@ -6694,8 +6772,12 @@ public:
         // warning in the history.
         bool ok = ((unsigned char) ack[0] == 0xFB);
         bool waiting = (strcmp(ack, "sending") == 0);
-        display.setColor(ok ? rift_pal.ok : (waiting ? rift_pal.mid : rift_pal.accent));
-        display.drawTextRightAlign(314, y, ack);
+        if (ok || waiting) {
+          display.setColor(ok ? rift_pal.ok : rift_pal.mid);
+          display.drawTextRightAlign(314, y, ack);
+        } else {
+          riftWarnText(display, 314, y, ack, 1, true);
+        }
       } else {
         int hops = 0;
         bool direct = false;
@@ -6709,7 +6791,7 @@ public:
       }
 
       display.setColor(rift_pal.fg);
-      wrapText(body, avail_px, y + RIFT_LINE_H, &display, 6);
+      wrapText(body, avail_px, y + RIFT_LINE_H, &display, 4);
     }
 
     // Mask, then chrome. Two fills and the strip redrawn is the whole cost of
@@ -6740,11 +6822,24 @@ public:
     // to show every message from everywhere, so it was blank only on a device that
     // had never received anything. A blank panel reads as a screen that failed to
     // draw, so it says which of the two it is.
+    // Two lines in mid, naming the conversation and saying what to do, per the
+    // empty-state rule in 00-SYSTEM.md: one line in dim said only that it was
+    // empty, and a blank panel with one grey line under it still read as a
+    // screen that had failed to draw.
     if (n_conv == 0) {
-      display.setColor(rift_pal.dim);
-      display.drawTextLeftAlign(6, _hist_top + 6,
-                                msg_log.count > 0 ? "No messages here yet."
-                                                  : "No messages yet.");
+      char l1[64], nm[48];
+      if (_target_is_channel && !headed) {
+        riftTranslateUTF8(nm, ch.name, sizeof(nm));
+        snprintf(l1, sizeof(l1), "Nothing on %s yet.", nm);
+      } else if (!_target_is_channel) {
+        riftTranslateUTF8(nm, _target_name, sizeof(nm));
+        snprintf(l1, sizeof(l1), "Nothing with %s yet.", nm);
+      } else {
+        snprintf(l1, sizeof(l1), "Nothing here yet.");
+      }
+      display.setColor(rift_pal.mid);
+      display.drawTextEllipsized(4, _hist_top + 6, 310, l1);
+      display.drawTextLeftAlign(4, _hist_top + 18, "Type below - ENTER sends it.");
     }
 
     // Compose line - show the tail once the text outgrows one line.
@@ -6760,7 +6855,7 @@ public:
       char cnt[12];
       int cap = channelCapacity();
       snprintf(cnt, sizeof(cnt), "%d/%d", _len, cap);
-      display.setColor(_len >= cap ? rift_pal.accent : (_len >= cap - 10 ? rift_pal.fg : rift_pal.mid));
+      display.setColor(_len >= cap ? rift_pal.accent_txt : (_len >= cap - 10 ? rift_pal.fg : rift_pal.mid));
       display.drawTextRightAlign(316, INPUT_Y, cnt);
     }
 
@@ -6776,7 +6871,7 @@ public:
     const char* shown = filtered;
     if (flen > max_chars) shown = filtered + (flen - max_chars);
 
-    display.setColor(rift_pal.accent);
+    display.setColor(rift_pal.accent_txt);   // the prompt is identity, and acc_tx is what reads by day
     display.setCursor(2, INPUT_Y);
     display.print(">");
     display.setColor(rift_pal.fg);

@@ -246,19 +246,19 @@ static inline uint16_t riftChannelColour(int channel_idx) {
   // degrees in this comment and 115 in that one, and the two "from accent" columns
   // disagreed by 90 for the same pair of colours.
   //
-  // The dE columns say one thing worth acting on. Channel 1 and channel 2 are 0.061
-  // and 0.053 from day mode's ok green, which is the closest pair anywhere in this
-  // palette - closer than any two of the twelve name colours, whose worst pair is
-  // 0.047 and is considered the usable floor. In day mode a channel name and the
-  // "delivered" mark are nearly the same colour. The day green was moved to
-  // #428610 to clear 4.5:1 on white and checked against the field it sits on, not
-  // against these four.
+  // The last column is the one that was worth acting on, and has been. Day
+  // mode's ok green was #428610 for a while - the lightest green at that hue to
+  // clear 4.5:1 on white, checked against the field and not against these four -
+  // and it sat 0.053 and 0.061 from channels 2 and 1, closer than any two of the
+  // twelve name colours, whose worst pair is 0.047. The September 2026 design
+  // round moved it to #2A6400 (0x2B20): 0.104 and 0.124 from the two greens, so
+  // a channel name and the "delivered" mark are told apart in day mode too.
   //
 //     RGB565  rgb              blk   wht   hue  chroma  dE accent  dE night grn  dE day grn
-//  1  0x73E0  rgb(115,125,  0)  4.66  4.50  115  0.128      0.263         0.221        0.061
-//  2  0x0429  rgb(  0,134, 74)  4.51  4.66  154  0.136      0.341         0.222        0.053
-//  3  0x631E  rgb( 99, 97,247)  4.58  4.58  278  0.218      0.391         0.453        0.357
-//  4  0xD170  rgb(214, 44,132)  4.55  4.61  355  0.215      0.167         0.458        0.355
+//  1  0x73E0  rgb(115,125,  0)  4.66  4.50  115  0.128      0.263         0.221        0.124
+//  2  0x0429  rgb(  0,134, 74)  4.51  4.66  154  0.136      0.341         0.222        0.104
+//  3  0x631E  rgb( 99, 97,247)  4.58  4.58  278  0.218      0.391         0.453        0.360
+//  4  0xD170  rgb(214, 44,132)  4.55  4.61  355  0.215      0.167         0.458        0.363
   switch (channel_idx) {
     case 1: return 0x73E0;
     case 2: return 0x0429;
@@ -1632,12 +1632,11 @@ static inline bool riftClockPlausible(uint32_t epoch) {
 // 0.047, and nine of the twelve land between 276 and 337 degrees. It measures
 // better and reads worse.
 //
-// The one thing here worth a second look is not in this table at all. Day mode's
-// ok green is OKLab 0.053 from channel colour 2 and 0.061 from channel colour 1,
-// which is the closest pair anywhere in the palette - closer than any two names.
-// It arrived when the day green was moved to #428610 to clear 4.5:1 on white, and
-// that change was checked against the field and not against these. In day mode a
-// channel name and "delivered" are nearly the same colour.
+// The one thing that was worth a second look was not in this table at all: day
+// mode's ok green, while it was #428610, sat 0.053 from channel colour 2 and
+// 0.061 from channel colour 1 - closer than any two names. The September 2026
+// round moved it to #2A6400 (0x2B20), 0.104 and 0.124 from the two greens; the
+// figures are in riftChannelColour's table.
 //
 //     RGB565  rgb              blk   wht   hue  chroma  accent  green  nearest
 //   0 0x73E0  rgb(115,125,  0)  4.66  4.50  115  0.128      81     21    6 0.088
