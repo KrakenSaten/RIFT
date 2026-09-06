@@ -1652,23 +1652,43 @@ public:
     display.drawTextLeftAlign(2, 82, link);
 
     // The activity graph: twenty bars, one per minute, oldest on the left, each
-    // as tall as that minute's share of the busiest minute in the window, on a
-    // 1px baseline in rule. It replaced a radar animation that showed only that
-    // the screen was drawing, and it is the literal answer to the screen's
-    // question. Read from the air log, which already carries every receive with
-    // its time, so it needs no state of its own; on a mesh so busy the log turns
-    // over inside twenty minutes the newest bars are the true ones and the
-    // oldest under-count, which is the honest direction to be wrong in.
+    // as tall as that minute's share of the busiest minute in the window. It
+    // replaced a radar animation that showed only that the screen was drawing,
+    // and it is the literal answer to the screen's question. Read from the air
+    // log, which already carries every receive with its time, so it needs no
+    // state of its own; on a mesh so busy the log turns over inside twenty
+    // minutes the newest bars are the true ones and the oldest under-count,
+    // which is the honest direction to be wrong in.
     //
-    // In the accent, at the owner's request. The design round reserved the
-    // accent for active tab, selection, warning and wordmark; this is a fifth
-    // use, stated here so it is a decision and not a drift.
+    // Three classes, not eight packet types, and not the accent. The screen
+    // asks whether the mesh is alive where you stand, and for that the useful
+    // split is what kind of traffic it was: somebody spoke (text, group text,
+    // group data), somebody announced themselves (advert), or the mesh kept
+    // itself running (acks, paths, requests, control, trace). Each class takes
+    // the air log's own colour for its main type - ok green for messages, the
+    // advert blue, mid for the rest - so the graph and the log say the same
+    // thing in the same colours, and the log one level down is the key. The
+    // worst pair of the three is OKLab 0.196 apart at night and 0.208 by day,
+    // four times the air log's own worst pair, which is what an 8px bar with
+    // no word beside it needs. The accent leaves the graph, and is back to its
+    // four meanings.
+    //
+    // Stacked in a fixed order from the bottom - talk, advert, drift - so the
+    // same colour is always in the same place and a mixed bar reads without a
+    // key. The height is the minute's exact share; the split inside it is by
+    // count, and a class that is present gets a pixel as long as the height
+    // has one to give, talk first. A bar two pixels tall with three classes in
+    // it shows two of them, rather than growing a pixel the number did not
+    // measure. The baseline is twenty segments on the bar pitch rather than
+    // one line, so a minute with nothing in it has a shape: "heard nothing for
+    // twenty minutes" and "no data yet" used to draw the same thing.
     char tmp[48];
     display.setTextSize(1);
     {
       const int GX = 2, GY = 110, GH = 16;   // bars grow upward from y GY+GH
-      uint16_t per_min[20];
-      for (int i = 0; i < 20; i++) per_min[i] = 0;
+      enum { K_TALK = 0, K_ADVERT = 1, K_DRIFT = 2, K_COUNT = 3 };
+      uint16_t per_min[20][K_COUNT];
+      memset(per_min, 0, sizeof(per_min));
       uint32_t now_ms = (uint32_t) millis();
       RiftRxLog& log = riftRxLog();
       for (int i = 0; i < log.count; i++) {
@@ -1676,10 +1696,19 @@ public:
         if (e == NULL) break;
         if (e->dir != RIFT_AIR_RX) continue;
         uint32_t back = (now_ms - e->at_ms) / 60000u;
-        if (back < 20 && per_min[19 - back] < 0xFFFF) per_min[19 - back]++;
+        if (back >= 20) continue;
+        uint8_t pt = riftHeaderPayloadType(e->header);
+        int k = (pt == 0x02 || pt == 0x05 || pt == 0x06) ? K_TALK
+              : (pt == 0x04) ? K_ADVERT : K_DRIFT;
+        if (per_min[19 - back][k] < 0xFFFF) per_min[19 - back][k]++;
       }
+      uint16_t total[20];
       uint16_t peak = 0;
-      for (int i = 0; i < 20; i++) if (per_min[i] > peak) peak = per_min[i];
+      for (int i = 0; i < 20; i++) {
+        uint32_t t = (uint32_t) per_min[i][0] + per_min[i][1] + per_min[i][2];
+        total[i] = (uint16_t) (t > 0xFFFF ? 0xFFFF : t);
+        if (total[i] > peak) peak = total[i];
+      }
       bool any = peak > 0;
       if (peak == 0) peak = 1;   // no division by zero; no bars are drawn anyway
 
@@ -1697,13 +1726,38 @@ public:
       display.drawTextLeftAlign(2, 100, tmp);
 
       display.setColor(rift_pal.rule);
-      display.fillRect(GX, GY + GH, 20 * 12 - 4, 1);
-      display.setColor(rift_pal.accent);
+      for (int i = 0; i < 20; i++) display.fillRect(GX + 12 * i, GY + GH, 8, 1);
+
+      const uint16_t kcol[K_COUNT] = { rift_pal.ok, riftNameColourAt(4), rift_pal.mid };
       for (int i = 0; i < 20; i++) {
-        if (per_min[i] == 0) continue;
-        int h = 1 + (int) (((long) per_min[i] * (GH - 1) + peak / 2) / peak);
+        if (total[i] == 0) continue;
+        int h = 1 + (int) (((long) total[i] * (GH - 1) + peak / 2) / peak);
         if (h > GH) h = GH;
-        display.fillRect(GX + 12 * i, GY + GH - h, 8, h);
+
+        // Split h by count, then make sure every class present has a pixel
+        // while there are pixels to give, taking them from the largest.
+        int px[K_COUNT];
+        int given = 0;
+        for (int k = 0; k < K_COUNT; k++) {
+          px[k] = (int) (((long) per_min[i][k] * h) / total[i]);
+          given += px[k];
+        }
+        for (int k = 0; k < K_COUNT && given < h; k++) {
+          if (per_min[i][k] > 0) { px[k]++; given++; }
+        }
+        for (int k = 0; k < K_COUNT; k++) {
+          if (per_min[i][k] == 0 || px[k] > 0) continue;
+          int big = 0;
+          for (int j = 1; j < K_COUNT; j++) if (px[j] > px[big]) big = j;
+          if (px[big] > 1) { px[big]--; px[k] = 1; }
+        }
+        int y0 = GY + GH;
+        for (int k = 0; k < K_COUNT; k++) {
+          if (px[k] <= 0) continue;
+          y0 -= px[k];
+          display.setColor(kcol[k]);
+          display.fillRect(GX + 12 * i, y0, 8, px[k]);
+        }
       }
     }
 
