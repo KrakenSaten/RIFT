@@ -5726,7 +5726,9 @@ private:
   static const int BODY_TOP = 12;      // picker list starts here
   static const int BODY_BOTTOM = 194;
   static const int INPUT_Y = 204;
-  static const int TAB_VISIBLE = 4;    // channel tabs shown at once
+  // The most tabs the strip can hold at once: a one-character name is 14px
+  // and the gap 4, so eighteen across 316. Bounds the layout arrays only.
+  static const int TAB_MAX_VISIBLE = 18;
 
   // The strip and the history top move by whether a heading is drawn, which is
   // only when the target is a contact - the strip cannot name one. With a channel
@@ -5737,9 +5739,8 @@ private:
   // varying top changes how many messages fit rather than where they sit.
   static const int TABS_Y_BARE    = 6;
   static const int TABS_Y_HEADED  = 18;
-  int _tabs_y;      // recorded at render, like _tab_w, so taps hit the same rows
+  int _tabs_y;      // recorded at render, like the tab spans, so taps hit the same rows
   int _hist_top;
-  int _tab_visible; // 3 in DM mode, so the DM marker has a column of its own
 
   // Configured channels, cached for the strip. Rebuilt on a timer rather than
   // every frame: render runs on the same SPI bus as the LoRa radio.
@@ -5749,12 +5750,28 @@ private:
   // received messages, but never appeared in the strip. 21 bytes each.
   ChanTab _tabs[MAX_GROUP_CHANNELS];
   int _tab_count;
-  int _tab_scroll;
-  int _tab_w;                 // recorded at render, so taps hit the same columns
+  int _tab_scroll;            // index of the first tab in the strip
+  // The strip's layout, recorded at render so taps land on the boxes that were
+  // drawn. Tabs are as wide as their names - rift-comms-spec.md: w = len*6 + 8,
+  // +6 with an unread mark, 4px apart from x 2 - and the strip is windowed a
+  // tab at a time from _tab_scroll, with « and » where it runs past an edge.
+  // It was four fixed columns of 80px, which is why a fifth channel was not
+  // "uncoloured" but absent: out of the strip, unmarked, its unread unseen.
+  int _tab_vis_idx[TAB_MAX_VISIBLE];   // index into _tabs
+  int _tab_vis_x0[TAB_MAX_VISIBLE];
+  int _tab_vis_x1[TAB_MAX_VISIBLE];    // exclusive
+  int _tab_vis_n;
+  int _tab_right;             // the strip's limit; the DM mark sits past it
+  bool _tab_more_left, _tab_more_right;
+  // Pull the active tab into view on the next render. Set when the target
+  // changes, not on every frame: the » and « taps scroll the strip, and a
+  // snap on every frame would undo them before they were seen.
+  bool _tab_snap;
   unsigned long _last_tabs_refresh;   // see _last_refresh above re: millis() wrap
   bool _tabs_refreshed_once;
 
   void refreshTabs() {
+    int before = _tab_count;
     _tab_count = 0;
     for (int i = 0; i < MAX_GROUP_CHANNELS && _tab_count < (int) (sizeof(_tabs) / sizeof(_tabs[0])); i++) {
       ChannelDetails ch;
@@ -5763,20 +5780,50 @@ private:
       StrHelper::strncpy(t->name, ch.name, sizeof(t->name));
       t->idx = (uint8_t) i;
     }
-    // keep the active channel in view
-    int active = -1;
-    for (int i = 0; i < _tab_count; i++) {
-      if (_target_is_channel && _tabs[i].idx == _target_channel_idx) { active = i; break; }
-    }
-    if (active >= 0) {
-      if (active < _tab_scroll) _tab_scroll = active;
-      if (active >= _tab_scroll + TAB_VISIBLE) _tab_scroll = active - TAB_VISIBLE + 1;
-    }
-    if (_tab_scroll > _tab_count - TAB_VISIBLE) _tab_scroll = _tab_count - TAB_VISIBLE;
+    if (_tab_count != before) _tab_snap = true;   // a channel came or went: re-place the active one
+    if (_tab_scroll > _tab_count - 1) _tab_scroll = _tab_count - 1;
     if (_tab_scroll < 0) _tab_scroll = 0;
   }
 
-  int tabWidth(DisplayDriver& display) const { return display.width() / TAB_VISIBLE; }
+  int activeTab() const {
+    if (!_target_is_channel) return -1;
+    for (int i = 0; i < _tab_count; i++) {
+      if (_tabs[i].idx == _target_channel_idx) return i;
+    }
+    return -1;
+  }
+
+  // A tab's width: its name, 4px each side, and 6px more for an unread mark.
+  // Capped at sixteen characters so one long name cannot own the whole strip.
+  int tabWidthFor(int i) const {
+    char filtered[sizeof(_tabs[i].name)];
+    riftTranslateUTF8(filtered, _tabs[i].name, sizeof(filtered));
+    int n = (int) strlen(filtered);
+    if (n > 16) n = 16;
+    if (n < 1) n = 1;
+    int w = n * RIFT_CHAR_W + 8;
+    bool active = _target_is_channel && _tabs[i].idx == _target_channel_idx;
+    if (!active && msg_unread.count(riftChannelConv(_tabs[i].idx)) > 0) w += 6;
+    return w;
+  }
+
+  // Lays the strip out from tab `first` up to x `right`, filling the visible
+  // spans. Returns how many tabs fit. The first x is 12 rather than 2 when
+  // there are tabs to the left, which is where « goes.
+  int layoutTabs(int first, int right) {
+    int n = 0;
+    int x = (first > 0) ? 12 : 2;
+    for (int i = first; i < _tab_count && n < TAB_MAX_VISIBLE; i++) {
+      int w = tabWidthFor(i);
+      if (x + w > right) break;
+      _tab_vis_idx[n] = i;
+      _tab_vis_x0[n] = x;
+      _tab_vis_x1[n] = x + w;
+      n++;
+      x += w + 4;
+    }
+    return n;
+  }
 
   void renderTabs(DisplayDriver& display) {
     if (!_tabs_refreshed_once || millis() - _last_tabs_refresh >= 2000) {
@@ -5785,51 +5832,71 @@ private:
       _tabs_refreshed_once = true;
     }
 
-    int tw = _tab_w = tabWidth(display);
     display.setTextSize(1);
 
-    // One fewer channel tab in DM mode, so the DM marker below gets the fourth
-    // column instead of being drawn on top of it. The tab width is unchanged, so
-    // the columns and their tap targets stay where they were.
-    _tab_visible = _target_is_channel ? TAB_VISIBLE : TAB_VISIBLE - 1;
+    // The strip stops short in DM mode so the DM mark has the right end to
+    // itself; » then sits just inside the limit.
+    _tab_right = _target_is_channel ? 316 : 296;
 
-    for (int i = _tab_scroll; i < _tab_count && i < _tab_scroll + _tab_visible; i++) {
-      int col = i - _tab_scroll;
-      int x = col * tw;
-      bool active = _target_is_channel && _tabs[i].idx == _target_channel_idx;
+    // Window the strip. The active tab is pulled into view when the target has
+    // just changed; otherwise the window stays where the last » or « left it.
+    int active = activeTab();
+    if (_tab_snap && active >= 0 && active < _tab_scroll) _tab_scroll = active;
+    if (_tab_scroll > _tab_count - 1) _tab_scroll = _tab_count - 1;
+    if (_tab_scroll < 0) _tab_scroll = 0;
+    for (;;) {
+      _tab_vis_n = layoutTabs(_tab_scroll, _tab_right);
+      _tab_more_right = (_tab_scroll + _tab_vis_n < _tab_count);
+      if (_tab_more_right) _tab_vis_n = layoutTabs(_tab_scroll, _tab_right - 12);   // room for »
+      _tab_more_left = _tab_scroll > 0;
+      bool active_shown = active < 0 || (active >= _tab_scroll && active < _tab_scroll + _tab_vis_n);
+      if (!_tab_snap || active_shown || _tab_scroll >= active) break;
+      _tab_scroll++;
+    }
+    _tab_snap = false;
 
-      if (active) {
+    for (int k = 0; k < _tab_vis_n; k++) {
+      int i = _tab_vis_idx[k];
+      int x = _tab_vis_x0[k];
+      int w = _tab_vis_x1[k] - x;
+      bool is_active = (i == active);
+      bool unread = !is_active && msg_unread.count(riftChannelConv(_tabs[i].idx)) > 0;
+
+      if (is_active) {
         // accent fill with the label in on_accent - the active channel has to
         // survive being read in sunlight, where a fill one shade off the
         // background does not. The ink is 6.01:1; white here was 3.5:1.
         display.setColor(rift_pal.accent);
-        display.fillRect(x, _tabs_y - 2, tw - 2, 13);
+        display.fillRect(x, _tabs_y - 2, w, 13);
         display.setColor(rift_pal.on_accent);
       } else {
-        // The border carries the channel colour; the label stays mid. The active
-        // tab keeps its accent fill untouched - being the selected channel is the
-        // stronger thing to say, and a colour bar at the same lightness as the
-        // accent would only muddy it. So the channel you are on is identified by
-        // name in the fill, and the ones you are not by colour in the outline.
+        // The border carries the channel colour and so does the label - the
+        // four channel colours were chosen in the 4.5:1 band precisely so they
+        // can carry text (channel-colours.md), and the label in mid left the
+        // identity to a 1px outline. Channels past the fourth, and the public
+        // channel, take rule: "no colour" is the honest answer to a fifth
+        // identity, and with a place in the strip it needs nothing more.
         uint16_t col = riftChannelColour(_tabs[i].idx);
         display.setColor(col != RIFT_CHAN_COL_NONE ? col : rift_pal.rule);
-        display.drawRect(x, _tabs_y - 2, tw - 2, 13);
-        display.setColor(rift_pal.mid);
+        display.drawRect(x, _tabs_y - 2, w, 13);
+        display.setColor(col != RIFT_CHAN_COL_NONE ? col : rift_pal.fg);
       }
 
       char filtered[sizeof(_tabs[i].name)];
       riftTranslateUTF8(filtered, _tabs[i].name, sizeof(filtered));
-      display.drawTextEllipsized(x + 3, _tabs_y, tw - 8, filtered);
+      display.drawTextEllipsized(x + 4, _tabs_y, w - 8 - (unread ? 6 : 0), filtered);
 
-      // Unread, on the tabs you are not looking at. The active tab is excluded
-      // because the accent dot would be invisible inside its accent fill - and
-      // because it is the conversation on screen, whose unread render() has just
-      // cleared. A channel scrolled out of the strip has no dot here; the nav bar
-      // still says something is unread somewhere.
-      if (!active && msg_unread.count(riftChannelConv(_tabs[i].idx)) > 0) {
-        renderUnreadDot(display, x + tw - 8, _tabs_y - 1);
-      }
+      // Unread, in the 6px the tab grew by, so it sits beside the name rather
+      // than on its last glyph. The active tab is excluded: it is the
+      // conversation on screen, whose unread render() has just cleared.
+      if (unread) renderUnreadDot(display, x + w - 6, _tabs_y + 2);
     }
+
+    // What the window cannot show, in the strip's own row: « and » are the
+    // spec's overflow marks, and both are tap targets.
+    display.setColor(rift_pal.fg);
+    if (_tab_more_left)  display.drawTextLeftAlign(2, _tabs_y, "\xAE");
+    if (_tab_more_right) display.drawTextLeftAlign(_tab_right - 8, _tabs_y, "\xAF");
 
     // a contact target is not in the strip, so say so rather than showing no
     // selection at all
@@ -6419,6 +6486,7 @@ private:
     _target_is_channel = e->is_channel;
     if (e->is_channel) {
       _target_channel_idx = e->channel_idx;
+      _tab_snap = true;
     } else {
       memcpy(_target_key, e->key, 6);
     }
@@ -6478,8 +6546,9 @@ public:
        // in declaration order: members are initialised in the order they are
        // declared regardless of how they are listed here, so a list in a
        // different order reads as a sequence the compiler will not honour
-       _tabs_y(0), _hist_top(0), _tab_visible(TAB_VISIBLE),
-       _tab_count(0), _tab_scroll(0), _tab_w(0),
+       _tabs_y(0), _hist_top(0),
+       _tab_count(0), _tab_scroll(0), _tab_vis_n(0), _tab_right(316),
+       _tab_more_left(false), _tab_more_right(false), _tab_snap(true),
        _last_tabs_refresh(0), _tabs_refreshed_once(false) {
     _input[0] = 0;
     _target_name[0] = 0;
@@ -6919,18 +6988,25 @@ public:
 
     if (y < _tabs_y - 2 || y > _tabs_y + 13) return false;
 
-    if (_tab_w <= 0) return false;   // strip hasn't been drawn yet
-    int col = x / _tab_w;
-    // in DM mode the last column holds the DM marker rather than a channel, so a
-    // tap there must not select the tab that would have been drawn under it
-    if (col < 0 || col >= _tab_visible) return false;
-    int i = _tab_scroll + col;
+    // The overflow marks scroll the window a tab at a time. The snap that
+    // keeps the active tab in view is off until the target changes, so the
+    // window stays where the tap put it.
+    if (_tab_more_left && x < 12) { _tab_scroll--; return true; }
+    if (_tab_more_right && x >= _tab_right - 12 && x < _tab_right) { _tab_scroll++; return true; }
+
+    // The spans drawn last render, so a tap lands on the box that was seen;
+    // the DM mark past _tab_right is in no span and selects nothing.
+    int i = -1;
+    for (int k = 0; k < _tab_vis_n; k++) {
+      if (x >= _tab_vis_x0[k] && x < _tab_vis_x1[k]) { i = _tab_vis_idx[k]; break; }
+    }
     if (i < 0 || i >= _tab_count) return false;
 
     _target_is_channel = true;
     _target_channel_idx = _tabs[i].idx;
     StrHelper::strncpy(_target_name, _tabs[i].name, sizeof(_target_name));
     _scroll = 0;   // a different conversation: land on its newest
+    _tab_snap = true;
     return true;
   }
 
