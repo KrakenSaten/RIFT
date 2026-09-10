@@ -3,8 +3,21 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+// The GT911 answers on one of two addresses, and which one is not a build-time
+// fact: it latches the address at power-on from the level on its INT pin, so two
+// T-Deck units off different production runs can differ. This was set to 0x14 by a
+// build flag and probed at that address only, so on a unit that came up at 0x5D
+// touch reported "not found" and the whole drag and scroll surface was dead -
+// while an I2C scan on the same device listed 0x5D plainly. Nothing was wrong with
+// the panel or its connector.
+//
+// So both are tried, in this order, and the one that answers is used. The flag
+// still sets which is preferred, for a board where that is known.
 #ifndef TOUCH_I2C_ADDR
-  #define TOUCH_I2C_ADDR 0x14   // GT911; the alternate address is 0x5D
+  #define TOUCH_I2C_ADDR 0x14
+#endif
+#ifndef TOUCH_I2C_ADDR_ALT
+  #define TOUCH_I2C_ADDR_ALT 0x5D
 #endif
 // 25 ms was chosen when touch only had to notice a tap. Following a finger is a
 // different job: at 40 samples a second a moderate drag advances ten pixels
@@ -55,17 +68,23 @@
 // Reuses the Wire bus initialised elsewhere.
 class TDeckTouch {
   bool _present;
+  uint8_t _addr;       // whichever of the two answered begin()
   unsigned long _last_poll;   // see TDeckKeyboard re: millis() wrap
   bool _down;
   int _x, _y;          // mapped to display coordinates
   int _raw_x, _raw_y;  // as reported, for calibration/diagnostics
 
 public:
-  TDeckTouch() : _present(false), _last_poll(0), _down(false),
+  TDeckTouch() : _present(false), _addr(TOUCH_I2C_ADDR), _last_poll(0), _down(false),
                  _x(0), _y(0), _raw_x(0), _raw_y(0) { memset(_raw, 0, sizeof(_raw)); }
 
   void begin();
   bool isPresent() const { return _present; }
+
+  // Which address answered, for the diagnostics row. Worth showing rather than
+  // assuming: it is the difference between a panel that is absent and one that is
+  // simply not where it was looked for.
+  uint8_t address() const { return _addr; }
 
   // Returns true once per completed tap, with the release position in x/y.
   // Reporting on release rather than press avoids firing while a finger drags.

@@ -4,20 +4,20 @@
 #define GT911_REG_STATUS   0x814E
 #define GT911_REG_POINT1   0x8150
 
-static bool gt911_read(uint16_t reg, uint8_t* buf, int len) {
-  Wire.beginTransmission(TOUCH_I2C_ADDR);
+static bool gt911_read(uint8_t addr, uint16_t reg, uint8_t* buf, int len) {
+  Wire.beginTransmission(addr);
   Wire.write((uint8_t)(reg >> 8));
   Wire.write((uint8_t)(reg & 0xFF));
   if (Wire.endTransmission(false) != 0) return false;   // repeated start
 
-  int got = Wire.requestFrom((int) TOUCH_I2C_ADDR, len);
+  int got = Wire.requestFrom((int) addr, len);
   if (got != len) return false;
   for (int i = 0; i < len; i++) buf[i] = Wire.read();
   return true;
 }
 
-static bool gt911_write(uint16_t reg, uint8_t val) {
-  Wire.beginTransmission(TOUCH_I2C_ADDR);
+static bool gt911_write(uint8_t addr, uint16_t reg, uint8_t val) {
+  Wire.beginTransmission(addr);
   Wire.write((uint8_t)(reg >> 8));
   Wire.write((uint8_t)(reg & 0xFF));
   Wire.write(val);
@@ -25,8 +25,21 @@ static bool gt911_write(uint16_t reg, uint8_t val) {
 }
 
 void TDeckTouch::begin() {
-  Wire.beginTransmission(TOUCH_I2C_ADDR);
-  _present = (Wire.endTransmission() == 0);
+  // Both addresses, preferred one first. See TDeckTouch.h for why this cannot be a
+  // build-time constant.
+  static const uint8_t addrs[2] = { TOUCH_I2C_ADDR, TOUCH_I2C_ADDR_ALT };
+  _present = false;
+  for (int i = 0; i < 2; i++) {
+    Wire.beginTransmission(addrs[i]);
+    if (Wire.endTransmission() == 0) {
+      _addr = addrs[i];
+      _present = true;
+      return;
+    }
+  }
+  // Not found at either. _addr keeps the preferred one so the diagnostics row can
+  // still say what was looked for.
+  _addr = TOUCH_I2C_ADDR;
 }
 
 bool TDeckTouch::poll(int& x, int& y) {
@@ -37,7 +50,7 @@ bool TDeckTouch::poll(int& x, int& y) {
   _last_poll = now;
 
   uint8_t status;
-  if (!gt911_read(GT911_REG_STATUS, &status, 1)) return false;
+  if (!gt911_read(_addr, GT911_REG_STATUS, &status, 1)) return false;
 
   // bit 7 means the controller has fresh data for us; the low nibble is the
   // number of touch points it is reporting
@@ -46,7 +59,7 @@ bool TDeckTouch::poll(int& x, int& y) {
 
   if (points > 0) {
     uint8_t d[8];
-    if (gt911_read(GT911_REG_POINT1, d, sizeof(d))) {
+    if (gt911_read(_addr, GT911_REG_POINT1, d, sizeof(d))) {
       memcpy(_raw, d, sizeof(_raw));
 
       // The read starts at 0x8150, which the datasheet defines as point 1's X low
@@ -95,7 +108,7 @@ bool TDeckTouch::poll(int& x, int& y) {
   }
 
   // the status register must be cleared or the controller stops reporting
-  gt911_write(GT911_REG_STATUS, 0);
+  gt911_write(_addr, GT911_REG_STATUS, 0);
 
   if (points == 0 && _down) {   // finger lifted - this completes a tap
     _down = false;

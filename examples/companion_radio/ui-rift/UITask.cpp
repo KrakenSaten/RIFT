@@ -3702,11 +3702,16 @@ public:
       // mapped, then the raw pair it came from. The raw pair is how the
       // calibration flags in TDeckTouch.h are set: touch each corner and read it
       // here. A corner that maps to 0/319 and 0/239 is calibrated.
-      snprintf(tmp, sizeof(tmp), "%d,%d (%d,%d)", _task->lastTouchX(), _task->lastTouchY(),
-               rift_touch.rawX(), rift_touch.rawY());
+      snprintf(tmp, sizeof(tmp), "%d,%d (%d,%d) @%02X", _task->lastTouchX(),
+               _task->lastTouchY(), rift_touch.rawX(), rift_touch.rawY(),
+               rift_touch.address());
       addReading("TOUCH", tmp, rift_pal.fg);
     } else {
-      addReading("TOUCH", "not found", rift_pal.accent);
+      // Says which addresses were tried, because "not found" on its own sent one
+      // session looking at the connector when the panel was answering on the other
+      // address the whole time.
+      snprintf(tmp, sizeof(tmp), "none @%02X/%02X", TOUCH_I2C_ADDR, TOUCH_I2C_ADDR_ALT);
+      addReading("TOUCH", tmp, rift_pal.accent);
     }
 #endif
 #if ENV_INCLUDE_GPS == 1
