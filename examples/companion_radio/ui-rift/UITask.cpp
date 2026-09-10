@@ -118,9 +118,17 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 static inline uint8_t riftHopCount(uint8_t path_len) { return mesh::Packet::pathHashCount(path_len); }
 static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::pathHashSize(path_len); }
 
+// The single file every build before generations wrote. No longer written, and
+// deliberately not deleted once a generation exists: load() falls back to it when
+// neither generation is usable, so it stays on as a third and older copy for the
+// one case that would want it. A few KB of SPIFFS is a fair price for that.
 #define RIFT_MSGLOG_PATH         "/rift_msgs.dat"
 // no longer written; kept so a stale one from an older build can be removed
 #define RIFT_MSGLOG_TMP          "/rift_msgs.new"
+// The two generations. A save writes whichever one is not current; the reader takes
+// the newer of the two that verify. See RiftLogic.h for why there are two.
+#define RIFT_MSGLOG_GEN0         "/rift_msgs.0"
+#define RIFT_MSGLOG_GEN1         "/rift_msgs.1"
 #define RIFT_MSGLOG_FLUSH_MILLIS 20000
 // The ceiling on how long the log may stay unwritten, whatever the traffic does.
 // Chosen from the cost measured on the device rather than picked: at the full 48
@@ -387,6 +395,15 @@ struct RiftMsgLog {
   // hammer flash and starve the radio. Back off instead, and show the count.
   uint8_t save_failures = 0;
   unsigned long retry_at = 0;
+  // Which generation is on the flash and what its sequence number is. -1 and 0 mean
+  // none has been written yet, which is also the state after a migration from the
+  // legacy single file, so the first save lands in slot 0.
+  int8_t   gen_slot = -1;
+  uint32_t gen_seq = 0;
+
+  static const char* genPath(int slot) {
+    return slot == 0 ? RIFT_MSGLOG_GEN0 : RIFT_MSGLOG_GEN1;
+  }
 
   // both in RiftLogic.h, so the backoff is tested without a filesystem
   bool dueToSave(unsigned long now) const {
@@ -395,13 +412,33 @@ struct RiftMsgLog {
                            (uint32_t) first_dirty_at, RIFT_MSGLOG_MAX_UNSAVED_MILLIS);
   }
 
-  bool save(const char* path) {
-    bool ok = saveInner(path);
+  bool save() {
+    // Whichever generation is not the current one. That is the whole of the fix:
+    // SPIFFS.open(path, "w") empties its target before the new copy exists, so
+    // doing it to the live history is why a failed first write - or power going
+    // inside the 251-380ms a save of 48 entries costs on the device - used to leave
+    // no history at all rather than the previous one.
+    const int slot = (gen_slot < 0) ? 0 : riftOtherGeneration(gen_slot);
+    const uint32_t seq = riftNextGenSeq(gen_seq);
+
+    bool ok = saveInner(genPath(slot), seq);
     if (ok) {
+      // Only now is the new generation the one to read, and only now may the next
+      // save target the other slot.
+      gen_slot = (int8_t) slot;
+      gen_seq = seq;
       save_failures = 0;
       // only the slow ones. A save that costs nothing is not news, and a line per
       // save would push everything else out of a 48-line ring within an evening.
-      if (last_save_ms >= 50) riftLogf("save %d msg %ums", count, (unsigned) last_save_ms);
+      if (last_save_ms >= 50) {
+        // The phases as well as the total. There is no watchdog on the main loop, so
+        // a slow save is the number that decides whether the write has to be broken
+        // up, and open/write/close is what says which part was slow. They are on the
+        // readings screen too, but that shows only the most recent save; a ring entry
+        // can still be read after the next one has replaced it.
+        riftLogf("save %d msg %ums gen%d o%u w%u c%u", count, (unsigned) last_save_ms,
+                 slot, (unsigned) t_open, (unsigned) t_write, (unsigned) t_close);
+      }
     } else {
       // Both in RiftLogic.h, and separate on purpose: the counter saturating must
       // not stop the deadline moving. See riftNextSaveFailures() for what that cost.
@@ -419,9 +456,13 @@ struct RiftMsgLog {
     return ok;
   }
 
-  bool saveInner(const char* path) {
+  bool saveInner(const char* path, uint32_t seq) {
 #if defined(ESP32)
     unsigned long began = millis();
+    // Accumulated over exactly the bytes written before the trailer, which is what
+    // the trailer then vouches for.
+    uint32_t crc = riftCrc32Init();
+    uint32_t payload_len = 0;
 
     File f = SPIFFS.open(path, "w");
     t_open = (uint32_t) (millis() - began);
@@ -459,6 +500,8 @@ struct RiftMsgLog {
       size_t need = 12 + (size_t) clen + (size_t) olen + (size_t) mlen;
       if (used + need > sizeof(buf)) {
         if (f.write(buf, used) != used) { ok = false; break; }
+        crc = riftCrc32Update(crc, buf, used);
+        payload_len += used;
         used = 0;
       }
 
@@ -478,7 +521,22 @@ struct RiftMsgLog {
       memcpy(&r[12 + clen + olen], p->msg, mlen);
       used += need;
     }
-    if (ok && used > 0 && f.write(buf, used) != used) ok = false;
+    if (ok && used > 0) {
+      if (f.write(buf, used) != used) {
+        ok = false;
+      } else {
+        crc = riftCrc32Update(crc, buf, used);
+        payload_len += used;
+      }
+    }
+    // The trailer last, and writing it is the commit. A save interrupted before
+    // this point leaves a generation the reader refuses, and the other generation -
+    // never touched by this write - is still the one it reads.
+    if (ok) {
+      uint8_t tr[RIFT_MSGLOG_TRAILER_LEN];
+      riftMsgLogTrailerWrite(tr, seq, payload_len, riftCrc32Final(crc));
+      if (f.write(tr, sizeof(tr)) != sizeof(tr)) ok = false;
+    }
     t_write = (uint32_t) (millis() - t0);
 
     t0 = millis();
@@ -486,15 +544,13 @@ struct RiftMsgLog {
     t_close = (uint32_t) (millis() - t0);
 
     if (!ok) {
-      // The partial file is kept, not removed. It used to be removed on the grounds
-      // that its header claims a count the file does not hold - but load() already
-      // stops at the first record that does not arrive and keeps what did, so a
-      // short file costs the newest messages and nothing else. Deleting it destroyed
-      // data the reader was built to recover, and if the power went before the retry
-      // the whole history was gone rather than its tail.
+      // The partial file is kept rather than removed, and now it costs nothing to
+      // keep: it has no trailer, so the reader refuses it and reads the other
+      // generation instead. gen_slot is not moved, so the retry writes this same
+      // slot again and the good generation stays where it is.
       //
-      // dirty stays set, so the backoff will retry and a later successful save
-      // rewrites the file whole.
+      // dirty stays set, so the backoff retries and a later save writes this
+      // generation whole.
       return false;
     }
 
@@ -507,7 +563,92 @@ struct RiftMsgLog {
 #endif
   }
 
-  void load(const char* path) {
+#if defined(ESP32)
+  // The trailer and the file size only, so choosing between the generations costs
+  // eighteen bytes a slot instead of reading either payload.
+  bool readTrailer(const char* path, uint32_t* seq, uint32_t* len, uint32_t* crc) {
+    File f = SPIFFS.open(path, "r");
+    if (!f) return false;
+    const uint32_t size = (uint32_t) f.size();
+    if (size < RIFT_MSGLOG_TRAILER_LEN || !f.seek(size - RIFT_MSGLOG_TRAILER_LEN)) {
+      f.close();
+      return false;
+    }
+    uint8_t tr[RIFT_MSGLOG_TRAILER_LEN];
+    const bool got = f.read(tr, sizeof(tr)) == sizeof(tr);
+    f.close();
+    return got && riftMsgLogTrailerParse(tr, size, seq, len, crc);
+  }
+
+  // Checked before a single entry is added, so a generation that fails leaves the
+  // log empty and the other one can still be tried. Streamed a bufferful at a time
+  // rather than read whole: the payload runs to about 3KB and there is no 3KB to
+  // spare at 60.8% RAM.
+  bool crcMatches(const char* path, uint32_t len, uint32_t want) {
+    File f = SPIFFS.open(path, "r");
+    if (!f) return false;
+    uint32_t crc = riftCrc32Init();
+    uint8_t buf[256];
+    uint32_t left = len;
+    while (left > 0) {
+      const size_t n = (left < sizeof(buf)) ? (size_t) left : sizeof(buf);
+      if (f.read(buf, n) != n) { f.close(); return false; }
+      crc = riftCrc32Update(crc, buf, n);
+      left -= n;
+    }
+    f.close();
+    return riftCrc32Final(crc) == want;
+  }
+#endif
+
+  void load() {
+#if defined(ESP32)
+    uint32_t seq[2] = { 0, 0 }, len[2] = { 0, 0 }, want[2] = { 0, 0 };
+    bool ok[2] = { false, false };
+    for (int s = 0; s < 2; s++) ok[s] = readTrailer(genPath(s), &seq[s], &len[s], &want[s]);
+
+    const int newest = riftPickNewerGeneration(ok[0], seq[0], ok[1], seq[1]);
+    if (newest >= 0) {
+      // Newest first, then the other one: a generation can carry a trailer that
+      // parses and still fail its CRC, and the second copy is what that case is
+      // for. Reading the older history is the right answer there - it is the
+      // newest one that is known to be whole.
+      for (int t = 0; t < 2; t++) {
+        const int s = (t == 0) ? newest : riftOtherGeneration(newest);
+        if (!ok[s]) continue;
+        if (!crcMatches(genPath(s), len[s], want[s])) {
+          riftLogf("msglog gen%d seq%u: bad CRC", s, (unsigned) seq[s]);
+          continue;
+        }
+        loadPayload(genPath(s));
+        gen_slot = (int8_t) s;
+        gen_seq = seq[s];
+        return;
+      }
+      riftLogf("msglog: both generations unreadable");
+    }
+
+    // No usable generation, which on the first boot after this change is the normal
+    // case and not a fault. gen_slot stays -1, so the first save writes slot 0, and
+    // the legacy file stays where it is as the older copy of last resort.
+    loadPayload(RIFT_MSGLOG_PATH);
+
+    // Reading a generation is not a change and loadPayload() clears dirty for that
+    // reason. Reading the *legacy* file is different: the history now exists only in
+    // the format being replaced, and nothing else would move it across until the
+    // next message happened to arrive - which on a quiet mesh is hours, all of them
+    // with no crash-safe copy. So the migration finishes itself, one debounce after
+    // boot. Only when there is something to migrate: a device with no history has
+    // nothing to gain from an empty generation, and its first message writes one.
+    if (count > 0) markDirty();
+#endif
+  }
+
+  // Reads one file that has already been established as complete, or the legacy
+  // single file. Unchanged from when there was only one: the payload format, its
+  // 6-byte header and all of its version handling are the same bytes as before, so
+  // generations wrap the old format rather than replacing it.
+  void loadPayload(const char* path) {
 #if defined(ESP32)
     File f = SPIFFS.open(path, "r");
     if (!f) return;
@@ -3693,8 +3834,16 @@ public:
     addReading("MSG WAKE", tmp, rift_pal.fg);
     // How long the last message-log write blocked for. There is no watchdog on
     // the main loop, so this is the number that says whether the debounce is
-    // enough or the write has to be broken up; then open / write / close, so a
-    // slow one can be attributed rather than guessed.
+    // enough; then open / write / close, so a slow one can be attributed rather
+    // than guessed.
+    //
+    // Measured on the device across five saves of the full 48 entries: 303-305ms
+    // in the steady state, of which 285-288ms is the open and 1-2ms is the write.
+    // That settles what this row used to leave open - breaking the write into
+    // pieces would buy nothing, because writing is not what blocks. It is
+    // SPIFFS.open(path, "w") truncating the file. Creating a slot that does not
+    // exist yet costs 710-970ms, which happens twice in a device's life, once per
+    // generation.
     snprintf(tmp, sizeof(tmp), "%d msg %ums", msg_log.count, (unsigned) msg_log.last_save_ms);
     addReading("MSGLOG", tmp, rift_pal.fg);
     snprintf(tmp, sizeof(tmp), "%u %u %u", (unsigned) msg_log.t_open, (unsigned) msg_log.t_write,
@@ -8787,7 +8936,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   // Before any screen exists, so COMMS and the popup open with the history
   // already in place rather than filling in a moment later.
   riftLoadSettings();   // before the first render, so the palette is right at boot
-  msg_log.load(RIFT_MSGLOG_PATH);
+  msg_log.load();
   // Builds before 0.5.0 wrote to a temporary and renamed it over the live file.
   // A device interrupted mid-save still has that temporary occupying a
   // filesystem which also holds the identity and has little room to spare.
@@ -9186,7 +9335,7 @@ void UITask::shutdown(bool restart){
   // A clean shutdown has no reason to lose the last few messages, so the
   // debounce is skipped here. This is also the only path that makes the loss
   // window in RIFT_MSGLOG_FLUSH_MILLIS apply solely to power being pulled.
-  if (msg_log.dirty) msg_log.save(RIFT_MSGLOG_PATH);
+  if (msg_log.dirty) msg_log.save();
 
   #ifdef PIN_BUZZER
   buzzer.shutdown();
@@ -9500,7 +9649,7 @@ void UITask::loop() {
   // private key. The timer restarts on each new message, so it fires once the
   // traffic settles rather than every 20 seconds during it.
   if (msg_log.dueToSave(millis())) {
-    msg_log.save(RIFT_MSGLOG_PATH);
+    msg_log.save();
   }
   if (riftDue((uint32_t) millis(), _next_state_check)) {
     _next_state_check = (uint32_t) millis() + 4000;

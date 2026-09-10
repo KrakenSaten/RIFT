@@ -699,6 +699,162 @@ TEST(ShouldFlush, ACleanLogIsNeverWrittenByTheDeadlineEither) {
     EXPECT_FALSE(riftShouldFlush(false, 999999, 0, 20000, 0, 0, 0, 120000u));
 }
 
+// ------------------------------------------------ message log generations
+//
+// The history was one file opened with "w", which empties it before the new copy
+// exists. Two generations plus a trailer make an interrupted save cost nothing:
+// the writer never truncates the generation being read from, and the reader
+// refuses one whose trailer is missing or whose CRC does not match.
+
+TEST(MsgLogGen, Crc32IsTheStandardOne) {
+    // The check value every CRC-32 implementation agrees on. Pinned because a file
+    // written here should be verifiable with any other tool.
+    const char* s = "123456789";
+    uint32_t c = riftCrc32Update(riftCrc32Init(), (const uint8_t*) s, 9);
+    EXPECT_EQ(0xCBF43926u, riftCrc32Final(c));
+
+    // and the empty message
+    EXPECT_EQ(0u, riftCrc32Final(riftCrc32Init()));
+}
+
+TEST(MsgLogGen, Crc32IsTheSameStreamedAsInOneGo) {
+    // it is computed a bufferful at a time while the file is written, so the split
+    // must not matter
+    uint8_t data[300];
+    for (size_t i = 0; i < sizeof(data); i++) data[i] = (uint8_t) (i * 31 + 7);
+
+    const uint32_t whole = riftCrc32Final(
+        riftCrc32Update(riftCrc32Init(), data, sizeof(data)));
+
+    for (size_t cut = 0; cut <= sizeof(data); cut++) {
+        uint32_t c = riftCrc32Init();
+        c = riftCrc32Update(c, data, cut);
+        c = riftCrc32Update(c, data + cut, sizeof(data) - cut);
+        EXPECT_EQ(whole, riftCrc32Final(c)) << "split at " << cut;
+    }
+}
+
+TEST(MsgLogGen, TrailerRoundTrips) {
+    uint8_t tr[RIFT_MSGLOG_TRAILER_LEN];
+    riftMsgLogTrailerWrite(tr, 42, 1234, 0xDEADBEEFu);
+
+    uint32_t seq = 0, len = 0, crc = 0;
+    ASSERT_TRUE(riftMsgLogTrailerParse(tr, 1234 + RIFT_MSGLOG_TRAILER_LEN,
+                                       &seq, &len, &crc));
+    EXPECT_EQ(42u, seq);
+    EXPECT_EQ(1234u, len);
+    EXPECT_EQ(0xDEADBEEFu, crc);
+}
+
+TEST(MsgLogGen, TrailerRefusesWhatItShould) {
+    uint8_t good[RIFT_MSGLOG_TRAILER_LEN];
+    riftMsgLogTrailerWrite(good, 7, 100, 0x11223344u);
+    const uint32_t size = 100 + RIFT_MSGLOG_TRAILER_LEN;
+    ASSERT_TRUE(riftMsgLogTrailerParse(good, size, NULL, NULL, NULL));
+
+    // a payload truncated under an intact trailer. This is the case a magic check
+    // alone would pass, and the reason the length is checked against the file.
+    EXPECT_FALSE(riftMsgLogTrailerParse(good, size - 1, NULL, NULL, NULL));
+    EXPECT_FALSE(riftMsgLogTrailerParse(good, size + 1, NULL, NULL, NULL));
+    EXPECT_FALSE(riftMsgLogTrailerParse(good, 0, NULL, NULL, NULL));
+    EXPECT_FALSE(riftMsgLogTrailerParse(good, RIFT_MSGLOG_TRAILER_LEN - 1,
+                                        NULL, NULL, NULL));
+
+    for (int i = 0; i < 4; i++) {   // every byte of the magic
+        uint8_t bad[RIFT_MSGLOG_TRAILER_LEN];
+        memcpy(bad, good, sizeof(bad));
+        bad[i] ^= 0xFF;
+        EXPECT_FALSE(riftMsgLogTrailerParse(bad, size, NULL, NULL, NULL)) << "magic " << i;
+    }
+
+    uint8_t ver[RIFT_MSGLOG_TRAILER_LEN];
+    memcpy(ver, good, sizeof(ver));
+    ver[4] = RIFT_MSGLOG_TRAILER_VER + 1;   // a file from a newer build
+    EXPECT_FALSE(riftMsgLogTrailerParse(ver, size, NULL, NULL, NULL));
+
+    // an erased sector reads as zeroes, and seq 0 must not pass as a first save
+    uint8_t zeroes[RIFT_MSGLOG_TRAILER_LEN] = { 0 };
+    EXPECT_FALSE(riftMsgLogTrailerParse(zeroes, size, NULL, NULL, NULL));
+    uint8_t seq0[RIFT_MSGLOG_TRAILER_LEN];
+    riftMsgLogTrailerWrite(seq0, 0, 100, 0);
+    EXPECT_FALSE(riftMsgLogTrailerParse(seq0, size, NULL, NULL, NULL));
+
+    // a payload too short to hold even the record header it claims
+    uint8_t tiny[RIFT_MSGLOG_TRAILER_LEN];
+    riftMsgLogTrailerWrite(tiny, 3, 5, 0);
+    EXPECT_FALSE(riftMsgLogTrailerParse(tiny, 5 + RIFT_MSGLOG_TRAILER_LEN,
+                                        NULL, NULL, NULL));
+}
+
+TEST(MsgLogGen, PicksTheNewerGeneration) {
+    EXPECT_EQ(1, riftPickNewerGeneration(true, 4, true, 9));
+    EXPECT_EQ(0, riftPickNewerGeneration(true, 9, true, 4));
+    EXPECT_EQ(0, riftPickNewerGeneration(true, 5, false, 99));
+    EXPECT_EQ(1, riftPickNewerGeneration(false, 99, true, 5));
+    EXPECT_EQ(-1, riftPickNewerGeneration(false, 1, false, 2));
+    EXPECT_EQ(0, riftPickNewerGeneration(true, 7, true, 7));   // a tie, slot 0
+}
+
+TEST(MsgLogGen, TheSequenceComparisonSurvivesItsWrap) {
+    // slot 0 wrote 0xFFFFFFFF, slot 1 then wrote 1 (0 being reserved), so slot 1
+    // is the newer despite being the smaller number
+    EXPECT_EQ(1, riftPickNewerGeneration(true, 0xFFFFFFFFu, true, 1));
+    EXPECT_EQ(0, riftPickNewerGeneration(true, 1, true, 0xFFFFFFFFu));
+}
+
+TEST(MsgLogGen, TheSequenceSkipsTheReservedZero) {
+    EXPECT_EQ(1u, riftNextGenSeq(0));
+    EXPECT_EQ(2u, riftNextGenSeq(1));
+    EXPECT_EQ(1u, riftNextGenSeq(0xFFFFFFFFu));   // wraps to 1, not to 0
+}
+
+TEST(MsgLogGen, SlotsAlternate) {
+    EXPECT_EQ(1, riftOtherGeneration(0));
+    EXPECT_EQ(0, riftOtherGeneration(1));
+
+    // ten saves in a row never write the slot they just read from
+    int slot = -1;
+    uint32_t seq = 0;
+    for (int i = 0; i < 10; i++) {
+        const int target = (slot < 0) ? 0 : riftOtherGeneration(slot);
+        EXPECT_NE(target, slot) << "save " << i << " truncated the live generation";
+        seq = riftNextGenSeq(seq);
+        slot = target;
+    }
+    EXPECT_EQ(10u, seq);
+}
+
+TEST(MsgLogGen, AnInterruptedSaveLeavesTheOtherGenerationInCharge) {
+    // slot 0 holds a complete generation 5; slot 1 was being written when the power
+    // went, so it has no valid trailer
+    const int newest = riftPickNewerGeneration(true, 5, false, 0);
+    EXPECT_EQ(0, newest);
+
+    // and the save after that writes slot 1 again rather than the good one
+    EXPECT_EQ(1, riftOtherGeneration(newest));
+}
+
+TEST(MsgLogGen, APayloadThatChangedUnderItsTrailerFailsTheCrc) {
+    // the case the CRC is for: the length is right, the trailer is intact, and a
+    // byte of the payload is not what was written
+    uint8_t payload[64];
+    for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (uint8_t) i;
+    const uint32_t crc = riftCrc32Final(
+        riftCrc32Update(riftCrc32Init(), payload, sizeof(payload)));
+
+    uint8_t tr[RIFT_MSGLOG_TRAILER_LEN];
+    riftMsgLogTrailerWrite(tr, 2, sizeof(payload), crc);
+    uint32_t got_len = 0, want_crc = 0;
+    ASSERT_TRUE(riftMsgLogTrailerParse(tr, sizeof(payload) + RIFT_MSGLOG_TRAILER_LEN,
+                                       NULL, &got_len, &want_crc));
+    EXPECT_EQ(sizeof(payload), got_len);
+
+    payload[17] ^= 0x01;
+    const uint32_t after = riftCrc32Final(
+        riftCrc32Update(riftCrc32Init(), payload, sizeof(payload)));
+    EXPECT_NE(want_crc, after);
+}
+
 // ------------------------------------------------------------ channel colours
 //
 // The contrast is computed here rather than taken from the design note, because

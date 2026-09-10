@@ -1242,6 +1242,113 @@ static inline uint32_t riftNextRetryAt(uint32_t now, uint8_t failures_after) {
   return now + riftSaveBackoffMillis(failures_after);
 }
 
+// -------------------------------------------------- message log, on the flash
+//
+// The history was one file, opened with "w". That truncates before the new copy
+// exists, so a first write that failed - or power going during the 251-380ms a
+// save of 48 entries costs on the device - left no history at all rather than an
+// older one. The comments claimed an interruption cost the newest messages, which
+// was only true once enough of the new file had been written.
+//
+// Two generations fix it without depending on rename() being atomic on SPIFFS,
+// which it is not promised to be. A save writes the generation that is *not*
+// current, so the file being read from is never the file being truncated, and the
+// reader takes the newest generation whose trailer is present and whose CRC
+// matches its payload.
+//
+// The trailer is at the end on purpose. A header would have to be written before
+// the payload it describes, so its CRC would need a seek back across a sector
+// already written - a second write to the one place that must not be half done.
+// Written last, its presence *is* the commit: an interrupted save leaves a
+// generation with no trailer, which is exactly what incomplete should look like,
+// and it takes one forward pass to write.
+//
+// The payload is unchanged - the same 6-byte header and the same records, with
+// the same version handling - so this wraps the existing format rather than
+// replacing it.
+
+#define RIFT_MSGLOG_TRAILER_LEN 18
+#define RIFT_MSGLOG_TRAILER_VER 1
+
+static inline uint32_t riftCrc32Init() { return 0xFFFFFFFFu; }
+
+// Bitwise rather than table-driven. A 256-entry table is 1KB of flash to checksum
+// at most 3KB twice a minute, and this runs inside a write that already costs
+// hundreds of milliseconds with the SPI bus held away from the radio; eight shifts
+// a byte does not register against that.
+static inline uint32_t riftCrc32Update(uint32_t crc, const uint8_t* p, size_t n) {
+  while (n--) {
+    crc ^= *p++;
+    for (int k = 0; k < 8; k++) {
+      crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t) (-(int32_t) (crc & 1u)));
+    }
+  }
+  return crc;
+}
+
+static inline uint32_t riftCrc32Final(uint32_t crc) { return crc ^ 0xFFFFFFFFu; }
+
+static inline void riftMsgLogTrailerWrite(uint8_t out[RIFT_MSGLOG_TRAILER_LEN],
+                                          uint32_t seq, uint32_t payload_len,
+                                          uint32_t crc) {
+  out[0] = 'R'; out[1] = 'G'; out[2] = 'E'; out[3] = 'N';
+  out[4] = RIFT_MSGLOG_TRAILER_VER;
+  out[5] = 0;   // reserved
+  memcpy(&out[6],  &seq, 4);
+  memcpy(&out[10], &payload_len, 4);
+  memcpy(&out[14], &crc, 4);
+}
+
+// file_size is what the filesystem reports, and checking the length against it is
+// what stops a trailer from vouching for a payload that was truncated under it:
+// the magic and the version would still read correctly on a file cut short between
+// the payload and its own trailer.
+//
+// seq 0 is reserved as "no generation", so a trailer full of zeroes - a sector
+// erased but not yet written - cannot pass as a legitimate first save.
+static inline bool riftMsgLogTrailerParse(const uint8_t in[RIFT_MSGLOG_TRAILER_LEN],
+                                          uint32_t file_size, uint32_t* seq,
+                                          uint32_t* payload_len, uint32_t* crc) {
+  if (in[0] != 'R' || in[1] != 'G' || in[2] != 'E' || in[3] != 'N') return false;
+  if (in[4] != RIFT_MSGLOG_TRAILER_VER) return false;
+  if (file_size < RIFT_MSGLOG_TRAILER_LEN) return false;
+
+  uint32_t s = 0, n = 0, c = 0;
+  memcpy(&s, &in[6],  4);
+  memcpy(&n, &in[10], 4);
+  memcpy(&c, &in[14], 4);
+
+  if (s == 0) return false;
+  if (n != file_size - RIFT_MSGLOG_TRAILER_LEN) return false;
+  if (n < 6) return false;   // the payload's own 6-byte header has to be in there
+
+  if (seq) *seq = s;
+  if (payload_len) *payload_len = n;
+  if (crc) *crc = c;
+  return true;
+}
+
+// Which generation to read: 0, 1, or -1 when neither is usable. The comparison is
+// signed on the difference, so a sequence that has run past 2^32 does not make the
+// older generation look newer - the same wrap-safe form the flush deadlines above
+// use. Ties go to slot 0, which cannot happen from this code writing but can from
+// a filesystem that duplicated a sector.
+static inline int riftPickNewerGeneration(bool a_ok, uint32_t a_seq,
+                                          bool b_ok, uint32_t b_seq) {
+  if (a_ok && b_ok) return ((int32_t) (a_seq - b_seq) >= 0) ? 0 : 1;
+  if (a_ok) return 0;
+  if (b_ok) return 1;
+  return -1;
+}
+
+static inline int riftOtherGeneration(int slot) { return slot == 0 ? 1 : 0; }
+
+// Skips 0 on wrap, because riftMsgLogTrailerParse() reserves it.
+static inline uint32_t riftNextGenSeq(uint32_t seq) {
+  const uint32_t next = seq + 1u;
+  return next == 0u ? 1u : next;
+}
+
 // ---------------------------------------------------------------- hop buckets
 //
 // NODES' summary row. The ranges are fixed on purpose: DIRECT | 1-2 | 3-5 | 6+.
