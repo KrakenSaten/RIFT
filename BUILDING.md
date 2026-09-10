@@ -277,6 +277,36 @@ rather than an edit to upstream's, so merges from upstream stay conflict-free.
 from the same binary attached to the release, and refuses a release if the tag and
 `RIFT_VERSION` disagree.
 
+### Tagging a release
+
+RIFT's tags are bare `v*`. `RELEASE.md` is upstream's file, left as upstream's, and
+describes the prefixed tags for the stock firmwares (`companion-v1.0.0` and its
+siblings) with releases created as drafts. None of that is how RIFT releases, which
+is why this section exists here rather than there.
+
+`RIFT_VERSION` in `variants/lilygo_tdeck/platformio.ini` has to equal the tag
+without its leading `v`, **including any pre-release suffix**: tagging `v1.0.0-rc1`
+needs `RIFT_VERSION` to read `1.0.0-rc1`. The workflow refuses the release
+otherwise. It is strict on purpose - a tester reading `1.0.0` off the SYSTEM screen
+while running a candidate cannot tell the two apart, and a bug report against the
+wrong one costs more than the bump.
+
+Where a build ends up, one destination per kind of run:
+
+| Run | GitHub release | Browser flasher |
+|---|---|---|
+| `v1.0.0` | release, and GitHub's "latest" | the site root |
+| `v1.0.0-rc1` | marked pre-release | `rc/` |
+| manual `workflow_dispatch` | none | `dev/` |
+
+The rule separating the first two is the SemVer hyphen, not a list of suffixes.
+`on: push: tags: ['v*']` matches a candidate as readily as a stable release, and
+the site root is what the README's install link points at - so without that
+condition, tagging a candidate would have replaced the stable flasher with it and
+the only tell would have been the version string on the page. That is the same
+failure a manual run caused three times before the `dev/` split, reached by a
+different route.
+
 ### Supply chain
 
 Third-party actions in RIFT's own workflows are pinned to commit SHAs, with the
@@ -284,11 +314,17 @@ version noted beside each. A tag is a movable pointer, and these workflows are
 what produce the binaries people flash. Permissions are read-only by default; only
 the job that creates the release and pushes to `gh-pages` is granted write.
 
-Two gaps, stated rather than papered over:
+The shared `.github/actions/setup-build-environment` is now pinned too -
+`actions/cache` and `actions/setup-python` by SHA, and `platformio` to an exact
+version rather than `--upgrade`, which had made the toolchain that compiled a
+release whatever PyPI served that morning. That does diverge from upstream, which
+is the price: a build check that can change without a commit is the one thing it
+must not do. The majors pinned are deliberately the ones already in use - upstream
+has moved to `cache@v6` and `setup-python@v7` - so this pins today's behaviour
+rather than folding an upgrade into it.
 
-- The shared `.github/actions/setup-build-environment` is upstream's and still
-  refers to `actions/cache@v5` and `actions/setup-python@v6` by tag. Pinning it
-  there would diverge from upstream and change their workflows too.
+One gap remains, stated rather than papered over:
+
 - The browser flasher loads ESP Web Tools 10.4.0 from unpkg. The version is
   pinned, but the `?module` form resolves that library's own dependencies from the
   CDN at load time using ranges. Removing that runtime dependency means bundling

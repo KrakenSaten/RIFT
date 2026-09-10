@@ -53,6 +53,13 @@ jobs:
       # comes from the tag, so the two can drift and ship a binary that calls
       # itself something the release does not. Cheaper to refuse than to detect
       # later from a screenshot.
+      #
+      # This applies to a release candidate too, and deliberately: tagging
+      # v1.0.0-rc1 requires RIFT_VERSION to be "1.0.0-rc1", not "1.0.0". A tester
+      # reading 1.0.0 off the SYSTEM screen while running a candidate has no way to
+      # tell the two apart, and a bug report against "1.0.0" that was really a
+      # candidate costs more than the version bump does. So the check is left strict
+      # and the suffix goes in both places.
       - name: Tag must match RIFT_VERSION
         if: github.ref_type == 'tag'
         run: |
@@ -198,22 +205,47 @@ jobs:
           # before anyone can see it, and pushing the tag was already the decision
           # to release
           draft: false
+          # Any tag carrying a SemVer pre-release suffix - v1.0.0-rc1, -beta2 - is
+          # marked as one, so GitHub stops calling it the latest release and the
+          # releases page says which is which. The rule is the hyphen rather than a
+          # list of suffixes, because that is what SemVer already means by it.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           body_path: RELEASE_NOTES.md
           files: out/*
 
-      # A tag build is the release: it replaces the page root, which is what the
+      # A stable tag is the release: it replaces the page root, which is what the
       # README link points at.
       #
-      # keep_files, because the dev/ directory below lives on the same branch and
-      # a root deploy must not delete it. The three files at the root have fixed
-      # names, so nothing stale accumulates there.
+      # A pre-release tag must not. The root flasher is what anyone arriving from
+      # the README gets, and 'tags: [v*]' matches v1.0.0-rc1 as readily as v1.0.0 -
+      # so before this condition existed, tagging a candidate would have replaced
+      # the stable flasher with it, and the only tell would have been the version
+      # string on the page. That is the same failure a manual run caused three times
+      # before the dev/ split below, arriving by a different route.
+      #
+      # keep_files, because the dev/ and rc/ directories below live on the same
+      # branch and a root deploy must not delete them. The three files at the root
+      # have fixed names, so nothing stale accumulates there.
       - name: Deploy flasher to GitHub Pages
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./site
           publish_branch: gh-pages
+          keep_files: true
+
+      # A pre-release tag gets its own flasher under rc/, so a candidate can be
+      # handed to testers by link without touching the stable one. Same shape as
+      # dev/ below and for the same reason.
+      - name: Deploy a candidate flasher under rc/
+        if: github.ref_type == 'tag' && contains(github.ref_name, '-')
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          destination_dir: rc
           keep_files: true
 
       # A manual run publishes a dev-<sha> build so the flasher can be tested on
