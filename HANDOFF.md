@@ -168,10 +168,21 @@ the commit messages. Neither is repeated here.
 
 ### Open items
 
-0. **Room servers in COMMS — the only part of the redesign not built.** The rest
-   shipped in two commits, and `design/comms-redesign.md` records the direction. What
-   remains is the third conversation kind, and it is blocked on something real rather
-   than on effort.
+0. **Room servers in COMMS — built in September 2026, by the third of the three
+   routes below.** `design/comms-redesign.md` records the direction. What was
+   decided: a login per action, and no persistent status. `sendToContact()` checks
+   `roomLoginState()` before posting to an `ADV_TYPE_ROOM` contact, opens the login
+   panel when there is none, and leaves the draft in the compose line for Enter
+   afterwards. `roomLoginState()` reads RIFT's own repeater-login session, not
+   `hasConnectionTo()`, so nothing that shipped rests on Connections.
+
+   One thing the code does not say: `RIFT_CONV_ROOM` is still only a `#define`
+   (`RiftLogic.h:1326`) and is used nowhere. A room is not a third conversation
+   kind — it is a contact conversation whose contact is `ADV_TYPE_ROOM`.
+   The reservation is there if a room ever needs its own kind; it does not yet.
+
+   The rest of this item is kept rather than deleted, because the blocker it
+   describes is still true, and it is what ruled the other two routes out.
 
    A room has to be **logged in** to over the radio before you can post, so a
    connect/connected status is exactly the right thing to want. But
@@ -182,16 +193,19 @@ the commit messages. Neither is repeated here.
    "connected" when it is not, which is worse than none. And upstream means to remove
    the mechanism it would rest on.
 
-   `RIFT_CONV_ROOM` is reserved and unimplemented, so the structure takes it without
-   rework. Before building it, one of these has to be true: upstream says what
-   replaces Connections, or RIFT owns the keep-alive deliberately and accepts the
-   divergence, or rooms work with a login per action and no persistent status —
-   honest, but probably not what a room is for.
+   Three routes were open, and one had to be true before building: upstream says
+   what replaces Connections, or RIFT owns the keep-alive deliberately and accepts
+   the divergence, or rooms work with a login per action and no persistent status.
+   **The third was taken.** The reservation about it stands as written — "honest,
+   but probably not what a room is for" — and it is why the upstream question below
+   is still worth asking.
 
-   **Queued, 2026-08-23: ask upstream rather than guess.** The blocker is not a
-   missing feature, it is not knowing what a `TODO - deprecate` means in practice —
-   whether Connections is being replaced, dropped, or simply left where it is. That is
-   a question, and an issue asking it costs nothing and unblocks everything after it.
+   **Still queued, and now narrower: ask upstream rather than guess.** Rooms work
+   without an answer, so this blocks nothing from shipping any more. It decides one
+   thing only: whether a *persistent* connect/connected status can be built — which
+   is exactly what a login per action does not give. `checkConnections()` is still
+   commented out at `MyMesh.cpp:3336` with `TODO - deprecate the 'Connections'
+   stuff`, so the question is unchanged: replaced, dropped, or simply left there.
 
    A pull request is the weaker opening move here, and worth saying why before anyone
    spends an evening on one: uncommenting `checkConnections()` would be a patch that
@@ -201,9 +215,11 @@ the commit messages. Neither is repeated here.
    a keep-alive and nothing replaces it yet, that is also the strongest possible case
    for the patch, and it will have been made by them rather than by us.
 
-   A second thing to settle first: a room password is a secret on screen, the same
-   class as the one-time channel key, which had to be wiped on leaving SYSTEM because
-   coming back redisplayed it. Any password field inherits that requirement.
+   **Settled, and done.** A room password is a secret on screen, the same class as
+   the one-time channel key, which had to be wiped on leaving SYSTEM because coming
+   back redisplayed it. The login field inherits that: it renders as dots, and the
+   edit buffer is `memset` on leaving the field either way — a password left there
+   would be one keypress from being redrawn unmasked in command mode.
 
    Two smaller things the redesign left standing, both deliberate. Unread is
    session-only, so a dot does not survive a reboot. And a channel scrolled out of

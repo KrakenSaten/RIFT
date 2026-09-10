@@ -3,8 +3,14 @@ runs:
   using: "composite"
   steps:
 
+    # Pinned by commit, like every action in rift-release.yml and
+    # rift-build-check.yml. A moving major tag means the build can change without a
+    # commit here, which is the one thing a build check must not do. Note these are
+    # deliberately the majors already in use - actions/cache is on v6 and
+    # setup-python on v7 upstream - so this pins today's behaviour rather than
+    # bundling an upgrade into it.
     - name: Init Cache
-      uses: actions/cache@v5
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
       with:
         path: |
           ~/.cache/pip
@@ -12,14 +18,20 @@ runs:
         key: ${{ runner.os }}-pio
 
     - name: Install Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
       with:
         python-version: '3.13'
 
     - name: Install PlatformIO
       shell: bash
       run: |
-        pip install --upgrade platformio
+        # Pinned for the same reason as the actions above: --upgrade meant the
+        # toolchain that compiled a release was whatever PyPI served that morning,
+        # and a build that cannot be reproduced cannot be bisected. 6.2.0 is what
+        # --upgrade resolved to when this was pinned, so CI keeps behaving as it
+        # did. Raise it deliberately, in its own commit, with the five
+        # environments built.
+        pip install platformio==6.2.0
 
     # a git tag of "room-server-v1.2.3" should set "v1.2.3" as GIT_TAG_VERSION
     - name: Extract Version from Git Tag

@@ -30,6 +30,12 @@ on:
       - 'build.sh'
       - 'merge-bin.py'
       - 'boards/**'
+      # PlatformIO compiles lib/ automatically - ed25519 lives there, and it signs
+      # every identity - and include/ is on the include path. Both are build inputs
+      # that sat outside this filter, so a commit touching only one of them ran no
+      # CI at all.
+      - 'lib/**'
+      - 'include/**'
   pull_request:
     # feature work happens on rift-* branches and was getting no CI at all
     branches: [rift-tdeck, 'rift-*']
@@ -54,6 +60,12 @@ on:
       - 'build.sh'
       - 'merge-bin.py'
       - 'boards/**'
+      # PlatformIO compiles lib/ automatically - ed25519 lives there, and it signs
+      # every identity - and include/ is on the include path. Both are build inputs
+      # that sat outside this filter, so a commit touching only one of them ran no
+      # CI at all.
+      - 'lib/**'
+      - 'include/**'
   workflow_dispatch:
 
 # nothing here writes to the repository

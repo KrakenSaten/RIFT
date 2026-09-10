@@ -6794,7 +6794,9 @@ private:
   }
 
   void sendToContact() {
-    // must be a live pointer - MyMesh stores it in its ACK table
+    // must be a live pointer. Not for the ACK table any more - that keeps the
+    // public key - but ContactInfo caches its shared secret through a mutable
+    // field, so a copy would pay for another ECDH on every send
     ContactInfo* rcpt = the_mesh.lookupContactByPubKey(_target_key, 6);
     if (rcpt == NULL) {
       _task->showAlert("Contact lost", 1200);
