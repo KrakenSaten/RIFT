@@ -47,6 +47,37 @@
 // the mapping did only the axis swap and the invert, so a tap in the true corner
 // arrived up to 11 pixels short of it, and the top rows of the nav bar could be
 // missed by a finger that was on them.
+//
+// A SECOND UNIT DOES NOT AGREE, and the values below are the first unit's. The
+// panel that answers on 0x5D, measured 2026-09-10 the same way: display top-right
+// gave raw (233, 305) and bottom-left raw (6, 5).
+//
+// Two of the four are wrong for that panel, and the argument is that a finger
+// cannot land outside the glass:
+//
+//   raw X at the top    read 233, where this says 228  -> true value is >= 233
+//   raw Y at the left   read 5,   where this says 8    -> true value is <= 5
+//
+// The other two contradict nothing: raw X at the bottom read 6 against 6, and raw
+// Y at the right read 305 against 310, which fits either a narrower panel or a
+// finger a few counts inside the edge. One touch cannot tell those apart.
+//
+// Both corners still map to the right display corner on that unit, but two of them
+// by clamping - (228-233)*239/222 is -5.4 and (5-8)*319/302 is -3.2, so the top
+// five and left three pixel rows compress onto the edge. The one consequence that
+// is felt: raw Y 305 maps to x=313, so the rightmost six columns cannot be reached.
+//
+// The values are LEFT AS THE FIRST UNIT'S ON PURPOSE, because no single set serves
+// both. Moving TOUCH_RAW_X_AT_TOP to 233 costs the other panel its top five rows
+// instead - (233-228)*239/227 is 5.3 - so the trade only moves the loss.
+//
+// Which says these do not belong in a build flag at all. They are in
+// variants/lilygo_tdeck/platformio.ini, shared by every T-Deck build, while the
+// measurements say the panels differ per unit - the same thing the I2C address
+// turned out to do. The fix is a calibration stored per device, or reading the
+// GT911's own resolution registers instead of measuring by hand. Neither is done,
+// and at six pixels it has not been worth doing; this note exists so the next
+// person does not "correct" the constants towards whichever panel is on the desk.
 #ifndef TOUCH_RAW_Y_AT_LEFT
   #define TOUCH_RAW_Y_AT_LEFT    8
 #endif
