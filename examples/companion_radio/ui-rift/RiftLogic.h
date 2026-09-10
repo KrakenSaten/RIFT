@@ -1201,12 +1201,27 @@ static inline uint32_t riftSaveBackoffMillis(uint8_t failures) {
   return 60000u;
 }
 
+// The debounce answers one question - has the burst ended? - and on a channel
+// that never goes quiet the answer is never. Every message and every delivery
+// update calls markDirty(), which pushes dirty_at forward, so ten minutes of
+// traffic at one message per ten seconds permitted no save at all: a 20-second
+// debounce was never an upper bound on how long the log could stay unwritten, and
+// the only thing that bounded it was the traffic stopping.
+//
+// So there are two routes to a write now, and either is enough: the burst has
+// settled, or it has been max_unsaved since the first unsaved change regardless.
+// The backoff after a failure vetoes both. max_unsaved of 0 disables the deadline,
+// which is what the callers that only ever wanted the debounce pass.
 static inline bool riftShouldFlush(bool dirty, uint32_t now, uint32_t dirty_at,
-                                   uint32_t debounce, uint8_t failures, uint32_t retry_at) {
+                                   uint32_t debounce, uint8_t failures, uint32_t retry_at,
+                                   uint32_t first_dirty_at = 0, uint32_t max_unsaved = 0) {
   if (!dirty) return false;
-  if (now - dirty_at < debounce) return false;          // burst has not settled
   if (failures > 0 && (int32_t) (now - retry_at) < 0) return false;   // backing off
-  return true;
+  if ((uint32_t) (now - dirty_at) >= debounce) return true;           // burst has settled
+  // and the deadline, for the burst that does not end. Unsigned throughout, so it
+  // survives the millis() wrap the same way the debounce above does.
+  if (max_unsaved > 0 && (uint32_t) (now - first_dirty_at) >= max_unsaved) return true;
+  return false;
 }
 
 // The counter and the deadline are two decisions, and treating them as one broke

@@ -122,6 +122,18 @@ static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::path
 // no longer written; kept so a stale one from an older build can be removed
 #define RIFT_MSGLOG_TMP          "/rift_msgs.new"
 #define RIFT_MSGLOG_FLUSH_MILLIS 20000
+// The ceiling on how long the log may stay unwritten, whatever the traffic does.
+// Chosen from the cost measured on the device rather than picked: at the full 48
+// entries a save took 251ms and 380ms on two occasions in one session (SYSTEM's
+// event log records any save over 50ms), so 380ms is the figure to budget, and it
+// is 380ms with the SPI bus held away from the LoRa radio and no watchdog to catch
+// an overrun. At 120s that is 0.32% of the time under sustained traffic, against
+// 0.63% at 60s - and the exposure it bounds is two minutes of messages rather than
+// one. Two minutes is an acceptable loss on a power cut; doubling the radio's
+// blackout rate to halve it is not an obvious trade, so this takes the upper end of
+// the 60-120s range the review suggested. The debounce above still decides the
+// common case, where a burst ends and nothing has to wait for this at all.
+#define RIFT_MSGLOG_MAX_UNSAVED_MILLIS 120000
 #define RIFT_CHAR_W         6   // Adafruit GFX classic font cell at setTextSize(1)
 #define RIFT_LINE_H        12   // row pitch used throughout this codebase
 
@@ -325,6 +337,7 @@ struct RiftMsgLog {
 
   bool dirty = false;
   unsigned long dirty_at = 0;   // when, so the write can wait for the burst to end
+  unsigned long first_dirty_at = 0;   // and when it first went dirty, for the deadline
   uint32_t last_save_ms = 0;    // how long the last write took, for SYSTEM
   // Phase breakdown - open / write / close. The total came out at 553ms for four
   // messages, which is about 200 bytes: far too little data for the volume to be
@@ -333,7 +346,15 @@ struct RiftMsgLog {
   // removing four of them was enough.
   uint32_t t_open = 0, t_write = 0, t_close = 0;
 
-  void markDirty() { dirty = true; dirty_at = millis(); }
+  // dirty_at moves on every change; first_dirty_at is set only on the clean-to-dirty
+  // transition, because the deadline measures from the oldest unsaved change and not
+  // from the newest. The three places that clear dirty leave it stale on purpose - it
+  // is read only while dirty, and the next transition sets it again.
+  void markDirty() {
+    if (!dirty) first_dirty_at = millis();
+    dirty = true;
+    dirty_at = millis();
+  }
 
   // Layout: "RMSG", version, count, then records oldest-first. Strings are
   // length-prefixed rather than fixed - a typical message is a fraction of the
@@ -370,7 +391,8 @@ struct RiftMsgLog {
   // both in RiftLogic.h, so the backoff is tested without a filesystem
   bool dueToSave(unsigned long now) const {
     return riftShouldFlush(dirty, (uint32_t) now, (uint32_t) dirty_at,
-                           RIFT_MSGLOG_FLUSH_MILLIS, save_failures, (uint32_t) retry_at);
+                           RIFT_MSGLOG_FLUSH_MILLIS, save_failures, (uint32_t) retry_at,
+                           (uint32_t) first_dirty_at, RIFT_MSGLOG_MAX_UNSAVED_MILLIS);
   }
 
   bool save(const char* path) {

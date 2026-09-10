@@ -626,6 +626,79 @@ TEST(ShouldFlush, ASuccessfulSaveClearsTheBackoff) {
     EXPECT_TRUE(riftShouldFlush(true, 100000, 0, 20000, 0, 0xFFFFFFFFu));
 }
 
+// The debounce was never an upper bound. Every message pushes dirty_at forward, so
+// a channel that stays busy deferred the write indefinitely - and the only thing
+// that ended the deferral was the traffic stopping. Measured on the device: at the
+// full 48 entries a save costs 251-380ms, which is what the 120s ceiling is chosen
+// against.
+
+TEST(ShouldFlush, ContinuousTrafficCannotDeferTheWriteForever) {
+    // a new message every ten seconds, each one restarting a 20-second debounce
+    const uint32_t first = 100000;
+    uint32_t dirty_at = first;
+    bool flushed = false;
+    for (uint32_t now = first; now <= first + 600000u; now += 10000u) {
+        if (riftShouldFlush(true, now, dirty_at, 20000, 0, 0, first, 120000u)) {
+            flushed = true;
+            EXPECT_EQ(120000u, now - first) << "fires at the deadline, not after it";
+            break;
+        }
+        dirty_at = now;   // the message arrives, and the debounce starts again
+    }
+    EXPECT_TRUE(flushed) << "ten minutes of traffic and never a write";
+
+    // the same ten minutes with the deadline disabled is the old behaviour, kept
+    // here as the demonstration: no write at any point
+    dirty_at = first;
+    for (uint32_t now = first; now <= first + 600000u; now += 10000u) {
+        EXPECT_FALSE(riftShouldFlush(true, now, dirty_at, 20000, 0, 0, first, 0))
+            << "unsaved for " << (now - first) << "ms";
+        dirty_at = now;
+    }
+}
+
+TEST(ShouldFlush, TheDeadlineMeasuresFromTheOldestUnsavedChange) {
+    const uint32_t first = 50000;
+    // the newest change was five seconds ago, so the debounce says wait; the oldest
+    // unsaved one was two minutes ago, which is what the deadline measures
+    EXPECT_TRUE (riftShouldFlush(true, first + 120000u, first + 115000u, 20000, 0, 0,
+                                 first, 120000u));
+    EXPECT_FALSE(riftShouldFlush(true, first + 119999u, first + 115000u, 20000, 0, 0,
+                                 first, 120000u));
+}
+
+TEST(ShouldFlush, TheSettledBurstStillWinsWithoutWaitingForTheDeadline) {
+    // the common case must not have become slower: quiet for 20s writes at 20s,
+    // not at 120s
+    const uint32_t first = 7000;
+    EXPECT_TRUE(riftShouldFlush(true, first + 20000u, first, 20000, 0, 0,
+                                first, 120000u));
+}
+
+TEST(ShouldFlush, TheBackoffVetoesTheDeadlineToo) {
+    // a deadline that has passed must not defeat the retry backoff, or a failing
+    // filesystem gets the retry storm back through the other route
+    const uint32_t first = 10000;
+    const uint32_t now = first + 300000u;      // long past the deadline
+    const uint32_t retry_at = now + 30000u;    // but still backing off
+    EXPECT_FALSE(riftShouldFlush(true, now, now - 1000, 20000, 3, retry_at,
+                                 first, 120000u));
+    EXPECT_TRUE (riftShouldFlush(true, retry_at, retry_at - 1000, 20000, 3, retry_at,
+                                 first, 120000u));
+}
+
+TEST(ShouldFlush, TheDeadlineSurvivesTheMillisWrap) {
+    const uint32_t first = 0xFFFFF000u;        // first unsaved change before the wrap
+    EXPECT_TRUE (riftShouldFlush(true, first + 120000u, first + 119000u, 20000, 0, 0,
+                                 first, 120000u));
+    EXPECT_FALSE(riftShouldFlush(true, first + 119999u, first + 119000u, 20000, 0, 0,
+                                 first, 120000u));
+}
+
+TEST(ShouldFlush, ACleanLogIsNeverWrittenByTheDeadlineEither) {
+    EXPECT_FALSE(riftShouldFlush(false, 999999, 0, 20000, 0, 0, 0, 120000u));
+}
+
 // ------------------------------------------------------------ channel colours
 //
 // The contrast is computed here rather than taken from the design note, because
