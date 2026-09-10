@@ -1012,7 +1012,7 @@ int MyMesh::sendTextTo(ContactInfo* recipient, const char* text, uint32_t& expec
   if (result != MSG_SEND_FAILED && expected_ack) {
     expected_ack_table[next_ack_idx].msg_sent = _ms->getMillis(); // add to circular table
     expected_ack_table[next_ack_idx].ack = expected_ack;
-    expected_ack_table[next_ack_idx].contact = recipient;
+    memcpy(expected_ack_table[next_ack_idx].pub_key, recipient->id.pub_key, PUB_KEY_SIZE);
     next_ack_idx = (next_ack_idx + 1) % EXPECTED_ACK_TABLE_SIZE;
   }
   return result;
@@ -1145,6 +1145,10 @@ int MyMesh::addGroupChannelRandom(const char* name, char* psk_base64_out, int ou
 ContactInfo*  MyMesh::processAck(const uint8_t *data) {
   // see if matches any in a table
   for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; i++) {
+    // An ack of 0 is an empty slot, or one already answered - the clear at the
+    // bottom of this loop sets it. It is not a hash anyone is waiting for, and
+    // matching it handed an incoming zero crc whatever identity the slot held.
+    if (expected_ack_table[i].ack == 0) continue;
     if (memcmp(data, &expected_ack_table[i].ack, 4) == 0) { // got an ACK from recipient
       out_frame[0] = PUSH_CODE_SEND_CONFIRMED;
       memcpy(&out_frame[1], data, 4);
@@ -1157,21 +1161,31 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
         memcpy(&ack_hash, data, 4);
         _ui->msgDelivered(ack_hash, trip_time);
       }
+      // Looked up now, from the identity the entry stored, rather than trusted
+      // from a pointer taken when the message was sent. See AckTableEntry.
+      ContactInfo* from = lookupContactByPubKey(expected_ack_table[i].pub_key, PUB_KEY_SIZE);
 #ifdef RIFT_VERSION
       // An ACK is the route having carried a message there and something back.
-      if (expected_ack_table[i].contact != NULL) {
-        markPathConfirmed(expected_ack_table[i].contact->id.pub_key, sizeof(AdvertPath::pubkey_prefix));
-        char trip[16];
-        snprintf(trip, sizeof(trip), "%.1fs", trip_time / 1000.0f);
-        riftRxLog().annotateLast(RIFT_AIR_K_ACK, expected_ack_table[i].contact->name, trip);
+      // Keyed off the stored identity rather than the contact record, so it still
+      // holds when the contact was deleted between the send and the ACK.
+      markPathConfirmed(expected_ack_table[i].pub_key, sizeof(AdvertPath::pubkey_prefix));
+      char trip[16];
+      snprintf(trip, sizeof(trip), "%.1fs", trip_time / 1000.0f);
+      if (from != NULL) {
+        riftRxLog().annotateLast(RIFT_AIR_K_ACK, from->name, trip);
       } else {
-        riftRxLog().annotateLast(RIFT_AIR_K_ACK, NULL, "for us");
+        // Deleted between the send and the ACK. The message's own delivery mark
+        // still lands - msgDelivered() above matches on the ack hash, not on a
+        // contact - so the trip time is still worth logging; there is simply no
+        // name left to put beside it. Naming the wrong one is what this fixes.
+        riftRxLog().annotateLast(RIFT_AIR_K_ACK, NULL, trip);
       }
 #endif
 
-      // NOTE: the same ACK can be received multiple times!
+      // NOTE: the same ACK can be received multiple times! The clear below means a
+      // repeat falls through to checkConnectionsAck(), as it did before.
       expected_ack_table[i].ack = 0; // clear expected hash, now that we have received ACK
-      return expected_ack_table[i].contact;
+      return from;
     }
   }
   return checkConnectionsAck(data);
@@ -1843,6 +1857,10 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   rift_login_sent_ms = 0;
 #endif
   next_ack_idx = 0;
+  // clears ack on every slot, which is what marks one unused - processAck() skips
+  // those, and a slot whose ack was left as whatever the memory held would be
+  // matched by an incoming hash that happened to equal it
+  memset(expected_ack_table, 0, sizeof(expected_ack_table));
   sign_data = NULL;
   dirty_contacts_expiry = 0;
   memset(advert_paths, 0, sizeof(advert_paths));   // clears valid on every slot
@@ -2108,7 +2126,7 @@ void MyMesh::handleCmdFrame(size_t len) {
         if (expected_ack) {
           expected_ack_table[next_ack_idx].msg_sent = _ms->getMillis(); // add to circular table
           expected_ack_table[next_ack_idx].ack = expected_ack;
-          expected_ack_table[next_ack_idx].contact = recipient;
+          memcpy(expected_ack_table[next_ack_idx].pub_key, recipient->id.pub_key, PUB_KEY_SIZE);
           next_ack_idx = (next_ack_idx + 1) % EXPECTED_ACK_TABLE_SIZE;
         }
 

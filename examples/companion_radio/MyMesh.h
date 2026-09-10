@@ -316,7 +316,11 @@ public:
   // Send a text message to a contact from local UI code. Mirrors the companion
   // app's CMD_SEND_TXT_MSG path, including registering the expected ACK, which
   // callers outside this class cannot do (expected_ack_table is private).
-  // 'recipient' must be a live pointer from lookupContactByPubKey(), not a copy.
+  // 'recipient' should still be a live pointer from lookupContactByPubKey()
+  // rather than a copy - no longer for the ACK table, which now keeps the public
+  // key, but because ContactInfo caches its shared secret through a mutable field
+  // (ContactInfo.h:22), so a copy discards the secret computed during the send and
+  // pays for another ECDH next time.
   // Returns MSG_SEND_FAILED / MSG_SEND_SENT_FLOOD / MSG_SEND_SENT_DIRECT.
   int  sendTextTo(ContactInfo* recipient, const char* text, uint32_t& expected_ack, uint32_t& est_timeout);
 
@@ -553,7 +557,18 @@ private:
   struct AckTableEntry {
     unsigned long msg_sent;
     uint32_t ack;
-    ContactInfo* contact;
+    // The recipient's identity, not the slot it happened to be sitting in. This
+    // was a ContactInfo* into the contacts array, and that array moves:
+    // removeContact() shifts every later entry down to close the gap, and
+    // allocateContactSlot() returns an existing slot when the table is full and
+    // the oldest non-favourite gets overwritten. Either one leaves a stored
+    // pointer meaning a different person - contacts A, B, C, a message to B, then
+    // A deleted, and B's ACK credits C. It is a wrong identity rather than a
+    // freed pointer, since the array itself is fixed, which is why the repair is
+    // to store what does not move and look the contact up on arrival.
+    //
+    // The whole key, not a prefix: a prefix is the thing that collides.
+    uint8_t pub_key[PUB_KEY_SIZE];
   };
   #define EXPECTED_ACK_TABLE_SIZE 8
   AckTableEntry expected_ack_table[EXPECTED_ACK_TABLE_SIZE]; // circular table
