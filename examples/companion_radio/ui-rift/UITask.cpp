@@ -4177,7 +4177,9 @@ public:
         // to type one in by hand.
         // Typed local, stored UTC. The RTC is what mesh consensus compares against
         // other nodes' adverts, so it can only ever hold UTC.
-        the_mesh.getRTCClock()->setCurrentTime(riftUtcFromLocal(epoch, rift_tz_quarters));
+        // Through riftSetClock(), not setCurrentTime(): the offset samples measured
+        // against the old clock have to move with it, or the mesh steps this back.
+        the_mesh.riftSetClock(riftUtcFromLocal(epoch, rift_tz_quarters));
         riftLogf("clock set to %s local", _edit.buf);
         _task->showAlert("Clock set", 1500);
         _mode = MENU;

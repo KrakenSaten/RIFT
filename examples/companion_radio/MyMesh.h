@@ -309,6 +309,21 @@ public:
   // hasHeardMesh() is false until the first reception; the caller needs it
   // because millis() 0 is a legitimate timestamp. Ages are computed as
   // millis() - getLastRxMillis() in unsigned arithmetic, which is wrap-safe.
+  // Set the clock, and correct the offset samples by however far it moved. Every
+  // clock change has to do this - see riftClockAdjusted() - so this is the seam,
+  // and setCurrentTime() should not be called directly on a RIFT build.
+  //
+  // Covers what RIFT owns: the SYSTEM screen and the companion command. It does
+  // NOT cover the GPS provider (MicroNMEALocationProvider) or the CLI, which set
+  // the clock through the shared RTCClock interface and would need a hook in
+  // src/helpers to reach - nothing in src/ includes a RIFT header today, and this
+  // was not worth being the first. The mesh step already refuses to fight a live
+  // GPS fix, so the gap is the sequence the review named: fix, then sync, then the
+  // fix is lost.
+#ifdef RIFT_VERSION
+  void riftSetClock(uint32_t secs);
+#endif
+
   bool          hasHeardMesh() const { return _rx_ever; }
   unsigned long getLastRxMillis() const { return _last_rx_millis; }
   uint32_t      getRxCount() const { return _rx_count; }

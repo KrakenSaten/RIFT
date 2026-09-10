@@ -136,11 +136,33 @@ static inline bool riftClockShouldStep(int agreeing, int32_t median) {
 // After the clock has been moved by `by` seconds every sample is that much
 // closer to zero - they were measured against the old clock. Adjusted rather
 // than cleared, so the readout can still say what the mesh thinks.
+// Every sample holds how far this clock is from one sender's, so moving the clock
+// by `by` seconds makes each one wrong by exactly that much. The correction is the
+// same arithmetic whoever moved it - and for a long time only the mesh's own step
+// applied it, while the user on SYSTEM, the companion app, the CLI and a GPS fix
+// all move the clock too. A hand-typed correction therefore left up to eight
+// samples still insisting on the offset it had just removed, and three that agree
+// are enough to step the clock straight back to where it was.
+//
+// Which is not a hypothetical shape: SYSTEM's own comment on the manual setter
+// says correcting a clock that is running ahead is the main reason to type one in.
+// Returns how many samples it corrected, so the caller can say so: a clock change
+// that silently moved eight samples is exactly the thing that was invisible here.
+static inline int riftClockAdjusted(RiftClockSync* c, int32_t by) {
+  if (c == NULL || by == 0) return 0;
+  int n = 0;
+  for (int i = 0; i < RIFT_CLOCK_SAMPLES; i++) {
+    if (c->s[i].used) { c->s[i].delta -= by; n++; }
+  }
+  return n;
+}
+
+// The bookkeeping for a step the *mesh* made, which is what SYSTEM's CLOCK SYNC row
+// reports. The sample correction is deliberately not here any more: it belongs to
+// the set itself (MyMesh::riftSetClock) so that every source gets it, and doing it
+// in both places would apply it twice.
 static inline void riftClockStepped(RiftClockSync* c, int32_t by, uint32_t now_ms) {
   if (c == NULL) return;
-  for (int i = 0; i < RIFT_CLOCK_SAMPLES; i++) {
-    if (c->s[i].used) c->s[i].delta -= by;
-  }
   c->last_step = by;
   c->last_step_ms = now_ms;
   if (c->steps < 0xFFFF) c->steps++;

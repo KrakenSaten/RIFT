@@ -580,8 +580,8 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
       LocationProvider* gps = sensors.getLocationProvider();
       bool gps_fix = (gps != NULL && gps->isValid());
       if (!gps_fix && riftClockShouldStep(agree, median)) {
-        getRTCClock()->setCurrentTime((uint32_t) ((int64_t) ours + median));
-        riftClockStepped(&cs, median, now_ms);
+        riftSetClock((uint32_t) ((int64_t) ours + median));   // corrects the samples
+        riftClockStepped(&cs, median, now_ms);                 // records that it was the mesh
         riftLogf("clock %s%lds from mesh, %d nodes agree", median < 0 ? "" : "+",
                  (long) median, agree);
       }
@@ -1141,6 +1141,22 @@ int MyMesh::addGroupChannelRandom(const char* name, char* psk_base64_out, int ou
   }
   return idx;
 }
+
+#ifdef RIFT_VERSION
+void MyMesh::riftSetClock(uint32_t secs) {
+  const uint32_t was = getRTCClock()->getCurrentTime();
+  getRTCClock()->setCurrentTime(secs);
+  // Signed, and computed in 64 bits first: the correction that matters most is a
+  // large one - the clock this was written for was thirteen hours out.
+  const int32_t by = (int32_t) ((int64_t) secs - (int64_t) was);
+  const int n = riftClockAdjusted(&riftClockState(), by);
+  // Only when it did something. A set that corrected nothing is the ordinary case -
+  // no adverts heard yet - and would otherwise be a line on every boot.
+  if (n > 0) {
+    riftLogf("clock %s%lds, %d samples moved with it", by < 0 ? "" : "+", (long) by, n);
+  }
+}
+#endif   // RIFT_VERSION
 
 ContactInfo*  MyMesh::processAck(const uint8_t *data) {
   // see if matches any in a table
@@ -2276,7 +2292,11 @@ void MyMesh::handleCmdFrame(size_t len) {
     memcpy(&secs, &cmd_frame[1], 4);
     uint32_t curr = getRTCClock()->getCurrentTime();
     if (secs >= curr) {
+#ifdef RIFT_VERSION
+      riftSetClock(secs);
+#else
       getRTCClock()->setCurrentTime(secs);
+#endif
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);

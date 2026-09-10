@@ -2988,7 +2988,16 @@ TEST(ClockSync, ThreeAgreeingNodesStepAClockThatIsLate) {
     EXPECT_EQ(600, med);
     EXPECT_EQ(3, agree);
     EXPECT_TRUE(riftClockShouldStep(agree, med));
+
+    // The two calls the mesh path makes, in that order. The sample correction lives
+    // in the setter now - MyMesh::riftSetClock - because the mesh is not the only
+    // thing that moves the clock, and riftClockStepped() records only that this one
+    // was the mesh's. The pair is what the end-to-end property rests on, so it is
+    // the pair that is asserted; splitting them across two tests would let the
+    // property hold in neither.
+    riftClockAdjusted(&c, med);
     riftClockStepped(&c, med, 3000);
+
     EXPECT_EQ(3, riftClockConsensus(&c, 3000, &med, &agree));
     EXPECT_EQ(0, med);   // the samples were measured against the old clock
     EXPECT_EQ(1, c.steps);
@@ -3041,6 +3050,107 @@ TEST(ClockSync, ANinthNodeReplacesTheStalest) {
     bool first_gone = true;
     for (int i = 0; i < RIFT_CLOCK_SAMPLES; i++) if (c.s[i].used && c.s[i].key[0] == 10) first_gone = false;
     EXPECT_TRUE(first_gone);
+}
+
+// Every sample measures this clock against one sender's, so moving the clock makes
+// each one wrong by the amount it moved. Only the mesh's own step corrected them,
+// and the mesh is not the only thing that sets the clock.
+
+TEST(ClockSync, AManualCorrectionIsNotSteppedBack) {
+    // The situation as it stood on the device: the clock came up thirteen hours
+    // ahead - bootstrapped from a contact timestamp after a flash - the adverts
+    // said so, and then the right time was typed in on SYSTEM.
+    const int32_t WRONG_BY = -13 * 3600;
+    const uint32_t theirs = (uint32_t) ((int64_t) OURS + WRONG_BY);
+
+    RiftClockSync c; riftClockReset(&c);
+    ASSERT_TRUE(riftClockNote(&c, K1, theirs, OURS, 1000));
+    ASSERT_TRUE(riftClockNote(&c, K2, theirs, OURS, 1100));
+    ASSERT_TRUE(riftClockNote(&c, K3, theirs, OURS, 1200));
+
+    int32_t med = 0; int agree = 0;
+    riftClockConsensus(&c, 1200, &med, &agree);
+    EXPECT_EQ(WRONG_BY, med);
+    EXPECT_EQ(3, agree);
+    ASSERT_TRUE(riftClockShouldStep(agree, med)) << "the mesh would step, and rightly";
+
+    // the hand-typed correction, by the same amount, through the setter
+    riftClockAdjusted(&c, WRONG_BY);
+
+    riftClockConsensus(&c, 1300, &med, &agree);
+    EXPECT_EQ(0, med) << "the samples still claimed the offset just removed";
+    EXPECT_EQ(3, agree);
+    EXPECT_FALSE(riftClockShouldStep(agree, med))
+        << "this is the defect: the mesh undoing a correction a person made";
+}
+
+TEST(ClockSync, WithoutTheCorrectionTheStepComesStraightBack) {
+    // The same sequence with the samples left alone, kept as the demonstration of
+    // what the seam prevents.
+    const int32_t WRONG_BY = -13 * 3600;
+    const uint32_t theirs = (uint32_t) ((int64_t) OURS + WRONG_BY);
+
+    RiftClockSync c; riftClockReset(&c);
+    ASSERT_TRUE(riftClockNote(&c, K1, theirs, OURS, 1000));
+    ASSERT_TRUE(riftClockNote(&c, K2, theirs, OURS, 1100));
+    ASSERT_TRUE(riftClockNote(&c, K3, theirs, OURS, 1200));
+
+    int32_t med = 0; int agree = 0;
+    riftClockConsensus(&c, 1300, &med, &agree);
+    EXPECT_EQ(WRONG_BY, med);
+    EXPECT_TRUE(riftClockShouldStep(agree, med))
+        << "thirteen hours, still claimed after the clock was already right";
+}
+
+TEST(ClockSync, SteppedRecordsTheStepWithoutTouchingTheSamples) {
+    // The correction moved to the setter, so this must no longer apply it - doing
+    // both would correct twice.
+    RiftClockSync c; riftClockReset(&c);
+    ASSERT_TRUE(riftClockNote(&c, K1, OURS + 600, OURS, 1000));
+
+    int32_t before = 0; int agree = 0;
+    riftClockConsensus(&c, 1000, &before, &agree);
+    EXPECT_EQ(600, before);
+
+    riftClockStepped(&c, 600, 1000);
+
+    int32_t after = 0;
+    riftClockConsensus(&c, 1000, &after, &agree);
+    EXPECT_EQ(before, after);
+    EXPECT_EQ(600, c.last_step);
+    EXPECT_EQ(1000u, c.last_step_ms);
+    EXPECT_EQ(1, c.steps);
+}
+
+TEST(ClockSync, AdjustingCorrectsEverySampleAndOnlyTheUsedOnes) {
+    RiftClockSync c; riftClockReset(&c);
+    ASSERT_TRUE(riftClockNote(&c, K1, OURS + 600, OURS, 1000));
+    ASSERT_TRUE(riftClockNote(&c, K2, OURS + 660, OURS, 1000));
+
+    EXPECT_EQ(2, riftClockAdjusted(&c, 600)) << "both samples, and it says so";
+
+    int32_t med = 0; int agree = 0;
+    EXPECT_EQ(2, riftClockConsensus(&c, 1000, &med, &agree));
+    EXPECT_EQ(30, med) << "600 and 660 become 0 and 60";
+
+    // and nothing at all for a no-op, which is what a set to the same second is
+    EXPECT_EQ(0, riftClockAdjusted(&c, 0));
+    riftClockConsensus(&c, 1000, &med, &agree);
+    EXPECT_EQ(30, med);
+    EXPECT_EQ(0, riftClockAdjusted(NULL, 100));   // must not fault
+}
+
+TEST(ClockSync, ACorrectionSurvivesTheSignedRange) {
+    // Thirteen hours is 46800 seconds and the arithmetic is done in 64 bits before
+    // it lands in an int32_t, so the correction that actually happened cannot wrap.
+    RiftClockSync c; riftClockReset(&c);
+    ASSERT_TRUE(riftClockNote(&c, K1, OURS - 46800, OURS, 1000));
+
+    riftClockAdjusted(&c, -46800);
+
+    int32_t med = 0; int agree = 0;
+    riftClockConsensus(&c, 1000, &med, &agree);
+    EXPECT_EQ(0, med);
 }
 
 TEST(ClockSync, OffsetTextIsSignedAndCompact) {
