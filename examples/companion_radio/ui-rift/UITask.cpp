@@ -1760,10 +1760,10 @@ class RiftMeshScreen : public RiftScreen {
   // ENTER presses, a tap does both - but it is drawn on the clock row rather than in
   // the action strip. A control belongs beside the thing it changes, and the three
   // above it are all "put something on the air", which setting a clock is not.
-  enum HomeBtn { BTN_DISCOVER, BTN_ADVERT_NEAR, BTN_ADVERT_MESH, BTN_SETTIME, BTN_COUNT };
-  int _btn_x0[BTN_COUNT] = { 0, 0, 0, 0 };
-  int _btn_x1[BTN_COUNT] = { 0, 0, 0, 0 };
-  int _btn_y[BTN_COUNT]  = { 0, 0, 0, 0 };   // two rows now, so touch cannot assume one
+  enum HomeBtn { BTN_DISCOVER, BTN_ADVERT_NEAR, BTN_ADVERT_MESH, BTN_COUNT };
+  int _btn_x0[BTN_COUNT] = { 0, 0, 0 };
+  int _btn_x1[BTN_COUNT] = { 0, 0, 0 };
+  int _btn_y[BTN_COUNT]  = { 0, 0, 0 };   // one row again, since SET left the clock row
   int _btn_sel = BTN_DISCOVER;
 
 public:
@@ -2114,7 +2114,6 @@ public:
       labels[BTN_DISCOVER]    = the_mesh.isDiscovering() ? "DISCOVERING..." : "DISCOVER 0-HOP";
       labels[BTN_ADVERT_NEAR] = "ADVERT NEAR";
       labels[BTN_ADVERT_MESH] = "ADVERT MESH";
-      labels[BTN_SETTIME]     = "SET";
 
       int w[BTN_COUNT], total = 0;
       for (int i = 0; i < BTN_COUNT; i++) {
@@ -2128,7 +2127,9 @@ public:
       int bx = 2;
       (void) total;
 
-      for (int i = 0; i <= BTN_ADVERT_MESH; i++) {
+      // All of them now. There used to be a fourth, drawn on the clock row rather
+      // than in this loop, which is why the bound was written the long way.
+      for (int i = 0; i < BTN_COUNT; i++) {
         bool sel = (i == _btn_sel);
         bool busy = (i == BTN_DISCOVER && the_mesh.isDiscovering());
         // The selected button is filled rather than only outlined: in sunlight the
@@ -2163,7 +2164,6 @@ public:
       switch (_btn_sel) {
         case BTN_ADVERT_NEAR: note = "direct RF only - use MESH before a first DM"; break;
         case BTN_ADVERT_MESH: note = "reaches nodes past direct range - more airtime"; break;
-        case BTN_SETTIME:     note = "stored as UTC, shown in the zone on this row"; break;
         default:              note = "asks direct neighbours only"; break;
       }
       display.setColor(rift_pal.mid);
@@ -2203,23 +2203,14 @@ public:
           snprintf(row, sizeof(row), "%02d:%02d %s %s %04d-%02d-%02d %s UP %s",
                    ch, cmi, zone, RIFT_DOT, cy, cmo, cd, RIFT_DOT, up);
         }
+        // The row is a reading now, with no control on it. SET used to sit at the
+        // right end and open the SYSTEM field; the row it was next to is the one
+        // place the clock is shown, which is why it was put there, but SYSTEM's own
+        // "Set time" row does the same job and is where every other setting is. The
+        // right end of this row is left empty rather than filled with something
+        // else.
         display.setColor(rift_pal.mid);
         display.drawTextLeftAlign(2, CLOCK_ROW_Y + 3, row);
-
-        int sw = w[BTN_SETTIME], sx = 316 - sw;
-        bool sel = (_btn_sel == BTN_SETTIME);
-        if (sel) {
-          display.setColor(rift_pal.accent);
-          display.fillRect(sx, CLOCK_ROW_Y, sw, 14);
-        } else {
-          display.setColor(rift_pal.rule);
-          display.drawRect(sx, CLOCK_ROW_Y, sw, 14);
-        }
-        display.setColor(sel ? rift_pal.on_accent : rift_pal.fg);
-        display.drawTextCentered(sx + sw / 2, CLOCK_ROW_Y + 3, labels[BTN_SETTIME]);
-        _btn_x0[BTN_SETTIME] = sx;
-        _btn_x1[BTN_SETTIME] = sx + sw;
-        _btn_y[BTN_SETTIME]  = CLOCK_ROW_Y;
       }
     }
 
@@ -2273,12 +2264,6 @@ public:
         _task->showAlert(ok ? "Advert sent (direct)" : "Advert failed", 1200);
         break;
       }
-      case BTN_SETTIME:
-        // Straight into the field on SYSTEM, prefilled with the current reading -
-        // the same flow the list row opens, reached from where the clock is shown.
-        _task->startSetTime();
-        break;
-
       case BTN_ADVERT_MESH: {
         // reaches nodes beyond direct RF range, which is what they need before
         // they can decrypt a DM from us
@@ -2475,7 +2460,6 @@ public:
   void beginChannelScope(bool from_comms)  { _return_to_comms = from_comms; activate(IT_SCOPE); }
   // Reached from the home screen clock row. No from_comms: BACKSPACE out of the
   // field lands on the SYSTEM list, which is where the same action lives.
-  void beginSetTime()                      { _return_to_comms = false; activate(IT_SETTIME); }
 
   // For the screen dump: put one of the sub-screens up as if it had been chosen
   // from the list, so a capture can be taken of it without a hand on the device.
@@ -9318,13 +9302,6 @@ void UITask::startChannelRemove() {
   nav_idx = RIFT_NAV_SYSTEM;
   setCurrScreen(nav_screens[RIFT_NAV_SYSTEM]);
   ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->beginDeleteChannel(true);
-}
-
-void UITask::startSetTime() {
-  dismissOverlay();
-  nav_idx = RIFT_NAV_SYSTEM;
-  setCurrScreen(nav_screens[RIFT_NAV_SYSTEM]);
-  ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->beginSetTime();
 }
 
 void UITask::startChannelScope() {

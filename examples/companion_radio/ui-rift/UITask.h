@@ -315,7 +315,6 @@ public:
   void startChannelScope();
 
   // Open the set-time field on SYSTEM, from the home screen clock row.
-  void startSetTime();
   // last key code the UI saw - reading this on screen is what identified the
   // keyboard co-processor repeating held keys
   int lastKeyCode() const { return _last_key; }
