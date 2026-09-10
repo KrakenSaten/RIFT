@@ -4,6 +4,7 @@
 #include "RiftRxLog.h"
 #include "RiftRepeater.h"
 #include "RiftScopes.h"
+#include "RiftMutes.h"
 #include "RiftScreenDump.h"
 #include "RiftClock.h"
 #include <helpers/sensors/LPPDataHelpers.h>   // LPP_* type codes, for the telemetry labels
@@ -1415,6 +1416,27 @@ void riftLoadSettings() {
       rift_tz_quarters = 0;
       if (f.read((uint8_t*) &tz, 1) == 1 && riftTzValid((int) tz)) rift_tz_quarters = (int) tz;
     }
+
+    // Absent in any file written before mutes existed, and absent means nothing is
+    // muted - which is what those files meant. Routed through set() rather than
+    // appended, so a truncated or hand-edited count cannot produce a slot past the
+    // channel table or two entries for one slot: set() validates and replaces.
+    // A count claiming more entries than the file holds simply stops when the reads
+    // fail, keeping the ones that arrived.
+    {
+      RiftMuteTable& mt = riftMutes();
+      mt.reset();
+      uint8_t nm = 0;
+      if (f.read(&nm, 1) == 1) {
+        for (int i = 0; i < (int) nm; i++) {
+          uint8_t idx = 0;
+          uint32_t fp = 0;
+          if (f.read(&idx, 1) != 1) break;
+          if (f.read((uint8_t*) &fp, 4) != 4) break;
+          mt.set(idx, fp, true);
+        }
+      }
+    }
   }
   f.close();
 
@@ -1504,6 +1526,21 @@ void riftSaveSettings() {
   {
     int8_t tz = (int8_t) rift_tz_quarters;
     ok = ok && (f.write((const uint8_t*) &tz, 1) == 1);
+  }
+
+  // The mute table, appended after the timezone for the same reason it came after
+  // the scopes: last is where a new section goes, so every older file still reads
+  // everything ahead of it. No name to store, so five bytes an entry.
+  {
+    RiftMuteTable& mt = riftMutes();
+    uint8_t nm = (uint8_t) mt.count();
+    ok = ok && (f.write(&nm, 1) == 1);
+    for (int i = 0; i < mt.count() && ok; i++) {
+      uint8_t idx = mt.at(i).channel_idx;
+      uint32_t fp = mt.at(i).channel_fp;
+      ok = ok && (f.write(&idx, 1) == 1);
+      ok = ok && (f.write((const uint8_t*) &fp, 4) == 4);
+    }
   }
 
   f.close();
@@ -2327,7 +2364,7 @@ class RiftSystemScreen : public RiftScreen {
   // it leaves the printable keys free for the text fields.
   enum Mode { MENU, EDIT_NAME, CH_NAME, CH_KEY_CHOICE, CH_KEY_ENTRY, CH_SHOW_KEY,
               CH_DELETE, CH_DELETE_CONFIRM, LOG, SET_TIME, RXLOG,
-              SCOPE_PICK, SCOPE_ENTRY, DIAG, RESET_CONFIRM, TZ_ENTRY };
+              SCOPE_PICK, SCOPE_ENTRY, MUTE_PICK, DIAG, RESET_CONFIRM, TZ_ENTRY };
   // The two advert actions used to head this list. They live on the home screen
   // now, as buttons beside DISCOVER - that screen is the one showing how many
   // nodes are stored and heard, so it is where you already are when the answer
@@ -2335,7 +2372,7 @@ class RiftSystemScreen : public RiftScreen {
   // list for the same reason: that is where the channels are. Their flows stay
   // here and are entered from there. Moved rather than copied: the same action
   // reachable from two places is two code paths that drift.
-  enum Item { IT_NAME, IT_CHANNEL, IT_DELCHANNEL, IT_SCOPE,
+  enum Item { IT_NAME, IT_CHANNEL, IT_DELCHANNEL, IT_SCOPE, IT_MUTE,
               IT_PATHMODE, IT_SCREEN, IT_SOUND, IT_DAYMODE, IT_SETTIME, IT_TIMEZONE,
               IT_DIAG, IT_LOG, IT_RXLOG, IT_RESET, IT_COUNT };
   bool _return_to_comms = false;   // a channel flow entered from COMMS goes back there
@@ -2366,7 +2403,7 @@ class RiftSystemScreen : public RiftScreen {
   // is what lets an action row share a reading row's geometry.
   static const char* itemLabel(int i) {
     static const char* LABEL[IT_COUNT] = {
-      "Edit node name", "Add channel", "Delete channel", "Channel scope",
+      "Edit node name", "Add channel", "Delete channel", "Channel scope", "Channel mute",
       "Path hash size", "Screen", "Alert sound", "Display", "Set time", "Time zone",
       "Diagnostics", "View log", "View air log", "Factory reset",
     };
@@ -2458,6 +2495,7 @@ public:
   void beginAddChannel(bool from_comms)    { _return_to_comms = from_comms; activate(IT_CHANNEL); }
   void beginDeleteChannel(bool from_comms) { _return_to_comms = from_comms; activate(IT_DELCHANNEL); }
   void beginChannelScope(bool from_comms)  { _return_to_comms = from_comms; activate(IT_SCOPE); }
+  void beginChannelMute(bool from_comms)   { _return_to_comms = from_comms; activate(IT_MUTE); }
   // Reached from the home screen clock row. No from_comms: BACKSPACE out of the
   // field lands on the SYSTEM list, which is where the same action lives.
 
@@ -2569,6 +2607,15 @@ private:
         collectScopable();
         _del_sel = 0;
         _mode = SCOPE_PICK;
+        break;
+
+      case IT_MUTE:
+        // The same list scope uses: every channel that has a name, Public included.
+        // Public is the likeliest thing anyone wants to mute, so excluding slot 0 -
+        // as the delete list has to - would miss the point of the feature.
+        collectScopable();
+        _del_sel = 0;
+        _mode = MUTE_PICK;
         break;
 
       case IT_TIMEZONE: {
@@ -2755,6 +2802,54 @@ private:
       _del_idx[_del_count++] = (uint8_t) i;
     }
     if (_del_sel >= _del_count) _del_sel = _del_count > 0 ? _del_count - 1 : 0;
+  }
+
+  int renderMuteList(DisplayDriver& display) {
+    renderHeading(display, "CHANNEL MUTE");
+    display.setTextSize(1);
+
+    if (_del_count == 0) {
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(4, 40, "No channels.");
+      display.drawTextLeftAlign(4, 64, "BACKSPACE back");
+      renderNavBar(display, RIFT_NAV_SYSTEM);
+      return 1000;
+    }
+
+    int y = 34;
+    char tmp[72];
+    for (int i = 0; i < _del_count && y < 176; i++, y += RIFT_LINE_H) {
+      ChannelDetails ch;
+      if (!the_mesh.getChannel(_del_idx[i], ch)) continue;
+      char nm[sizeof(ch.name)];
+      riftTranslateUTF8(nm, ch.name, sizeof(nm));
+
+      const bool m = riftMutes().isMuted(_del_idx[i],
+                                        riftChannelConv(_del_idx[i]).channel_fp);
+      // Truncated to the column for the reason the scope list gives: the pad width
+      // only pads, so a long name pushes the second column right and it stops
+      // being a column.
+      char col[17];
+      StrHelper::strncpy(col, nm, sizeof(col));
+      snprintf(tmp, sizeof(tmp), "%-16s %s", col, m ? "muted" : "notifies");
+
+      if (i == _del_sel) {
+        display.setColor(rift_pal.accent);
+        display.fillRect(0, y - 2, display.width(), 12);
+        display.setColor(rift_pal.on_accent);
+      } else {
+        display.setColor(rift_pal.fg);
+      }
+      display.drawTextLeftAlign(4, y, tmp);
+    }
+
+    display.setColor(rift_pal.mid);
+    // What mute does and does not do. Without the second half, the unread dot
+    // appearing anyway would read as the setting not having taken.
+    display.drawTextLeftAlign(4, 202, "Muted: no wake, no popup. Dot still shows.");
+    display.drawTextLeftAlign(4, 214, "ENTER: toggle   BACKSPACE: back");
+    renderNavBar(display, RIFT_NAV_SYSTEM);
+    return 1000;
   }
 
   int renderScopeList(DisplayDriver& display) {
@@ -3533,6 +3628,7 @@ public:
       case CH_KEY_ENTRY:   return renderKeyEntry(display);
       case CH_SHOW_KEY:    return renderShowKey(display);
       case SCOPE_PICK:     return renderScopeList(display);
+      case MUTE_PICK:      return renderMuteList(display);
       case SCOPE_ENTRY:    return renderScopeEntry(display);
       case CH_DELETE:      return renderDeleteList(display);
       case CH_DELETE_CONFIRM:
@@ -3618,7 +3714,8 @@ public:
       // list, beside the channels they act on.
       addRow(ROW_GROUP, -1, "ACTIONS");
       for (int i = 0; i < IT_COUNT; i++) {
-        if (i == IT_CHANNEL || i == IT_DELCHANNEL || i == IT_SCOPE) continue;   // in COMMS
+        if (i == IT_CHANNEL || i == IT_DELCHANNEL || i == IT_SCOPE
+            || i == IT_MUTE) continue;                                          // in COMMS
         if (i == IT_RESET) continue;                                            // its own group, below
         Row* r = addRow(ROW_ACTION, i, itemLabel(i));
         itemValue(i, tmp, sizeof(tmp));
@@ -3988,7 +4085,7 @@ public:
     if (_mode == RXLOG) { _rx_scroll  -= steps; if (_rx_scroll < 0) _rx_scroll = 0; return true; }
 
     // The pickers move a cursor.
-    if (_mode == CH_DELETE || _mode == SCOPE_PICK) {
+    if (_mode == CH_DELETE || _mode == SCOPE_PICK || _mode == MUTE_PICK) {
       if (_del_count == 0) return false;
       int n = _del_sel + steps;
       if (n < 0) n = 0;
@@ -4081,6 +4178,29 @@ public:
       if (c == KEY_ENTER) { finishChannel(2); return true; }
       if (_edit.handleKey(c)) return true;
       if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = CH_KEY_CHOICE; return true; }
+      return true;
+    }
+
+    if (_mode == MUTE_PICK) {
+      if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _mode = MENU; return true; }
+      if (_del_count == 0) return true;
+      if (c == KEY_UP)   { _del_sel = (_del_sel + _del_count - 1) % _del_count; return true; }
+      if (c == KEY_DOWN) { _del_sel = (_del_sel + 1) % _del_count; return true; }
+      if (c == KEY_ENTER) {
+        const uint8_t idx = _del_idx[_del_sel];
+        const uint32_t fp = riftChannelConv(idx).channel_fp;
+        const bool want = !riftMutes().isMuted(idx, fp);
+        // set() refuses only when muting: with no fingerprint there is no identity
+        // to bind the mute to, and the table can be full. Unmuting always succeeds,
+        // because it removes an entry rather than storing one.
+        if (!riftMutes().set(idx, fp, want)) {
+          _task->showAlert(fp == 0 ? "Channel has no identity" : "No mute slots left", 1600);
+          return true;
+        }
+        riftSaveSettings();
+        riftLogf("channel slot %d: %s", (int) idx, want ? "muted" : "notifies");
+        return true;
+      }
       return true;
     }
 
@@ -4271,9 +4391,16 @@ public:
         // in /rift.cfg keyed on the slot, and with eight of them a fresh channel
         // was told "No scope slots left" while no scope was live. The fingerprint
         // check kept routing safe; the slot count was what leaked.
-        if (ok && riftScopes().clear(_del_idx[_del_sel])) {
+        // The scope and the mute both belong to the channel, not to the slot, so
+        // both go with it. Neither is sufficient on its own to keep the table
+        // honest - CMD_SET_CHANNEL can replace a slot from the companion app
+        // without passing through here - which is why both are also fingerprint
+        // checked on every read.
+        bool dropped = riftScopes().clear(_del_idx[_del_sel]);
+        dropped = riftMutes().clear(_del_idx[_del_sel]) || dropped;
+        if (ok && dropped) {
           riftSaveSettings();
-          riftLogf("scope dropped with channel slot %d", (int) _del_idx[_del_sel]);
+          riftLogf("scope/mute dropped with channel slot %d", (int) _del_idx[_del_sel]);
         }
         if (ok && gone.kind == RIFT_CONV_CHANNEL) {
           // Also takes any fingerprint-less entries in that slot, restored from a log
@@ -6464,7 +6591,8 @@ private:
     // the end of the CHANNELS section because that is where the channels are.
     uint8_t action;
   };
-  static const uint8_t PICK_ADD_CHANNEL = 1, PICK_REMOVE_CHANNEL = 2, PICK_SCOPE = 3;
+  static const uint8_t PICK_ADD_CHANNEL = 1, PICK_REMOVE_CHANNEL = 2, PICK_SCOPE = 3,
+                       PICK_MUTE = 4;
   PickEntry _picks[RIFT_PICKER_MAX];
   int _pick_count;
   bool _pick_truncated;
@@ -6792,11 +6920,12 @@ private:
     // The two channel actions close the section. They used to be SYSTEM actions,
     // two screens away from the list they change; the flows still live there and
     // come back here when they are done.
-    for (int a = PICK_ADD_CHANNEL; a <= PICK_SCOPE && _pick_count < RIFT_PICKER_MAX; a++) {
+    for (int a = PICK_ADD_CHANNEL; a <= PICK_MUTE && _pick_count < RIFT_PICKER_MAX; a++) {
       PickEntry* e = &_picks[_pick_count++];
       StrHelper::strncpy(e->name, a == PICK_ADD_CHANNEL ? "+ Add channel"
                                 : a == PICK_REMOVE_CHANNEL ? "- Remove channel"
-                                                           : "  Channel scope", sizeof(e->name));
+                                : a == PICK_SCOPE ? "  Channel scope"
+                                                  : "  Channel mute", sizeof(e->name));
       e->is_channel = true;
       e->channel_idx = 0xFF;
       e->action = (uint8_t) a;
@@ -7253,7 +7382,8 @@ private:
       _picking = false;
       if (e->action == PICK_ADD_CHANNEL)         _task->startChannelAdd();
       else if (e->action == PICK_REMOVE_CHANNEL) _task->startChannelRemove();
-      else                                       _task->startChannelScope();
+      else if (e->action == PICK_SCOPE)          _task->startChannelScope();
+      else                                       _task->startChannelMute();
       return;
     }
     _target_is_channel = e->is_channel;
@@ -9080,6 +9210,16 @@ void UITask::newMsgConv(uint8_t path_len, const char* from_name, const char* tex
   // that have to agree.
   msg_unread.mark(conv);
 
+  // Muted channels keep their unread mark and lose the two things that interrupt:
+  // the popup and the wake. Marked above regardless, deliberately - the dot in the
+  // COMMS strip is then the only thing that says this channel had traffic, and
+  // dropping it too would make mute mean "ignore".
+  //
+  // Only channels can be muted. A DM has no per-conversation setting and should not
+  // get one by accident here.
+  const bool muted = (conv.kind == RIFT_CONV_CHANNEL)
+                  && riftMutes().isMuted(conv.channel_idx, conv.channel_fp);
+
 
   // Don't take the screen away from someone mid-input: a half-typed line in
   // COMMS, a channel name being entered, or a one-time key being read. Each
@@ -9094,7 +9234,7 @@ void UITask::newMsgConv(uint8_t path_len, const char* from_name, const char* tex
   // conversation, so a message arriving in a different one has to announce itself
   // even though COMMS is on screen. showsConversation() defaults to false, so every
   // other screen behaves exactly as before.
-  if (_overlay == NULL && curr != NULL && !curr->isModal()
+  if (!muted && _overlay == NULL && curr != NULL && !curr->isModal()
       && !curr->showsConversation(conv)) {
     pushOverlay(msg_preview);
   }
@@ -9118,14 +9258,22 @@ void UITask::newMsgConv(uint8_t path_len, const char* from_name, const char* tex
     // wake that was needed and suppressed costs the message. So it always wakes, and
     // the link state is logged rather than acted on - if a phone really is attached
     // and notifying, the line in the log says so and the duplicate is visible.
-    if (!_display->isOn()) {
+    // The argument above is why this always fires - for a channel the user wants.
+    // A muted one is the case it does not cover: there the screen lights up all day
+    // for traffic they have already decided is background, and they said so per
+    // channel rather than leaving it to be inferred.
+    if (!muted && !_display->isOn()) {
       _display->turnOn();
       if (rift_msg_wakes < 0xFFFF) rift_msg_wakes++;
       rift_last_wake_ms = (uint32_t) millis();
       riftLogf("wake: screen on%s", hasConnection() ? " (link up)" : "");
     }
     if (_display->isOn()) {
-      _auto_off = millis() + AUTO_OFF_MILLIS;
+      // A muted channel does not hold the screen on either - pushing the idle timer
+      // out is a smaller version of the same interruption. It still repaints, so a
+      // message arriving while someone is looking at the conversation appears:
+      // mute is about not interrupting, not about not updating.
+      if (!muted) _auto_off = millis() + AUTO_OFF_MILLIS;
       refreshNow();
     }
   }
@@ -9309,6 +9457,13 @@ void UITask::startChannelScope() {
   nav_idx = RIFT_NAV_SYSTEM;
   setCurrScreen(nav_screens[RIFT_NAV_SYSTEM]);
   ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->beginChannelScope(true);
+}
+
+void UITask::startChannelMute() {
+  dismissOverlay();
+  nav_idx = RIFT_NAV_SYSTEM;
+  setCurrScreen(nav_screens[RIFT_NAV_SYSTEM]);
+  ((RiftSystemScreen*) nav_screens[RIFT_NAV_SYSTEM])->beginChannelMute(true);
 }
 
 /*

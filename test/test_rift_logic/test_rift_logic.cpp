@@ -7,6 +7,7 @@
 // only - so there is nothing to link.
 #include "../../examples/companion_radio/ui-rift/RiftLogic.h"
 #include "../../examples/companion_radio/ui-rift/RiftClock.h"
+#include "../../examples/companion_radio/ui-rift/RiftMutes.h"
 #include "../../examples/companion_radio/CompanionCmdLimits.h"
 
 // ---------------------------------------------------------------- hash resolution
@@ -853,6 +854,104 @@ TEST(MsgLogGen, APayloadThatChangedUnderItsTrailerFailsTheCrc) {
     const uint32_t after = riftCrc32Final(
         riftCrc32Update(riftCrc32Init(), payload, sizeof(payload)));
     EXPECT_NE(want_crc, after);
+}
+
+// -------------------------------------------------------- channel mutes
+//
+// A mute suppresses the wake and the popup for one channel. The thing to get right
+// is not the boolean, it is that a slot is not an identity - so every read checks
+// the fingerprint, and the safe direction when there is no identity to check is
+// "not muted": a channel that announces itself can be muted again, where one
+// silenced by accident looks like a channel that has gone quiet.
+
+TEST(ChannelMute, NothingIsMutedToBeginWith) {
+  RiftMuteTable m;
+  EXPECT_EQ(0, m.count());
+  EXPECT_FALSE(m.isMuted(0, 0xAAAA));
+  EXPECT_FALSE(m.isMuted(7, 0xBBBB));
+}
+
+TEST(ChannelMute, MutesAndUnmutesOneChannel) {
+  RiftMuteTable m;
+  ASSERT_TRUE(m.set(3, 0x1234, true));
+  EXPECT_TRUE(m.isMuted(3, 0x1234));
+  EXPECT_EQ(1, m.count());
+
+  // other channels are unaffected
+  EXPECT_FALSE(m.isMuted(2, 0x1234));
+  EXPECT_FALSE(m.isMuted(4, 0x1234));
+
+  ASSERT_TRUE(m.set(3, 0x1234, false));
+  EXPECT_FALSE(m.isMuted(3, 0x1234));
+  EXPECT_EQ(0, m.count()) << "unmuting stores nothing, it removes the entry";
+}
+
+TEST(ChannelMute, ASlotThatChangedHandsIsNotMuted) {
+  // The failure the fingerprint exists for: slot 2 muted, the channel deleted, and
+  // slot 2 later holding a different one. Silence nobody chose is worse here than
+  // in the scope table, because nothing is misrouted - the messages simply stop
+  // announcing themselves and the channel looks quiet rather than broken.
+  RiftMuteTable m;
+  ASSERT_TRUE(m.set(2, 0xAAAA, true));
+  EXPECT_TRUE(m.isMuted(2, 0xAAAA));
+  EXPECT_FALSE(m.isMuted(2, 0xBBBB)) << "a different channel in the same slot";
+}
+
+TEST(ChannelMute, AnUnidentifiableChannelIsNotMuted) {
+  // Fingerprint 0 is "not recorded" and must never act as a wildcard, on either
+  // side of the comparison.
+  RiftMuteTable m;
+  ASSERT_TRUE(m.set(5, 0xC0DE, true));
+  EXPECT_FALSE(m.isMuted(5, 0)) << "an unknown channel is not the muted one";
+
+  EXPECT_FALSE(m.set(6, 0, true)) << "and there is no identity to bind a mute to";
+  EXPECT_FALSE(m.isMuted(6, 0));
+  EXPECT_EQ(1, m.count());
+}
+
+TEST(ChannelMute, ClearingCompactsSoNoHoleReadsAsChannelZero) {
+  // isMuted walks count() entries, so a blanked entry in the middle would read as
+  // an entry for channel 0 - which is Public, the channel most likely to be muted
+  // and the one that must not be silenced by accident.
+  RiftMuteTable m;
+  ASSERT_TRUE(m.set(1, 0x11, true));
+  ASSERT_TRUE(m.set(2, 0x22, true));
+  ASSERT_TRUE(m.set(3, 0x33, true));
+  ASSERT_EQ(3, m.count());
+
+  ASSERT_TRUE(m.clear(2));
+  EXPECT_EQ(2, m.count());
+  EXPECT_TRUE(m.isMuted(1, 0x11));
+  EXPECT_FALSE(m.isMuted(2, 0x22));
+  EXPECT_TRUE(m.isMuted(3, 0x33));
+  EXPECT_FALSE(m.isMuted(0, 0x11)) << "the hole must not read as Public";
+
+  EXPECT_FALSE(m.clear(2)) << "clearing what is not there says so";
+}
+
+TEST(ChannelMute, ReboundWhenTheSlotIsSetAgain) {
+  RiftMuteTable m;
+  ASSERT_TRUE(m.set(4, 0xAAAA, true));
+  ASSERT_TRUE(m.set(4, 0xBBBB, true));   // same slot, new channel, muted again
+  EXPECT_EQ(1, m.count()) << "replaced rather than appended";
+  EXPECT_TRUE(m.isMuted(4, 0xBBBB));
+  EXPECT_FALSE(m.isMuted(4, 0xAAAA));
+}
+
+TEST(ChannelMute, AFullTableSaysSo) {
+  RiftMuteTable m;
+  for (int i = 0; i < RIFT_MUTE_SLOTS; i++) {
+    ASSERT_TRUE(m.set((uint8_t) i, (uint32_t) (0x100 + i), true)) << "slot " << i;
+  }
+  EXPECT_EQ(RIFT_MUTE_SLOTS, m.count());
+  EXPECT_FALSE(m.set(RIFT_MUTE_SLOTS, 0x999, true)) << "full, and it refuses";
+
+  // but re-setting one that is already there still works when full
+  EXPECT_TRUE(m.set(0, 0x100, true));
+
+  m.reset();
+  EXPECT_EQ(0, m.count());
+  EXPECT_FALSE(m.isMuted(0, 0x100));
 }
 
 // ------------------------------------------------------------ channel colours

@@ -313,6 +313,7 @@ public:
   void startChannelAdd();
   void startChannelRemove();
   void startChannelScope();
+  void startChannelMute();
 
   // Open the set-time field on SYSTEM, from the home screen clock row.
   // last key code the UI saw - reading this on screen is what identified the
