@@ -3174,6 +3174,49 @@ TEST(Tropo, RemembersTheLastOpeningAfterItCloses) {
     EXPECT_EQ(1000 + 100 * RIFT_TROPO_NEEDED, t.last_open_ms);
 }
 
+// riftDragIsMove() answers whether the finger moved. riftTouchRelease() answers
+// what to do about it, and the order it asks in is what M5 got wrong.
+
+TEST(TouchRelease, ADarkScreenWakesWhateverTheFingerDid) {
+  // The M5 case. A touch on a screen that is off is a request to wake it, and a
+  // pixel of jitter on the way does not turn that into a gesture. was_drag was
+  // asked first, so it did: the wake was skipped and the screen stayed dark.
+  EXPECT_EQ(RIFT_TOUCH_WAKE, riftTouchRelease(true, false));
+  EXPECT_EQ(RIFT_TOUCH_WAKE, riftTouchRelease(true, true));
+}
+
+TEST(TouchRelease, ALitScreenStillSeparatesGestureFromTap) {
+  // and the other half is unchanged, which is what stops a drag from also paging
+  // COMMS or activating the row a finger lifted from
+  EXPECT_EQ(RIFT_TOUCH_DRAG, riftTouchRelease(false, true));
+  EXPECT_EQ(RIFT_TOUCH_TAP,  riftTouchRelease(false, false));
+}
+
+TEST(TouchRelease, WakeOutranksEverything) {
+  // stated as the ordering rather than as four cases, because the ordering is the
+  // rule: nothing the finger did can outvote a screen that could not be seen
+  for (int drag = 0; drag <= 1; drag++) {
+    EXPECT_EQ(RIFT_TOUCH_WAKE, riftTouchRelease(true, drag != 0))
+        << "was_drag=" << drag;
+  }
+  // the three answers are distinct, so a caller cannot conflate two of them
+  EXPECT_NE(RIFT_TOUCH_WAKE, RIFT_TOUCH_DRAG);
+  EXPECT_NE(RIFT_TOUCH_DRAG, RIFT_TOUCH_TAP);
+  EXPECT_NE(RIFT_TOUCH_WAKE, RIFT_TOUCH_TAP);
+}
+
+TEST(TouchRelease, TheDriverCountsTravelEvenWhenTheUIIgnoresIt) {
+  // Why skipping the drag branch while dark is not enough on its own: travel is
+  // counted in the driver, so a finger that moved on a dark screen still reports
+  // it, and the release would still have read that as a gesture. Both halves are
+  // needed, and this is the half that decides.
+  const int travel_on_a_dark_screen = 40;
+  EXPECT_TRUE(riftDragIsMove(travel_on_a_dark_screen, RIFT_TAP_SLOP_PX));
+  EXPECT_EQ(RIFT_TOUCH_WAKE,
+            riftTouchRelease(true, riftDragIsMove(travel_on_a_dark_screen,
+                                                  RIFT_TAP_SLOP_PX)));
+}
+
 TEST(DragIsMove, AFingerThatBarelyMovedIsStillATap) {
   // A tap reports a pixel or two of travel because a finger does not lift straight
   // up. Suppressing those would make the screen deaf to careful taps.

@@ -9468,6 +9468,11 @@ void UITask::loop() {
 
 #ifdef RIFT_INPUT_TOUCH
   {
+    // Whether the screen can be seen decides what a touch means, so it is read
+    // once here and used by both halves below rather than asked twice in different
+    // places - which is how the two disagreed.
+    const bool dark = (_display != NULL && !_display->isOn());
+
     // Drag first: the driver tracks the finger continuously and only reports a
     // tap on release, so movement has to be read from the live position. A tap
     // that moved is a scroll and must not also fire as a tap; the release below
@@ -9479,7 +9484,12 @@ void UITask::loop() {
         _drag_last_y = rift_touch.lastY();
         rift_touch.dragReset();
         _drag_applied = 0;
-      } else {
+      } else if (!dark) {
+        // Movement is not applied to a screen nobody can see. It was: COMMS'
+        // handleDrag() scrolls the history by the pixel and returns true, so a
+        // finger on a dark screen scrolled it invisibly, set _drag_moved, pushed
+        // the auto-off timer out and repainted a black panel over the SPI bus the
+        // radio shares. The history had moved by the time the screen came back.
         int dy = rift_touch.lastY() - _drag_last_y;
         if (dy != 0) {
           RiftScreen* t = (_overlay != NULL) ? _overlay : curr;
@@ -9534,18 +9544,27 @@ void UITask::loop() {
       // up. _drag_moved stays as the other half: COMMS scrolls by the pixel and
       // consumes a jitter smaller than the slop, and that release must not page.
       // The rule is riftDragIsMove() in RiftLogic.h, where it is tested.
-      bool was_drag = _drag_moved
-                   || riftDragIsMove(rift_touch.dragTravel(), RIFT_TAP_SLOP_PX);
+      const bool was_drag = _drag_moved
+                         || riftDragIsMove(rift_touch.dragTravel(), RIFT_TAP_SLOP_PX);
       _drag_moved = false;
-      if (was_drag) {
+
+      // riftTouchRelease() in RiftLogic.h, where the order is tested. A dark
+      // screen wakes on the release whatever the finger did getting there, and
+      // that is the half this had backwards: was_drag was asked first, so a wake
+      // touch that jittered a pixel was taken for a gesture and the wake never
+      // ran. The driver counts travel on its own, so skipping the drag branch
+      // above is not enough on its own to fix it - the release has to know too.
+      const int action = riftTouchRelease(dark, was_drag);
+
+      if (action == RIFT_TOUCH_WAKE) {
+        checkDisplayOn(0);          // the first touch only wakes the screen
+      } else if (action == RIFT_TOUCH_DRAG) {
         // nothing: the gesture was a drag, and the screen has already had it
       } else {
       _touch_x = tx;   // kept for the SYSTEM readout while calibrating
       _touch_y = ty;
 
-      if (_display != NULL && !_display->isOn()) {
-        checkDisplayOn(0);          // first tap just wakes the screen
-      } else if (ty >= _display->height() - 16) {
+      if (ty >= _display->height() - 16) {
         // nav bar: jump straight to the tapped screen
         int col = (tx * RIFT_NAV_COUNT) / _display->width();
         if (col >= 0 && col < RIFT_NAV_COUNT) {

@@ -1349,6 +1349,26 @@ static inline uint32_t riftNextGenSeq(uint32_t seq) {
   return next == 0u ? 1u : next;
 }
 
+// ------------------------------------------------------ what a touch release is
+//
+// Three answers, and the order between them is the whole of it. A release on a
+// screen that is off is a request to wake it, and that outranks anything the
+// finger did getting there - but the drag test was asked first, so a wake touch
+// with one pixel of jitter was classed as a gesture, the wake was skipped and the
+// screen stayed dark. On COMMS it also scrolled the history invisibly on the way,
+// so the view had moved by the time the screen came back.
+//
+// Stated here rather than left as the shape of an if-chain, because an if-chain is
+// what got the order wrong.
+#define RIFT_TOUCH_WAKE  0   // the screen was off: turn it on, and nothing else
+#define RIFT_TOUCH_DRAG  1   // a gesture the screen has already had; raises no tap
+#define RIFT_TOUCH_TAP   2   // act on it where it landed
+
+static inline int riftTouchRelease(bool display_off, bool was_drag) {
+  if (display_off) return RIFT_TOUCH_WAKE;
+  return was_drag ? RIFT_TOUCH_DRAG : RIFT_TOUCH_TAP;
+}
+
 // ---------------------------------------------------------------- hop buckets
 //
 // NODES' summary row. The ranges are fixed on purpose: DIRECT | 1-2 | 3-5 | 6+.
