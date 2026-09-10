@@ -556,6 +556,76 @@ TEST(ShouldFlush, SurvivesTheMillisWrap) {
     EXPECT_TRUE (riftShouldFlush(true, retry, dirty_at, 20000, 0, 0));
 }
 
+// The second time the backoff broke, and by a different mechanism: the increment
+// and the new deadline both sat inside "if (save_failures < 255)", so a saturated
+// counter stopped moving retry_at. The old deadline was already in the past, so the
+// condition above went true on the next loop iteration and the retries were back to
+// every pass - reachable after about four hours of continuous failure.
+TEST(ShouldFlush, TheCounterSaturatesButTheDeadlineDoesNot) {
+    EXPECT_EQ(1,   riftNextSaveFailures(0));
+    EXPECT_EQ(2,   riftNextSaveFailures(1));
+    EXPECT_EQ(255, riftNextSaveFailures(254));
+    EXPECT_EQ(255, riftNextSaveFailures(255));   // saturates rather than wrapping to 0
+
+    // the deadline is set from the count after the failure, saturated or not
+    uint32_t now = 500000;
+    EXPECT_EQ(now + 60000u, riftNextRetryAt(now, 255));
+    EXPECT_EQ(now + 5000u,  riftNextRetryAt(now, 1));
+}
+
+TEST(ShouldFlush, ASaturatedCounterStillBacksOff) {
+    // the loop, as it runs: dirty long ago so the debounce is not what decides,
+    // the counter already at its ceiling, and one more failure now
+    const uint32_t dirty_at = 0;
+    const uint32_t now = 4 * 60 * 60 * 1000u;   // about where saturation arrives
+    const uint8_t failures = riftNextSaveFailures(255);
+    const uint32_t retry_at = riftNextRetryAt(now, failures);
+
+    EXPECT_EQ(255, failures);
+    EXPECT_GT(retry_at, now) << "a saturated counter must still move the deadline";
+
+    EXPECT_FALSE(riftShouldFlush(true, now, dirty_at, 20000, failures, retry_at));
+    EXPECT_FALSE(riftShouldFlush(true, now + 1, dirty_at, 20000, failures, retry_at));
+    EXPECT_FALSE(riftShouldFlush(true, retry_at - 1, dirty_at, 20000, failures, retry_at));
+    EXPECT_TRUE (riftShouldFlush(true, retry_at, dirty_at, 20000, failures, retry_at));
+
+    // and it keeps holding, failure after failure, rather than degrading
+    uint32_t t = retry_at;
+    for (int i = 0; i < 20; i++) {
+        const uint32_t next = riftNextRetryAt(t, riftNextSaveFailures(255));
+        EXPECT_EQ(t + 60000u, next) << "failure " << i;
+        EXPECT_FALSE(riftShouldFlush(true, t, dirty_at, 20000, 255, next));
+        t = next;
+    }
+}
+
+TEST(ShouldFlush, TheShapeThatShippedWrong) {
+    // The caller's old form, written out. The increment and the deadline shared one
+    // "has the counter got room?" branch, so at the ceiling neither happened and the
+    // deadline kept whatever value it had - which was in the past, because it was
+    // set an hour of retries ago.
+    const uint32_t now = 4 * 60 * 60 * 1000u;
+    uint8_t failures = 255;
+    uint32_t retry_at = 1000;            // set long ago, long since elapsed
+    if (failures < 255) {                // the branch as it was
+        failures++;
+        retry_at = riftNextRetryAt(now, failures);
+    }
+    EXPECT_TRUE(riftShouldFlush(true, now, 0, 20000, failures, retry_at))
+        << "kept as a demonstration: this is what retried every loop pass";
+
+    // and the form it has now, from the same starting state
+    failures = riftNextSaveFailures(255);
+    retry_at = riftNextRetryAt(now, failures);
+    EXPECT_FALSE(riftShouldFlush(true, now, 0, 20000, failures, retry_at));
+}
+
+TEST(ShouldFlush, ASuccessfulSaveClearsTheBackoff) {
+    // zero failures means the deadline is not consulted at all, which is what lets
+    // the next dirty burst be written on its own schedule
+    EXPECT_TRUE(riftShouldFlush(true, 100000, 0, 20000, 0, 0xFFFFFFFFu));
+}
+
 // ------------------------------------------------------------ channel colours
 //
 // The contrast is computed here rather than taken from the design note, because

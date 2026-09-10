@@ -279,6 +279,11 @@ public:
   void pushOverlay(RiftScreen* o);
   void dismissOverlay();
 
+  // Whether a popup is currently over the screen. A screen renders underneath one,
+  // so anything a screen does in render() that means "the user has seen this" has
+  // to ask - see the unread mark in RiftCommsScreen::render().
+  bool hasOverlay() const { return _overlay != NULL; }
+
   // Offer a held key to the Nordic picker. Does nothing unless COMMS is showing
   // and the key actually has variants.
   void openNordicPicker(char base);

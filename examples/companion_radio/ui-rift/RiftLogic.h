@@ -1209,6 +1209,24 @@ static inline bool riftShouldFlush(bool dirty, uint32_t now, uint32_t dirty_at,
   return true;
 }
 
+// The counter and the deadline are two decisions, and treating them as one broke
+// the backoff a second time. The increment and the new retry_at both sat inside
+// "if (save_failures < 255)", so once the counter saturated - reachable after about
+// four hours of continuous failure at these intervals - a failing save stopped
+// moving the deadline. The old one was already in the past, so riftShouldFlush()
+// above said yes on the very next loop iteration and the retries went back to
+// every pass, which is the exact behaviour the backoff exists to prevent, arrived
+// at by the counter that measures it.
+//
+// The counter saturates. The deadline is set after every failure, saturated or not.
+static inline uint8_t riftNextSaveFailures(uint8_t failures) {
+  return failures < 255 ? (uint8_t) (failures + 1) : (uint8_t) 255;
+}
+
+static inline uint32_t riftNextRetryAt(uint32_t now, uint8_t failures_after) {
+  return now + riftSaveBackoffMillis(failures_after);
+}
+
 // ---------------------------------------------------------------- hop buckets
 //
 // NODES' summary row. The ranges are fixed on purpose: DIRECT | 1-2 | 3-5 | 6+.

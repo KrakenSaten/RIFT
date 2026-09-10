@@ -380,11 +380,19 @@ struct RiftMsgLog {
       // only the slow ones. A save that costs nothing is not news, and a line per
       // save would push everything else out of a 48-line ring within an evening.
       if (last_save_ms >= 50) riftLogf("save %d msg %ums", count, (unsigned) last_save_ms);
-    } else if (save_failures < 255) {
-      save_failures++;
-      retry_at = millis() + riftSaveBackoffMillis(save_failures);
-      riftLogf("SAVE FAILED (%u), retry in %us", (unsigned) save_failures,
-               (unsigned) (riftSaveBackoffMillis(save_failures) / 1000u));
+    } else {
+      // Both in RiftLogic.h, and separate on purpose: the counter saturating must
+      // not stop the deadline moving. See riftNextSaveFailures() for what that cost.
+      save_failures = riftNextSaveFailures(save_failures);
+      retry_at = riftNextRetryAt((uint32_t) millis(), save_failures);
+      // The log line is limited on its own account rather than by the counter. At
+      // the 60s ceiling a line per retry is a line a minute into a 48-line ring,
+      // which would bury everything else within the hour - and after the fourth
+      // identical failure the line has stopped being news.
+      if (save_failures <= 4) {
+        riftLogf("SAVE FAILED (%u), retry in %us", (unsigned) save_failures,
+                 (unsigned) (riftSaveBackoffMillis(save_failures) / 1000u));
+      }
     }
     return ok;
   }
@@ -6857,7 +6865,13 @@ private:
 
   // delivery suffix for an outgoing direct message, or NULL if not applicable
   const char* deliveryLabel(const RiftMsgLog::Entry* p, char* buf, size_t buf_len) {
-    if (!p->outgoing || p->expected_ack == 0) return NULL;   // channel send / incoming
+    if (!p->outgoing) return NULL;   // incoming
+    // delivered is asked before expected_ack, and the order is the whole fix. The
+    // log restores delivered and trip_ms but deliberately never restores
+    // expected_ack - there is no point waiting for an ACK to a send from before the
+    // restart - so a delivery that had been confirmed, timed and stored came back
+    // as expected_ack == 0 and returned here before anything looked at it. The
+    // check glyph vanished on reboot from messages that had been acknowledged.
     if (p->delivered) {
       // The check glyph (CP437 0xFB) is the form; the colour is the second cue.
       // No channel or sender name can begin with it, and it sits in the slot where
@@ -6867,6 +6881,9 @@ private:
       snprintf(buf, buf_len, "\xFB %.1fs", p->trip_ms / 1000.0f);
       return buf;
     }
+    // Nothing left to wait for: a channel send, or an entry restored from the log
+    // whose ACK is not coming. Neither should read "sending" or "no ack".
+    if (p->expected_ack == 0) return NULL;
     // subtract rather than add: millis() wraps at ~49.7 days, and
     // (sent_at + timeout) would overflow and report a fresh send as timed out
     if (p->timeout_ms > 0 && millis() - p->sent_at_ms > p->timeout_ms) return "no ack";
@@ -7179,10 +7196,26 @@ public:
     // A channel target needs none. It is already in the strip under an accent
     // fill, and naming it again above said the same thing twice. That case gets
     // the strip at the top of the screen and the 16px into the history instead.
-    // On screen is read. Done here rather than on navigation because switching
+    // Drawn is not the same as read, and this used to be unconditional. Two ways
+    // it was wrong: a message arriving in the selected conversation while the
+    // history is scrolled up had its unread mark set and then cleared by the next
+    // frame without ever being on screen; and a conversation drawn underneath an
+    // overlay - the repeater panel, a room login prompt - was treated as read
+    // through it, since an overlay draws over a screen that still renders.
+    //
+    // The rule is the conservative one: this is the visible active view, nothing is
+    // covering it, and the history is at the newest. Anything else leaves the mark
+    // alone, so it is still there when the view comes back. The picker returns
+    // above, so it needs no test here.
+    //
+    // A more precise version tracks the last visible message id as the read
+    // position, which is what the scrolled case actually wants. This is the part
+    // that can be got right without one.
+    //
+    // Still done here rather than on navigation, for the original reason: switching
     // channel in the strip neither enters nor leaves a screen, so there is no
-    // navigation event to hang it on - and the frame is what actually knows.
-    msg_unread.clear(currentConv());
+    // navigation event to hang it on - and the frame is what knows.
+    if (_scroll == 0 && !_task->hasOverlay()) msg_unread.clear(currentConv());
 
     // Decided here, drawn after the history.
     //
