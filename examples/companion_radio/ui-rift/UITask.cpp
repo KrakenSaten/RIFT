@@ -98,7 +98,30 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 // still do.
 #define RIFT_DOUBLETAP_MILLIS  400
 
-#define RIFT_MSG_LOG_SIZE  48
+// How many messages the history holds, in RAM and in the file.
+//
+// 264 bytes an entry, measured by building at 48 and at 96 and taking the
+// difference - 12,672 bytes for 48 messages. Most of that is Entry's msg[161] and
+// origin[62]; the rest is the parallel RiftConvKey array the unread tracker keeps,
+// which is sized by this same constant. Unlike RIFT_PICKER_MAX below, this one is
+// in .bss because msg_log is a file static, so the cost does show in the build's
+// RAM figure: 60.9% at 48 against 64.8% at 96.
+//
+// Raised from 48, which was chosen before the device had been used daily and turned
+// out to be about half a day of a busy Public channel.
+//
+// What does NOT scale is the save. Measured on the device across a day of real
+// traffic: a save of 48 entries costs 140-368ms, of which the write is 1-2ms and
+// the rest is SPIFFS.open() truncating plus the close. Doubling the content doubles
+// the 1-2ms and leaves the rest where it is, so this number is bounded by RAM
+// rather than by how long the main loop blocks - which is not what was expected
+// before it was measured.
+//
+// 255 is the ceiling without a format change: the file header carries the count in
+// a single byte. Growing and shrinking are both safe below that, because load()
+// clamps to this value - an older file loads whole, and a larger one loses its
+// oldest entries rather than failing.
+#define RIFT_MSG_LOG_SIZE  96
 
 // Where the message history lives, and how long a burst is allowed to settle
 // before it is written.
