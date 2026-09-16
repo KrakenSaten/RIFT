@@ -373,6 +373,18 @@ protected:
 
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
 
+#ifdef RIFT_VERSION
+  // Ties the air-log row to the packet it describes.
+  //
+  // logRx() runs right after the frame is parsed and before the Dispatcher decides
+  // whether to decode it now or hold it, which is the last moment at which "the
+  // newest row" is certainly this packet's row. onRecvPacket() then points the
+  // annotators back at that row for the whole of the decode, however long the
+  // packet was held. Both wrap the base class rather than replacing it.
+  void logRx(mesh::Packet* packet, int len, float score) override;
+  mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
+#endif
+
   // The transmit side of the air log. Upstream declares both of these empty, so
   // overriding them costs no divergence - the log was receive-only because nothing
   // here had asked, not because the hooks were missing.

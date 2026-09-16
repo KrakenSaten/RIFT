@@ -61,9 +61,19 @@ inline RiftActivity& riftActivity();
 #define RIFT_AIR_K_CLI     7   // who: the repeater, text: its reply
 #define RIFT_AIR_K_TRACE   8
 
+// How many packets can be in flight between being logged and being decoded. The
+// Dispatcher holds a flood packet for up to 32 seconds before handing it up, and
+// every packet it holds came from the same fixed pool - so one association per
+// pool slot is exactly enough, and the pool is 16.
+#define RIFT_AIR_INFLIGHT 16
+
 struct RiftRxLog {
   struct Entry {
     uint32_t at_ms;
+    // Which packet this row is. Assigned in ring order and never reused, so a row
+    // can be named after it has been overwritten and the naming still fails
+    // safely - see rowForSeq(). Starts at 1; 0 means "no row".
+    uint32_t seq;
     // Signal on a receive; air time in milliseconds on a transmit.
     //
     // Reused rather than widened. RSSI and SNR describe a signal arriving and mean
@@ -116,6 +126,24 @@ struct RiftRxLog {
   // sent 400.
   uint32_t total_tx = 0;
 
+  // The next row number to hand out. Never 0, which is the "no row" value.
+  uint32_t next_seq = 1;
+
+  // Which row the packet currently being decoded belongs to, or 0 for "whatever is
+  // newest" - the answer for a packet decoded in the same breath as it was logged,
+  // and for anything the Dispatcher never logged at all, such as a loopback.
+  uint32_t decoding_seq = 0;
+
+  // Packets logged but not yet decoded. With no receive delay configured an entry
+  // lives for a few statements - the Dispatcher logs the frame and decodes it
+  // inside the same call - and the table is empty again by the time anything could
+  // look at it. A receive delay is what makes entries outlive their call.
+  struct InFlight {
+    const void* pkt;
+    uint32_t seq;
+  };
+  InFlight inflight[RIFT_AIR_INFLIGHT] = {};
+
   Entry* alloc(uint8_t dir, uint8_t header, uint8_t path_len, int len) {
     head = (head + 1) % RIFT_RX_LOG_LINES;
     if (count < RIFT_RX_LOG_LINES) count++;
@@ -125,6 +153,8 @@ struct RiftRxLog {
       total_tx++;
     }
     Entry* e = &lines[head];
+    e->seq = next_seq++;
+    if (next_seq == 0) next_seq = 1;   // 0 is reserved for "no row"
     e->at_ms = (uint32_t) millis();
     e->dir = dir;
     e->header = header;
@@ -148,24 +178,86 @@ struct RiftRxLog {
     lines[head].has_hash = 1;
   }
 
-  // The scope the most recent receive came under. NULL or empty leaves it as
-  // unscoped; the handler passes "?" for a scope it could not name.
+  // The row carrying this number, or NULL once it has been overwritten.
+  //
+  // Row numbers are handed out in ring order, so how far back a row sits is the
+  // difference between its number and the newest - no search, and the row that has
+  // been overwritten is exactly the one whose distance has grown past count. The
+  // subtraction is unsigned so it survives next_seq wrapping.
+  Entry* rowForSeq(uint32_t seq) {
+    if (count == 0 || seq == 0) return NULL;
+    uint32_t back = lines[head].seq - seq;
+    if (back >= (uint32_t) count) return NULL;   // aged out of the ring
+    return &lines[(head - (int) back + RIFT_RX_LOG_LINES * 2) % RIFT_RX_LOG_LINES];
+  }
+
+  // Remember that this packet is the one just logged. Called for every received
+  // packet the Dispatcher parses, whether or not it will be held before decoding,
+  // because at that moment the newest row is still the right one and later it is
+  // not.
+  void bindPacket(const void* pkt) {
+    if (pkt == NULL || count == 0) return;
+    int free_idx = -1;
+    for (int i = 0; i < RIFT_AIR_INFLIGHT; i++) {
+      if (inflight[i].pkt == pkt) { inflight[i].seq = lines[head].seq; return; }
+      if (inflight[i].pkt == NULL && free_idx < 0) free_idx = i;
+    }
+    // A pool slot reused without its packet ever being decoded leaves its old entry
+    // behind; the branch above overwrites it, so the table cannot hold more distinct
+    // pointers than the pool has packets and free_idx cannot run out in practice.
+    if (free_idx >= 0) {
+      inflight[free_idx].pkt = pkt;
+      inflight[free_idx].seq = lines[head].seq;
+    }
+  }
+
+  // Point the annotators at this packet's row for the duration of its decode, and
+  // release the association. An unknown packet leaves decoding_seq at 0, which is
+  // the old behaviour: annotate whatever is newest.
+  void beginDecode(const void* pkt) {
+    decoding_seq = 0;
+    if (pkt == NULL) return;
+    for (int i = 0; i < RIFT_AIR_INFLIGHT; i++) {
+      if (inflight[i].pkt == pkt) {
+        decoding_seq = inflight[i].seq;
+        inflight[i].pkt = NULL;
+        inflight[i].seq = 0;
+        return;
+      }
+    }
+  }
+
+  void endDecode() { decoding_seq = 0; }
+
+  // The row the annotators below write to: the packet being decoded, or the newest
+  // row when nothing is being decoded.
+  //
+  // It used to be the newest row unconditionally, on the reasoning that the
+  // Dispatcher logs a frame and hands it up inside the same call. That holds only
+  // when nothing is held in between: with a receive delay configured, packet A is
+  // logged and queued, packet B arrives and takes the newest row, and A's decode
+  // then wrote A's sender and text onto B's signal measurements and timestamp. A
+  // stayed blank, and if B had been a transmit the annotation was dropped entirely.
+  Entry* annotationRow() {
+    if (decoding_seq != 0) return rowForSeq(decoding_seq);   // NULL if it aged out
+    return count == 0 ? NULL : &lines[head];
+  }
+
+  // The scope the receive came under. NULL or empty leaves it as unscoped; the
+  // handler passes "?" for a scope it could not name.
   void setLastScope(const char* name) {
-    if (count == 0 || name == NULL || name[0] == 0) return;
-    Entry* e = &lines[head];
-    if (e->dir != RIFT_AIR_RX) return;
+    if (name == NULL || name[0] == 0) return;
+    Entry* e = annotationRow();
+    if (e == NULL || e->dir != RIFT_AIR_RX) return;
     snprintf(e->scope, sizeof(e->scope), "%s", name);
   }
 
-  // Called by the handler that decoded the packet the radio most recently
-  // logged. The Dispatcher logs the raw frame, then hands it up, and the
-  // callbacks run inside that same call - so "the newest entry" is the packet
-  // being decoded. Only a receive is annotated; a transmit's row says what was
-  // sent from its header, and nothing decodes it afterwards.
+  // Called by the handler that decoded a packet. Only a receive is annotated; a
+  // transmit's row says what was sent from its header, and nothing decodes it
+  // afterwards.
   void annotateLast(uint8_t kind, const char* who, const char* text) {
-    if (count == 0) return;
-    Entry* e = &lines[head];
-    if (e->dir != RIFT_AIR_RX) return;
+    Entry* e = annotationRow();
+    if (e == NULL || e->dir != RIFT_AIR_RX) return;
     e->kind = kind;
     if (who != NULL)  snprintf(e->who, sizeof(e->who), "%s", who);
     if (text != NULL) snprintf(e->text, sizeof(e->text), "%s", text);

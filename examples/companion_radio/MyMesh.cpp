@@ -395,6 +395,28 @@ void MyMesh::logTx(mesh::Packet* packet, int len) { (void) packet; (void) len; }
 void MyMesh::logTxFail(mesh::Packet* packet, int len) { (void) packet; (void) len; }
 #endif
 
+#ifdef RIFT_VERSION
+void MyMesh::logRx(mesh::Packet* packet, int len, float score) {
+  // logRxRaw() created the row a moment ago and nothing has been logged since, so
+  // the newest row is this packet's. Recorded here rather than there because that
+  // hook is handed the raw bytes and this one is handed the Packet, and the Packet
+  // is what the delayed queue holds and what the decode handlers are given.
+  (void) len; (void) score;
+  riftRxLog().bindPacket(packet);
+}
+
+mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
+  // The decode runs inside this call, however long the packet waited to get here,
+  // so this is the one place that knows which row every annotateLast() below
+  // belongs to. Cleared afterwards so anything decoded outside a received packet -
+  // a loopback from importContact(), say - falls back to the newest row.
+  riftRxLog().beginDecode(pkt);
+  mesh::DispatcherAction action = BaseChatMesh::onRecvPacket(pkt);
+  riftRxLog().endDecode();
+  return action;
+}
+#endif
+
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
   // Recorded before the companion-link check below, and deliberately outside it:
   // this is the device's own record of mesh activity, and gating it on a
