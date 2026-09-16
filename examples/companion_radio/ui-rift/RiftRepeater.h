@@ -34,6 +34,11 @@
 #define RIFT_REP_CLI_TEXT   64
 #define RIFT_REP_TELEM      10
 
+// What stands in for a reply that must not be shown. Named rather than written
+// out at each view, because the repeater panel and the air log have to say the
+// same thing about the same reply, and a second literal is how they drift apart.
+#define RIFT_CLI_SECRET_SHOWN  "(secret reply not shown)"
+
 // What we are waiting for. One at a time, because the panel offers one action
 // at a time and refuses a second while one is outstanding. These values are also
 // what MyMesh::rift_pending_kind holds, so the two ends agree on the request in
@@ -259,23 +264,36 @@ public:
     if (_pending == RIFT_REP_TELEMETRY) _pending = RIFT_REP_IDLE;
   }
 
+  // Whether this reply must be kept off every on-device view.
+  //
+  // A reply can carry a secret two ways: because we asked for one, or because
+  // upstream echoes a new password back unasked. The window belongs to the node
+  // we asked, so it is only consulted for that node; the echo test is about the
+  // shape of the text and so applies to any sender's reply.
+  //
+  // Public because the panel is not the only thing that keeps the text. The air
+  // log records every decoded packet, and it was recording the raw reply before
+  // this class ever saw it - so the redaction has to be a question anyone can
+  // ask, rather than something that happens inside onCliReply() below.
+  bool replyIsSecret(const uint8_t* pub_key, const char* text) const {
+    if (text == NULL) return false;
+    if (riftCliReplyEchoesSecret(text)) return true;
+    return isTarget(pub_key) && _secret_until != 0 && !riftDue(millis(), _secret_until);
+  }
+
   // A CLI reply can be several lines in one blob of text. Split on newlines so
   // the screen can print it without measuring anything.
   void onCliReply(const uint8_t* pub_key, const char* text) {
     if (!isTarget(pub_key) || text == NULL) return;
     if (_pending == RIFT_REP_CLI) _pending = RIFT_REP_IDLE;
 
-    // A reply can carry a secret two ways: because we asked for one, or because
-    // upstream echoes a new password back unasked. Either way the whole reply is
-    // replaced rather than edited - it is not worth trying to find the secret
-    // inside a string whose shape belongs to somebody else's firmware.
-    // Not cleared here: the window stands until it expires, because the reply
-    // that consumed it might have been the phone's.
-    bool secret = (_secret_until != 0 && !riftDue(millis(), _secret_until))
-                  || riftCliReplyEchoesSecret(text);
-    if (secret) {
-      const char* safe = "(secret reply not shown)";
-      pushLine(safe, (int) strlen(safe));
+    // The whole reply is replaced rather than edited - it is not worth trying to
+    // find the secret inside a string whose shape belongs to somebody else's
+    // firmware.
+    // The window is not cleared here: it stands until it expires, because the
+    // reply that consumed it might have been the phone's.
+    if (replyIsSecret(pub_key, text)) {
+      pushLine(RIFT_CLI_SECRET_SHOWN, (int) strlen(RIFT_CLI_SECRET_SHOWN));
       return;
     }
 

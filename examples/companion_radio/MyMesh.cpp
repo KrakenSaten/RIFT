@@ -1377,7 +1377,14 @@ void MyMesh::onCommandDataRecv(const ContactInfo &from, mesh::Packet *pkt, uint3
                                const char *text) {
   markConnectionActive(from); // in case this is from a server, and we have a connection
 #ifdef RIFT_VERSION
-  riftRxLog().annotateLast(RIFT_AIR_K_CLI, from.name, text);
+  // Asked before anything keeps the text, not after. The repeater panel redacted
+  // its own copy inside onCliReply() below, but the air log had already stored the
+  // raw reply - so `get guest.password` showed "(secret reply not shown)" on the
+  // panel and the password itself on AIR, which is a redaction in name only. The
+  // classification is one question now, and every on-device copy asks it.
+  const bool cli_secret = riftRepeater().replyIsSecret(from.id.pub_key, text);
+  riftRxLog().annotateLast(RIFT_AIR_K_CLI, from.name,
+                           cli_secret ? RIFT_CLI_SECRET_SHOWN : text);
   // A repeater answers a CLI command here. Upstream queues it for the companion
   // app and that is the only copy, so with no phone attached the answer to
   // something the device itself asked was thrown away. Observed, not diverted:
