@@ -790,6 +790,23 @@ static RiftConvKey riftChannelConv(uint8_t idx) {
   return riftConvChannel(idx, riftChannelFingerprint(ch.channel.secret, klen));
 }
 
+// Only channels can be muted. A DM has no per-conversation setting and must not
+// get one by accident, and a slot that can no longer name its channel resolves to
+// unknown - which is not a muted conversation either.
+//
+// One function because there are now two callers at different moments: the sound,
+// decided before MyMesh raises the notification, and the popup, decided when the
+// message is filed. Two copies of this test would be two chances for a muted
+// channel to be silent in one view and audible in the other.
+static bool riftConvIsMuted(const RiftConvKey& conv) {
+  return conv.kind == RIFT_CONV_CHANNEL
+      && riftMutes().isMuted(conv.channel_idx, conv.channel_fp);
+}
+
+bool UITask::isChannelMuted(uint8_t channel_idx) const {
+  return riftConvIsMuted(riftChannelConv(channel_idx));
+}
+
 
 // Break text into lines at a pixel width, calling emit() per line (NULL just
 // counts). DisplayDriver::printWordWrap() is only a default that forwards to
@@ -9239,9 +9256,8 @@ void UITask::newMsgConv(uint8_t path_len, const char* from_name, const char* tex
   // dropping it too would make mute mean "ignore".
   //
   // Only channels can be muted. A DM has no per-conversation setting and should not
-  // get one by accident here.
-  const bool muted = (conv.kind == RIFT_CONV_CHANNEL)
-                  && riftMutes().isMuted(conv.channel_idx, conv.channel_fp);
+  // get one by accident here. Same test the sound already made in isChannelMuted().
+  const bool muted = riftConvIsMuted(conv);
 
 
   // Don't take the screen away from someone mid-input: a half-typed line in

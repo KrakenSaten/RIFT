@@ -363,6 +363,10 @@ public:
                   const uint8_t* peer) override;
   void msgDelivered(uint32_t ack_hash, uint32_t trip_time_millis) override;
   void notify(UIEventType t = UIEventType::none) override;
+  // RIFT is the only UI with a mute list, so it is the only one that answers this
+  // with anything but false. Resolves the channel fingerprint on this side, for the
+  // same reason newMsgConv() does: MyMesh hands over the slot and the keys are here.
+  bool isChannelMuted(uint8_t channel_idx) const override;
   void loop() override;
 
   void shutdown(bool restart = false);

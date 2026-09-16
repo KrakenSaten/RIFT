@@ -1458,7 +1458,13 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   // Not an else: a UI that is the client itself still wants to be told, and the
   // tickle above is for an app that may or may not exist. See
   // AbstractUITask::notifiesWhileConnected().
-  if (_ui && (!_serial->isConnected() || _ui->notifiesWhileConnected())) {
+  //
+  // The mute is asked here rather than left to the UI, because by the time
+  // newMsgConv() checked it the sound had already played: muting a channel
+  // suppressed the popup and the wake and kept the beep. See
+  // AbstractUITask::isChannelMuted().
+  if (_ui && (!_serial->isConnected() || _ui->notifiesWhileConnected())
+      && !_ui->isChannelMuted(channel_idx)) {
     _ui->notify(UIEventType::channelMessage);
   }
 #endif

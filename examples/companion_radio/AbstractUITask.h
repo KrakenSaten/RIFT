@@ -82,5 +82,18 @@ public:
   // Defaults to upstream's behaviour, so nothing changes for ui-new, ui-orig or
   // ui-tiny.
   virtual bool notifiesWhileConnected() const { return false; }
+
+  // Whether this channel's notifications are muted.
+  //
+  // Asked before notify() rather than inside the UI afterwards, because a sound
+  // cannot be taken back. The mute check used to live only in newMsgConv(), which
+  // runs after the sound has already played: muting a channel suppressed the popup
+  // and the wake and left the beep, which is the one effect a muted channel must
+  // not have.
+  //
+  // Channels only. A DM has no per-conversation mute and must not acquire one by
+  // being passed through here. Defaults to false, so a UI with no mute list - every
+  // upstream one - behaves exactly as before.
+  virtual bool isChannelMuted(uint8_t channel_idx) const { (void) channel_idx; return false; }
   virtual void loop() = 0;
 };
