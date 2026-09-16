@@ -1098,9 +1098,25 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   // being wrong.
   // On every screen, SYSTEM included: it used to borrow this slot for its page
   // number, and it has no pages now.
-  char batt[8];
-  snprintf(batt, sizeof(batt), "%d%%", rift_nav_batt_pct);
-  if (rift_nav_batt_pct <= 15) {
+  // "CHG" while a charger is driving the pin, because the percentage beside it is
+  // then the last reading taken on the battery and not a current one. It used to
+  // print the live conversion, which with a cable in is the system rail: plugging in
+  // took the number from 50 to 99 without the cell gaining anything. Measured at
+  // 4.61V on this board, where a cell cannot pass 4.20.
+  //
+  // The held number is kept rather than blanked - "CHG 47%" says more than "CHG",
+  // and what it says is true as of when the cable went in. Before any reading has
+  // been taken on battery there is nothing to hold, and it says so.
+  char batt[12];
+  if (rift_nav_batt_ext) {
+    if (rift_nav_batt_pct > 0) snprintf(batt, sizeof(batt), "CHG %d%%", rift_nav_batt_pct);
+    else                       snprintf(batt, sizeof(batt), "CHG");
+  } else {
+    snprintf(batt, sizeof(batt), "%d%%", rift_nav_batt_pct);
+  }
+  // Not warned about while charging. The held figure can be low and still be the
+  // wrong thing to interrupt over - the cable is in and the number is going up.
+  if (rift_nav_batt_pct <= 15 && !rift_nav_batt_ext) {
     riftWarnText(display, display.width() - 2, 228, batt, 1, true);
   } else {
     display.setColor(rift_pal.mid);
@@ -1108,12 +1124,10 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   }
 }
 
-#ifndef BATT_MIN_MILLIVOLTS
-  #define BATT_MIN_MILLIVOLTS 3000
-#endif
-#ifndef BATT_MAX_MILLIVOLTS
-  #define BATT_MAX_MILLIVOLTS 4200
-#endif
+// BATT_MIN_MILLIVOLTS and BATT_MAX_MILLIVOLTS were the two ends of the straight
+// line this UI used to draw between empty and full. riftBattPercent() carries the
+// real curve now, so they are gone from here rather than left to be picked up again.
+// ui-new and ui-orig keep their own copies; they are upstream's and untouched.
 
 // Where a screen is, in one line at the top of its own body.
 //
@@ -1588,6 +1602,7 @@ void riftSaveSettings() {
 #endif
 }
 int rift_nav_batt_pct = 0;
+bool rift_nav_batt_ext = false;
 // Which SYSTEM page is showing, so the nav bar can say 1/2 in the slack where the
 // battery percentage normally sits. Only SYSTEM writes it; the other four screens
 // never look at it, and the percentage is still on all of them.
@@ -9539,6 +9554,31 @@ bool UITask::isButtonPressed() const {
 }
 
 void UITask::loop() {
+  // Ahead of everything that reads it. Two seconds is far slower than the frame
+  // rate and far faster than a battery changes, and the ADC conversion is eight
+  // samples on a bus the radio also uses - there is no reason to pay for it per
+  // frame, which is what the nav bar used to do.
+  if (riftDue((uint32_t) millis(), _next_batt_sample)) {
+    uint16_t mv = getBattMilliVolts();
+    if (mv > 0) {
+      // Frozen rather than updated while something else is driving the pin. With
+      // USB attached this reads the system rail, so every sample taken then would
+      // replace a real measurement with one of the charger - which is how the
+      // percentage used to jump from 50 to 99 the instant a cable went in. What is
+      // kept is the last reading actually taken on the battery, and the nav bar
+      // says so rather than passing it off as current.
+      const bool ext = riftBattIsExternal(mv, board.isExternalPowered());
+      if (!ext) {
+        // Seeded rather than smoothed on the first sample after a charge. The held
+        // value is as stale as the charge was long, and easing towards the truth
+        // from it would be a slower way of being wrong.
+        _batt_mv = _batt_external ? mv : riftBattSmooth(_batt_mv, mv);
+      }
+      _batt_external = ext;
+    }
+    _next_batt_sample = (uint32_t) millis() + 2000;
+  }
+
   char c = 0;
 #if UI_HAS_JOYSTICK
   int ev = user_btn.check();
@@ -9870,10 +9910,12 @@ void UITask::loop() {
     // Buckets rather than readings. A line every four seconds would bury everything
     // else in the ring, and only crossing downward is news - a brownout otherwise
     // leaves LAST RESET saying a reset happened and nothing saying why.
-    uint16_t mv = getBattMilliVolts();
+    // The smoothed reading, not a fresh conversion: a transmit sagging the rail is
+    // not a battery event, and an unsmoothed sample would have written one into the
+    // log every time the bucket boundary happened to fall inside the sag.
+    uint16_t mv = _batt_mv;
     if (mv > 0) {
-      int pct = ((int) mv - BATT_MIN_MILLIVOLTS) * 100
-                / (BATT_MAX_MILLIVOLTS - BATT_MIN_MILLIVOLTS);
+      int pct = riftBattPercent((int) mv);
       int8_t bucket = (pct <= 5) ? 0 : ((pct <= 10) ? 1 : ((pct <= 20) ? 2 : 3));
       if (_batt_bucket < 0) {
         _batt_bucket = bucket;          // first reading is the baseline, not an event
@@ -9913,13 +9955,12 @@ void UITask::loop() {
 
   if (_display != NULL && _display->isOn()) {
     if (riftDue((uint32_t) millis(), _next_refresh) && curr) {
-      // Once per frame, for the nav bar to draw. The title bar used to read the
-      // ADC inside its own render, so this is no more work - just in one place.
-      {
-        int mv = (int) getBattMilliVolts();
-        int pct = ((mv - BATT_MIN_MILLIVOLTS) * 100) / (BATT_MAX_MILLIVOLTS - BATT_MIN_MILLIVOLTS);
-        rift_nav_batt_pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
-      }
+      // Once per frame, for the nav bar to draw - but only the arithmetic. The
+      // conversion itself moved to the sampler at the top of loop(), because doing
+      // it here meant the percentage moved with whatever the radio was doing at the
+      // instant the frame was drawn. riftBattPercent() already clamps to 0..100.
+      rift_nav_batt_pct = riftBattPercent((int) _batt_mv);
+      rift_nav_batt_ext = _batt_external;
       _display->startFrame();
       int delay_millis = curr->render(*_display);
       // Popup, then alert box: three layers into one canvas, one bulk transfer
@@ -9998,7 +10039,10 @@ void UITask::loop() {
 
 #ifdef AUTO_SHUTDOWN_MILLIVOLTS
   if (riftDue((uint32_t) millis(), next_batt_chck)) {
-    uint16_t milliVolts = getBattMilliVolts();
+    // Smoothed, deliberately. Shutting down is not reversible from the user's side,
+    // and a transmit sagging the rail past the threshold for the length of a packet
+    // is not a flat battery.
+    uint16_t milliVolts = _batt_mv;
     if (milliVolts > 0 && milliVolts < AUTO_SHUTDOWN_MILLIVOLTS) {
       if(!board.isExternalPowered()) {
         if (_display != NULL) {

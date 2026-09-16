@@ -2504,3 +2504,101 @@ static inline bool riftDragIsMove(int travel_px, int slop_px) {
   if (travel_px < 0) travel_px = -travel_px;
   return travel_px > slop_px;
 }
+
+// ---- battery ---------------------------------------------------------------
+//
+// Charge remaining, from cell voltage.
+//
+// This was (mv - 3000) * 100 / 1200 at two call sites, which draws a straight line
+// between an empty cell and a full one. A lithium cell does not discharge in a
+// straight line: it drops quickly off the top, then sits almost still for most of
+// its charge, then falls off a cliff. Straight-line arithmetic therefore reads
+// high across the whole useful range, and worst exactly where it matters - 3.50V
+// is a cell with nothing left in it and the old formula called it 42%.
+//
+// The flatness is also why the reading underneath this has to be right. Half the
+// table below spans 110mV: between 3.84V and 3.73V the cell goes from 50% to 20%.
+// A converter that is 200mV out does not shift this curve, it invalidates it, which
+// is what getBattMilliVolts() had to be fixed for first.
+//
+// Resting voltages. A cell under load reads lower than its charge deserves, so this
+// under-reports while the radio transmits; the display smooths across that rather
+// than trying to model it, because the sag depends on the cell's age and internal
+// resistance and those are not knowable from here.
+//
+// Anything above the top of the table is 100 and anything below the bottom is 0:
+// 3.27V is where a protection circuit is about to disconnect, and there is no useful
+// resolution left below it.
+struct RiftBattPoint { int16_t mv; int8_t pct; };
+
+static const RiftBattPoint RIFT_BATT_CURVE[] = {
+  { 4200, 100 }, { 4150, 95 }, { 4110, 90 }, { 4080, 85 }, { 4020, 80 },
+  { 3980,  75 }, { 3950, 70 }, { 3910, 65 }, { 3870, 60 }, { 3850, 55 },
+  { 3840,  50 }, { 3820, 45 }, { 3800, 40 }, { 3790, 35 }, { 3770, 30 },
+  { 3750,  25 }, { 3730, 20 }, { 3710, 15 }, { 3690, 10 }, { 3610,  5 },
+  { 3270,   0 },
+};
+
+static inline int riftBattPercent(int mv) {
+  const int n = (int) (sizeof(RIFT_BATT_CURVE) / sizeof(RIFT_BATT_CURVE[0]));
+  if (mv >= RIFT_BATT_CURVE[0].mv)     return 100;
+  if (mv <= RIFT_BATT_CURVE[n - 1].mv) return 0;
+
+  for (int i = 1; i < n; i++) {
+    if (mv >= RIFT_BATT_CURVE[i].mv) {
+      const int lo_mv = RIFT_BATT_CURVE[i].mv,     hi_mv = RIFT_BATT_CURVE[i - 1].mv;
+      const int lo_p  = RIFT_BATT_CURVE[i].pct,    hi_p  = RIFT_BATT_CURVE[i - 1].pct;
+      const int span  = hi_mv - lo_mv;             // never 0: the table descends
+      // rounded, not truncated - the steps are 5 points and dropping the remainder
+      // would bias every reading downward
+      return lo_p + ((mv - lo_mv) * (hi_p - lo_p) + span / 2) / span;
+    }
+  }
+  return 0;
+}
+
+// One EMA step for the displayed reading, in integers.
+//
+// Sampled on a timer rather than per frame, and smoothed because a 22dBm transmit
+// drags the rail down for the length of the packet: the cell has not lost charge,
+// but an unsmoothed gauge says it has and then says it has not. Seeded on the first
+// reading rather than ramping up from zero.
+//
+// Weight 1/8 at one sample every two seconds settles in about fifteen, which is
+// slower than a transmit and faster than anyone watching the number.
+static inline uint16_t riftBattSmooth(uint16_t prev, uint16_t sample) {
+  if (prev == 0 || prev == sample) return sample;
+
+  uint16_t next = (uint16_t) (((uint32_t) prev * 7 + sample + 4) / 8);
+  // Integer division stalls a step short of the target in both directions: from
+  // 3701mV towards 3700mV the arithmetic returns 3701 forever, and from 3699 it
+  // returns 3699. One millivolt is nothing to the percentage, but a filter that
+  // cannot reach its own input is a thing to be found later and mistrusted, so the
+  // last step is taken by hand.
+  if (next == prev) next = (sample > prev) ? (uint16_t) (prev + 1) : (uint16_t) (prev - 1);
+  return next;
+}
+
+// Above this, the reading is not a cell.
+//
+// A lithium cell tops out at 4.20V and a charger's constant-voltage point is the
+// same 4.20, so nothing on a battery can read here. Measured on this board: with USB
+// attached GPIO4 sits at 4.61V, which is the system rail fed from VBUS - five volts
+// less a drop - and not the battery at all. 4.30 clears the highest a cell plus
+// measurement noise can reach and sits well under what the rail reads.
+#define RIFT_BATT_MAX_CELL_MV 4300
+
+// Whether this reading is coming from something other than the battery.
+//
+// Two independent signals, because one of them has a known hole. isExternalPowered()
+// is HWCDC::isPlugged(), which reports a USB *host*: a charger that never enumerates
+// supplies power without being one, and the device reads as on battery while it
+// charges. The voltage test has no such hole - it is physics rather than detection -
+// and catches exactly the case the first one misses.
+//
+// Deliberately not a rate-of-change test. A step no cell could make would catch the
+// same cases, but a gauge that decides what it is looking at by how fast the number
+// moved is a gauge that will be wrong in some circumstance nobody thought of.
+static inline bool riftBattIsExternal(uint16_t mv, bool usb_host) {
+  return usb_host || mv > RIFT_BATT_MAX_CELL_MV;
+}

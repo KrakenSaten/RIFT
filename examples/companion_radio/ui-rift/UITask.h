@@ -75,6 +75,10 @@ void riftApplyPalette(bool day);
 // Computed once per frame in loop(); the title bar used to read the ADC on every
 // call instead.
 extern int rift_nav_batt_pct;
+// Whether that percentage is a held reading rather than a live one, because the pin
+// is being driven by a charger. Mirrored alongside it so the nav bar can say which
+// it is showing - a number that silently stops tracking is worse than no number.
+extern bool rift_nav_batt_ext;
 // Which SYSTEM page is showing. The nav bar reads it to print 1/2 where the battery
 // percentage sits on the other four screens; only SYSTEM writes it.
 extern int rift_system_page;
@@ -189,6 +193,17 @@ class UITask : public AbstractUITask {
   uint32_t _next_state_check = 0;
   bool _gps_had_fix = false;
   int8_t _batt_bucket = -1;      // -1 until the first reading, which is a baseline
+  // The settled cell voltage the display reads, and when to sample it next.
+  //
+  // The nav bar used to call getBattMilliVolts() inside its own render, so the
+  // percentage was a fresh conversion every frame and moved with whatever the radio
+  // was doing at that instant. One sampler on a timer, smoothed, and every consumer
+  // on this side reads the same number. 0 means nothing has been sampled yet.
+  uint16_t _batt_mv = 0;
+  uint32_t _next_batt_sample = 0;
+  // Whether the pin is currently being driven by something other than the cell, so
+  // _batt_mv is a held reading rather than a live one. See riftBattIsExternal().
+  bool _batt_external = false;
   // uint32_t, not int: this holds millis() + 300, and a signed int overflows at
   // day 24.8 - undefined behaviour, and negative long before the millis wrap that
   // riftDue() exists to handle. Zero is safe as the initial value because it is

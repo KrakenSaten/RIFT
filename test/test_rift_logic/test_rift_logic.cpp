@@ -3361,6 +3361,99 @@ TEST(DragSteps, RefusesNullAndANonsensePitch) {
   EXPECT_EQ(0, riftDragSteps(&r, 100, -4));
 }
 
+// ---------------------------------------------------------------- battery curve
+
+TEST(BattPercent, EndsAreClampedRatherThanExtrapolated) {
+    EXPECT_EQ(100, riftBattPercent(4200));
+    EXPECT_EQ(100, riftBattPercent(4350));   // freshly off a charger
+    EXPECT_EQ(0,   riftBattPercent(3270));
+    EXPECT_EQ(0,   riftBattPercent(2800));   // below any protection cutoff
+    EXPECT_EQ(0,   riftBattPercent(0));      // "not sampled yet" must not read full
+}
+
+TEST(BattPercent, TableBreakpointsAreExact) {
+    EXPECT_EQ(50, riftBattPercent(3840));
+    EXPECT_EQ(20, riftBattPercent(3730));
+    EXPECT_EQ(10, riftBattPercent(3690));
+    EXPECT_EQ(80, riftBattPercent(4020));
+}
+
+TEST(BattPercent, TheOldStraightLineReadHighWhereItMattered) {
+    // 3.50V is a cell with nothing useful left. The old formula was
+    // (mv - 3000) * 100 / 1200, which called it 41.
+    EXPECT_EQ(41, (3500 - 3000) * 100 / 1200);
+    EXPECT_LT(riftBattPercent(3500), 10);
+
+    // and 3.70V, the middle of the flat part, was 58
+    EXPECT_EQ(58, (3700 - 3000) * 100 / 1200);
+    EXPECT_LT(riftBattPercent(3700), 20);
+}
+
+TEST(BattPercent, IsMonotonicAcrossTheWholeRange) {
+    // a gauge that ever climbs as the cell drains is worse than a wrong one
+    int prev = -1;
+    for (int mv = 2500; mv <= 4400; mv++) {
+        int p = riftBattPercent(mv);
+        EXPECT_GE(p, prev) << "fell back at " << mv << "mV";
+        EXPECT_GE(p, 0);
+        EXPECT_LE(p, 100);
+        prev = p;
+    }
+}
+
+TEST(BattPercent, TheFlatMiddleIsWhyTheReadingHasToBeRight) {
+    // 110mV covers thirty points here, which is the whole argument for reading the
+    // converter through its calibration rather than assuming a reference.
+    EXPECT_EQ(30, riftBattPercent(3840) - riftBattPercent(3730));
+    // so a converter 200mV out does not shift the answer, it destroys it: half a
+    // charge reported as almost none
+    EXPECT_EQ(50, riftBattPercent(3840));
+    EXPECT_LT(riftBattPercent(3840 - 200), 10);
+}
+
+TEST(BattSmooth, SeedsOnTheFirstSampleRatherThanRampingFromZero) {
+    EXPECT_EQ(3900, riftBattSmooth(0, 3900));
+}
+
+TEST(BattSmooth, MovesTowardsTheSampleAndSettles) {
+    uint16_t v = riftBattSmooth(0, 3900);
+    for (int i = 0; i < 40; i++) v = riftBattSmooth(v, 3700);
+    EXPECT_EQ(3700, v) << "must actually reach the value, not stall short of it";
+}
+
+TEST(BattSmooth, ASingleTransmitSagBarelyMovesIt) {
+    uint16_t v = riftBattSmooth(0, 3900);
+    v = riftBattSmooth(v, 3600);     // one packet's worth of sag
+    EXPECT_GT(v, 3850);
+}
+
+TEST(BattExternal, AUsbHostIsExternalWhateverTheVoltageSays) {
+    EXPECT_TRUE(riftBattIsExternal(3800, true));
+    EXPECT_TRUE(riftBattIsExternal(4080, true));
+}
+
+TEST(BattExternal, AVoltageNoCellCanReachIsExternalWithoutAHost) {
+    // the hole in isExternalPowered(): a charger that never enumerates. Measured at
+    // 4612mV on a T-Deck, where the cell itself cannot pass 4200.
+    EXPECT_TRUE(riftBattIsExternal(4612, false));
+    EXPECT_TRUE(riftBattIsExternal(4400, false));
+}
+
+TEST(BattExternal, ARealCellOnBatteryIsNotExternal) {
+    EXPECT_FALSE(riftBattIsExternal(4080, false));   // full, rested, measured
+    EXPECT_FALSE(riftBattIsExternal(4200, false));   // the highest a cell reaches
+    EXPECT_FALSE(riftBattIsExternal(3600, false));
+    EXPECT_FALSE(riftBattIsExternal(3270, false));
+}
+
+TEST(BattExternal, TheThresholdClearsAFullCellPlusNoise) {
+    // must not trip on a cell at its ceiling, must trip well below the rail
+    EXPECT_FALSE(riftBattIsExternal(RIFT_BATT_MAX_CELL_MV, false));
+    EXPECT_TRUE (riftBattIsExternal(RIFT_BATT_MAX_CELL_MV + 1, false));
+    EXPECT_GT(RIFT_BATT_MAX_CELL_MV, 4200);   // above any cell
+    EXPECT_LT(RIFT_BATT_MAX_CELL_MV, 4612);   // below the measured rail
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
