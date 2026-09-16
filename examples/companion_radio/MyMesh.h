@@ -495,6 +495,10 @@ private:
   // helpers, short-cuts
   void saveChannels() { _store->saveChannels(this); }
   void saveContacts();
+  // Record that contacts[] has changed and a write is owed. Every place that used
+  // to assign dirty_contacts_expiry calls this instead, so the hard deadline cannot
+  // be forgotten at one of them.
+  void markContactsDirty();
 
   DataStore* _store;
   NodePrefs _prefs;
@@ -544,6 +548,12 @@ private:
   uint8_t *sign_data;
   uint32_t sign_data_len;
   unsigned long dirty_contacts_expiry;
+  // The hard deadline, measured from the oldest unsaved change rather than the
+  // newest. dirty_contacts_expiry alone coalesces a burst, and a burst that never
+  // ends - a contact advert every few seconds on a busy mesh - pushed it forward
+  // forever, so nothing was written at all. Set on the clean-to-dirty transition
+  // only; see markContactsDirty().
+  unsigned long dirty_contacts_deadline;
 
   TransportKey send_scope;
 

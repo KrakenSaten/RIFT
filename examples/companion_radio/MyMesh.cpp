@@ -126,6 +126,14 @@ unsigned int decode_base64_length(const unsigned char input[], unsigned int inpu
 #define DIRECT_SEND_PERHOP_FACTOR       6.0f
 #define DIRECT_SEND_PERHOP_EXTRA_MILLIS 250
 #define LAZY_CONTACTS_WRITE_DELAY       5000
+// The longest contacts[] may go unsaved while changes keep arriving. The delay
+// above waits for a burst to settle, which is the right thing for a burst that
+// ends; a mesh busy enough to re-advert an existing contact every few seconds is
+// a burst that does not, and the write was deferred indefinitely.
+// 120s matches RIFT_MSGLOG_MAX_UNSAVED_MILLIS, for the same trade: a bounded loss
+// window on unexpected power loss, against writing flash more often than the data
+// is worth.
+#define MAX_CONTACTS_WRITE_DELAY        120000
 
 #define PUBLIC_GROUP_PSK                "izOH6cXN6mrJ5e26oRXNcg=="
 
@@ -646,7 +654,7 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
   }
 
 
-  if (!is_new) dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY); // only schedule lazy write for contacts that are in contacts[]
+  if (!is_new) markContactsDirty(); // only schedule lazy write for contacts that are in contacts[]
 }
 
 int MyMesh::getPathCacheSize() const { return ADVERT_PATH_TABLE_SIZE; }
@@ -997,7 +1005,7 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
   memcpy(&out_frame[1], contact.id.pub_key, PUB_KEY_SIZE);
   _serial->writeFrame(out_frame, 1 + PUB_KEY_SIZE); // NOTE: app may not be connected
 
-  dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+  markContactsDirty();
 }
 
 int MyMesh::sendTextTo(ContactInfo* recipient, const char* text, uint32_t& expected_ack, uint32_t& est_timeout) {
@@ -1398,7 +1406,7 @@ void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uin
                                  const uint8_t *sender_prefix, const char *text) {
   markConnectionActive(from);
   // from.sync_since change needs to be persisted
-  dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+  markContactsDirty();
   queueMessage(from, TXT_TYPE_SIGNED_PLAIN, pkt, sender_timestamp, sender_prefix, 4, text);
 }
 
@@ -1886,6 +1894,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(expected_ack_table, 0, sizeof(expected_ack_table));
   sign_data = NULL;
   dirty_contacts_expiry = 0;
+  dirty_contacts_deadline = 0;
   memset(advert_paths, 0, sizeof(advert_paths));   // clears valid on every slot
   path_evictions = 0;
   discovered_count = 0;
@@ -2334,7 +2343,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     if (recipient) {
       recipient->out_path_len = OUT_PATH_UNKNOWN;
       // recipient->lastmod = ??   shouldn't be needed, app already has this version of contact
-      dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+      markContactsDirty();
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND); // unknown contact
@@ -2352,7 +2361,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     if (recipient) {
       updateContactFromFrame(*recipient, last_mod, cmd_frame, len);
       recipient->lastmod = last_mod;
-      dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+      markContactsDirty();
       writeOKFrame();
     } else {
       ContactInfo contact{};   // value-initialised: see updateContactFromFrame
@@ -2360,7 +2369,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       contact.lastmod = last_mod;
       contact.sync_since = 0;
       if (addContact(contact)) {
-        dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+        markContactsDirty();
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_TABLE_FULL);
@@ -2371,7 +2380,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     ContactInfo *recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     if (recipient && removeContact(*recipient)) {
       _store->deleteBlobByKey(pub_key, PUB_KEY_SIZE);
-      dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+      markContactsDirty();
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND); // not found, or unable to remove
@@ -3141,6 +3150,16 @@ void MyMesh::saveContacts() {
   _store->saveContacts(this, save_filter);
 }
 
+void MyMesh::markContactsDirty() {
+  // The hard deadline is set only on the clean-to-dirty transition, because it
+  // measures from the oldest unsaved change and not from the newest. The debounce
+  // below moves on every change, as it always did.
+  if (dirty_contacts_expiry == 0) {
+    dirty_contacts_deadline = futureMillis(MAX_CONTACTS_WRITE_DELAY);
+  }
+  dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+}
+
 void MyMesh::enterCLIRescue() {
   _cli_rescue = true;
   cli_command[0] = 0;
@@ -3374,9 +3393,13 @@ void MyMesh::loop() {
   }
 
   // is there are pending dirty contacts write needed?
-  if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {
+  // Either the burst has settled, or it has gone on long enough that waiting for it
+  // to settle is the same as never writing. See markContactsDirty().
+  if (dirty_contacts_expiry && (millisHasNowPassed(dirty_contacts_expiry)
+                                || millisHasNowPassed(dirty_contacts_deadline))) {
     saveContacts();
     dirty_contacts_expiry = 0;
+    dirty_contacts_deadline = 0;
   }
 
 #ifdef DISPLAY_CLASS
