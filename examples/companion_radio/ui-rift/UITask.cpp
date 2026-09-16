@@ -5064,7 +5064,24 @@ public:
 // Shared scan result table. BLE advertisement callbacks fire on the Bluedroid
 // task (core 0) while rendering happens on the loop task (core 1), so every
 // touch of this table is inside the spinlock.
-#define RIFT_RF_MAX 48
+//
+// 88 bytes a finding: 44 for RfContact, doubled because the render keeps a
+// snapshot of the same size. Measured by building at 48 and 96 and taking the
+// difference. 48 was reported full almost all the time in an ordinary urban
+// place, which makes the number a floor on what is audible rather than a count of
+// it - and RIFT_RF_AGE_MILLIS already forgets anything unheard for 45s, so this is
+// a window on what is around right now, not a log that fills up.
+//
+// The constraint used to be the stack, not RAM: the render's snapshot was a local,
+// 2.1KB of the loop task's 8KB, so doubling this would have taken half the stack
+// before it bought a single extra finding. That snapshot is static now, which is
+// what makes this number free to raise.
+//
+// Not taken past 96 yet for one reason: RADAR is the screen that scans Wi-Fi and
+// BLE, so it is where the heap is under most pressure, and FREE HEAP on the
+// diagnostics screen has not been read while a scan is running. 128 would cost
+// 67.6% against 66.7%, so the room is there if that number says it is safe.
+#define RIFT_RF_MAX 96
 
 struct RfContact {
   uint8_t key[6];     // BSSID for Wi-Fi, MAC for BLE - the actual identity
@@ -5739,7 +5756,18 @@ public:
     }
 
     // snapshot under the lock, then draw without holding it
-    RfContact snap[RIFT_RF_MAX];
+    //
+    // static, not a local. At 44 bytes an entry this array is 2.1KB, and the loop
+    // task it runs on has 8KB of stack (ARDUINO_LOOP_STACK_SIZE, not overridden
+    // here) - so a quarter of the stack was going on a copy, inside a function that
+    // then word-wraps and calls the display driver. Raising RIFT_RF_MAX would have
+    // doubled that before it doubled anything useful.
+    //
+    // Safe as a static because there is one caller and it is this render, on one
+    // task: the scan callbacks write rf_table from the Wi-Fi and BLE tasks and
+    // never touch this, and overlays draw after a screen rather than inside its
+    // render, so there is no re-entry.
+    static RfContact snap[RIFT_RF_MAX];
     int n;
     unsigned long now_ms = millis();
     portENTER_CRITICAL(&rf_mux);
