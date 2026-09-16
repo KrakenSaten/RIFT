@@ -6,7 +6,10 @@
 
 #define PIN_VBAT_READ 4
 #define BATTERY_SAMPLES 8
-#define ADC_MULTIPLIER (2.0f * 3.3f * 1000)
+// The divider between the cell and the ADC pin, and nothing else. It used to be
+// (2.0f * 3.3f * 1000): the 2.0 is this, and the rest was an assumed full-scale
+// reference that getBattMilliVolts() no longer needs - see there.
+#define BATTERY_DIVIDER 2
 
 class TDeckBoard : public ESP32Board {
 public:
@@ -22,17 +25,35 @@ public:
     }
   #endif
 
+  // Cell voltage in millivolts, from the chip's own calibration rather than from
+  // an assumed reference.
+  //
+  // This used to scale the raw count: (2.0 * 3.3 * 1000 * raw) / 4096, which says
+  // full scale is exactly 3.3V and the converter is linear. The ESP32-S3 is
+  // neither. Its reference varies part to part, the curve bends near both rails,
+  // and the factory measures each chip and writes the correction into eFuse.
+  // analogReadMilliVolts() is the core's accessor for exactly that, and the
+  // difference is typically 100-300mV.
+  //
+  // That error matters more than its size suggests. A lithium cell sits between
+  // 3.84V and 3.73V for the middle thirty percent of its charge, so 110mV *is*
+  // thirty points - an uncorrected reading does not shift the percentage, it
+  // erases the meaning of it. See riftBattPercent().
+  //
+  // Instantaneous on purpose. Telemetry and the companion's battery command want a
+  // measurement; the display wants a settled number, and smooths this itself,
+  // because a reading taken during a 22dBm transmit is real and is not what a
+  // battery gauge should show.
   uint16_t getBattMilliVolts() {
-    #if defined(PIN_VBAT_READ) && defined(ADC_MULTIPLIER)
+    #if defined(PIN_VBAT_READ)
       analogReadResolution(12);
 
-      uint32_t raw = 0;
+      uint32_t mv = 0;
       for (int i = 0; i < BATTERY_SAMPLES; i++) {
-        raw += analogRead(PIN_VBAT_READ);
+        mv += analogReadMilliVolts(PIN_VBAT_READ);
       }
 
-      raw = raw / BATTERY_SAMPLES;
-      return (ADC_MULTIPLIER * raw) / 4096;
+      return (uint16_t) ((mv / BATTERY_SAMPLES) * BATTERY_DIVIDER);
     #else
       return 0;
     #endif

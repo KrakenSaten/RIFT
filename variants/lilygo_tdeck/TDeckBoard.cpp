@@ -6,7 +6,14 @@ uint32_t deviceOnline = 0x00;
 void TDeckBoard::begin() {
   
   ESP32Board::begin();
-  
+
+  // Stated rather than inherited. A full cell is 4.2V and the divider halves it, so
+  // the pin sees up to 2.1V and needs the widest attenuation to stay on scale - and
+  // analogReadMilliVolts() picks its calibration curve from whatever attenuation is
+  // configured, so leaving it at the core's default meant the correction and the
+  // range were both being assumed. Four other variants here already say it out loud.
+  analogSetPinAttenuation(PIN_VBAT_READ, ADC_11db);
+
   // Enable peripheral power
   pinMode(PIN_PERF_POWERON, OUTPUT);
   digitalWrite(PIN_PERF_POWERON, HIGH);
