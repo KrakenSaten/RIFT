@@ -1108,6 +1108,24 @@ static inline void riftFormatAge(uint32_t millis_since, char* buf, size_t len) {
   riftFormatAgeSecs(millis_since / 1000, buf, len);
 }
 
+// Microseconds as milliseconds to one decimal, for the RUNTIME rows on SYSTEM.
+//
+// A whole millisecond hides the difference those rows exist to show. A full-frame
+// blit has a floor of 30.7ms of SPI clock and the question is what it costs above
+// that; "31" answers neither way. One decimal is as far as this is worth taking -
+// the jitter between two frames is wider than a hundredth of a millisecond, so
+// another digit would be presenting noise as precision.
+//
+// Truncates rather than rounds, so a figure read off the screen is never larger
+// than the one that was measured. The widest output is a full uint32 of
+// microseconds, 4294967.2, which is nine characters and a terminator.
+#define RIFT_MS_BUF_LEN  12
+
+static inline void riftFormatMicrosMs(uint32_t us, char* buf, size_t len) {
+  if (buf == NULL || len == 0) return;
+  snprintf(buf, len, "%u.%u", (unsigned) (us / 1000), (unsigned) ((us % 1000) / 100));
+}
+
 // Who can actually receive a direct message.
 //
 // NODES allowed ADV_TYPE_CHAT only while the COMMS picker allowed CHAT and ROOM,

@@ -1381,6 +1381,24 @@ static void riftPlay(const TDeckSpeaker::Step* seq, int n, uint8_t gain) {
 uint16_t rift_msg_wakes = 0;
 uint32_t rift_last_wake_ms = 0;
 
+// How long the main loop takes to come round, which is how long the radio waits
+// between calls to the_mesh.loop().
+//
+// Kept here rather than in main.cpp because that file is shared with three other
+// UIs. loop() runs the mesh, then the interface manager and the sensors, then this
+// one - so the interval between two entries to UITask::loop() is one turn of the
+// whole loop, and that is the rate at which the radio is actually serviced.
+//
+// The maximum is what a missed packet is attributed to. The mean says whether that
+// maximum is the ordinary case or an outlier worth going after, which is the
+// difference between optimising the frame and optimising the one screen that
+// blocks.
+static uint32_t rift_loop_prev_us = 0;
+static uint32_t rift_loop_max_us = 0;
+static uint64_t rift_loop_total_us = 0;
+static uint32_t rift_loop_count = 0;
+static bool     rift_loop_seen = false;   // micros() can legitimately read 0 once
+
 // Four bytes on SPIFFS: magic, version, flags. Small enough that the write cost
 // that dominates the message log does not apply, and it only happens when a
 // setting is actually changed.
@@ -3995,6 +4013,47 @@ public:
     addRow(ROW_GROUP, -1, "RUNTIME");
     snprintf(tmp, sizeof(tmp), "%uK", (unsigned) (ESP.getFreeHeap() / 1024));
     addReading("FREE HEAP", tmp, rift_pal.fg);
+
+    // The two numbers the display work has to start from, and neither existed
+    // before this row. FRAME is what endFrame() costs - see ST7789NativeDisplay.h
+    // for why the 30.7ms of SPI clock is a floor and not the answer. LOOP is how
+    // long the radio waits between services, which is the thing the frame cost
+    // matters through: the panel and the SX1262 are on the same two wires.
+    //
+    // Tenths of a millisecond, because the interesting differences are smaller
+    // than a millisecond and a bare integer would hide them.
+#ifdef RIFT_DISPLAY
+    {
+      const uint32_t n = display.blitCount();
+      if (n == 0) {
+        // No canvas, or nothing drawn yet. The fallback path writes straight to
+        // the panel and has no bulk transfer to time.
+        addReading("FRAME", "no blit yet", rift_pal.mid);
+      } else {
+        const uint32_t mx = display.blitMaxMicros();
+        char mean_s[RIFT_MS_BUF_LEN], max_s[RIFT_MS_BUF_LEN];
+        riftFormatMicrosMs(display.blitMeanMicros(), mean_s, sizeof(mean_s));
+        riftFormatMicrosMs(mx, max_s, sizeof(max_s));
+        snprintf(tmp, sizeof(tmp), "%s max %sms n%u", mean_s, max_s, (unsigned) n);
+        // 50ms is well clear of the 30.7ms floor, so a maximum above it is the
+        // PSRAM read or a frame that was interrupted, not the transfer.
+        addReading("FRAME", tmp, mx > 50000 ? rift_pal.accent : rift_pal.fg);
+      }
+    }
+#endif
+    if (rift_loop_count == 0) {
+      addReading("LOOP", "no turn yet", rift_pal.mid);
+    } else {
+      char mean_s[RIFT_MS_BUF_LEN], max_s[RIFT_MS_BUF_LEN];
+      riftFormatMicrosMs((uint32_t) (rift_loop_total_us / rift_loop_count),
+                         mean_s, sizeof(mean_s));
+      riftFormatMicrosMs(rift_loop_max_us, max_s, sizeof(max_s));
+      snprintf(tmp, sizeof(tmp), "%s max %sms", mean_s, max_s);
+      // 100ms: long enough that a packet can have come and gone inside it, and
+      // far enough above a frame that this flags a blocking screen rather than
+      // the ordinary cost of drawing one.
+      addReading("LOOP", tmp, rift_loop_max_us > 100000 ? rift_pal.accent : rift_pal.fg);
+    }
     {
       esp_reset_reason_t reason = esp_reset_reason();
       const char* rr;
@@ -9582,6 +9641,21 @@ bool UITask::isButtonPressed() const {
 }
 
 void UITask::loop() {
+  // First statement in the function, so the interval spans a whole turn of the
+  // main loop rather than the part of it after the battery sample. Two entries
+  // here have one the_mesh.loop() between them; see the note beside the counters.
+  {
+    uint32_t now_us = micros();
+    if (rift_loop_seen) {
+      uint32_t dt = now_us - rift_loop_prev_us;   // correct across the 71-minute wrap
+      if (dt > rift_loop_max_us) rift_loop_max_us = dt;
+      rift_loop_total_us += dt;
+      rift_loop_count++;
+    }
+    rift_loop_prev_us = now_us;
+    rift_loop_seen = true;
+  }
+
   // Ahead of everything that reads it. Two seconds is far slower than the frame
   // rate and far faster than a battery changes, and the ADC conversion is eight
   // samples on a bus the radio also uses - there is no reason to pay for it per

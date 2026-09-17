@@ -33,6 +33,27 @@ class ST7789NativeDisplay : public DisplayDriver {
   uint16_t _color;
   int _textsize;
 
+  // What endFrame() costs, because the display work has to start from a measurement
+  // and there has not been one.
+  //
+  // 320*240*2 = 153,600 bytes at the 40MHz set in begin() is 30.7ms of SPI clock,
+  // and that is a floor rather than the figure: the canvas is in PSRAM, and
+  // drawRGBBitmap reads it out through writePixels() before any of it reaches the
+  // bus. Whether the read or the transfer dominates is not worth reasoning about
+  // from the datasheet when it can be counted.
+  //
+  // It is also not merely time the radio is not being served. PIN_TFT_SCL is 40 and
+  // PIN_TFT_SDA is 41, which are P_LORA_SCLK and P_LORA_MOSI - the panel and the
+  // SX1262 sit on the same two wires behind different chip selects, so a blit is
+  // time the radio cannot be reached at all.
+  //
+  // The maximum is the number that matters. A mean hides the single frame that ran
+  // long, and the single frame that ran long is the one that cost a packet.
+  uint32_t _blit_last_us;
+  uint32_t _blit_max_us;
+  uint64_t _blit_total_us;
+  uint32_t _blit_count;
+
   // o/O with a stroke, drawn rather than looked up: CP437 (and so the Adafruit
   // classic font) has no slashed O at all, and the nearest glyph in the font is
   // a phi, which has ascenders and descenders that read badly as a letter.
@@ -49,6 +70,10 @@ public:
     _textsize = 1;
     _canvas = NULL;
     _target = &display;
+    _blit_last_us = 0;
+    _blit_max_us = 0;
+    _blit_total_us = 0;
+    _blit_count = 0;
   }
 
   bool begin();
@@ -73,4 +98,20 @@ public:
   // screen-dump command so a design round can work from the device's own
   // pixels rather than from photographs of it.
   const uint16_t* frameBuffer() const { return _canvas ? _canvas->getBuffer() : NULL; }
+
+  // Blit cost, in microseconds. Zero count means nothing has been transferred -
+  // either nothing has drawn yet, or the canvas allocation failed and there is no
+  // bulk transfer to time. SYSTEM reads these; see the note beside the members.
+  uint32_t blitLastMicros() const { return _blit_last_us; }
+  uint32_t blitMaxMicros() const { return _blit_max_us; }
+  uint32_t blitCount() const { return _blit_count; }
+  uint32_t blitMeanMicros() const {
+    return _blit_count ? (uint32_t) (_blit_total_us / _blit_count) : 0;
+  }
+  // So a screen can be watched on its own rather than through the average since
+  // boot, which a few seconds on RADAR would otherwise dominate for the rest of
+  // the session.
+  void blitStatsReset() {
+    _blit_last_us = 0; _blit_max_us = 0; _blit_total_us = 0; _blit_count = 0;
+  }
 };

@@ -176,7 +176,19 @@ uint16_t ST7789NativeDisplay::getTextWidth(const char* str) {
 void ST7789NativeDisplay::endFrame() {
   // Single bulk transfer of the finished frame. drawRGBBitmap goes through
   // writePixels(), so this is one SPI burst rather than per-pixel traffic.
+  //
+  // Timed around the transfer and nothing else, so the number is the blit and not
+  // the render that produced it. micros() wraps about every 71 minutes; the
+  // unsigned subtraction is correct across that wrap for any interval short enough
+  // to be one, which this is by a wide margin.
   if (_canvas != NULL) {
+    uint32_t t0 = micros();
     display.drawRGBBitmap(0, 0, _canvas->getBuffer(), width(), height());
+    uint32_t dt = micros() - t0;
+
+    _blit_last_us = dt;
+    if (dt > _blit_max_us) _blit_max_us = dt;
+    _blit_total_us += dt;
+    _blit_count++;
   }
 }

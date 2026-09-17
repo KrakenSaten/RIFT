@@ -1011,6 +1011,37 @@ TEST(OriginHops, RefusesWhatCarriesNoCount) {
     EXPECT_EQ(99, h) << "a refusal must not write to the output";
 }
 
+TEST(FormatMicrosMs, OneDecimalAndNeverLargerThanMeasured) {
+    char b[RIFT_MS_BUF_LEN];
+    riftFormatMicrosMs(0, b, sizeof(b));        EXPECT_STREQ("0.0", b);
+    riftFormatMicrosMs(99, b, sizeof(b));       EXPECT_STREQ("0.0", b);
+    riftFormatMicrosMs(100, b, sizeof(b));      EXPECT_STREQ("0.1", b);
+    riftFormatMicrosMs(1000, b, sizeof(b));     EXPECT_STREQ("1.0", b);
+    // The number this row exists for: 153,600 bytes at 40MHz is 30.72ms of SPI
+    // clock, and a whole-millisecond field could not tell that from 31.4.
+    riftFormatMicrosMs(30720, b, sizeof(b));    EXPECT_STREQ("30.7", b);
+    riftFormatMicrosMs(31400, b, sizeof(b));    EXPECT_STREQ("31.4", b);
+    // Truncation, not rounding, in both directions from a half.
+    riftFormatMicrosMs(1999, b, sizeof(b));     EXPECT_STREQ("1.9", b);
+    riftFormatMicrosMs(1950, b, sizeof(b));     EXPECT_STREQ("1.9", b);
+    riftFormatMicrosMs(1050, b, sizeof(b));     EXPECT_STREQ("1.0", b);
+}
+
+TEST(FormatMicrosMs, TheWidestOutputStillFitsTheBuffer) {
+    char b[RIFT_MS_BUF_LEN];
+    riftFormatMicrosMs(0xFFFFFFFFu, b, sizeof(b));
+    EXPECT_STREQ("4294967.2", b) << "a full uint32 of microseconds must not be truncated";
+    EXPECT_LT(strlen(b), (size_t) RIFT_MS_BUF_LEN);
+}
+
+TEST(FormatMicrosMs, RefusesWithoutWriting) {
+    char b[RIFT_MS_BUF_LEN];
+    memset(b, 'x', sizeof(b));
+    riftFormatMicrosMs(1000, b, 0);
+    EXPECT_EQ('x', b[0]) << "a zero-length buffer must not be written to";
+    riftFormatMicrosMs(1000, NULL, sizeof(b));   // must not crash
+}
+
 TEST(FormatAgeSecs, TakesSecondsWithoutTheMillisRoundTrip) {
     char b[RIFT_AGE_BUF_LEN];
     riftFormatAgeSecs(0, b, sizeof(b));      EXPECT_STREQ("0s", b);
