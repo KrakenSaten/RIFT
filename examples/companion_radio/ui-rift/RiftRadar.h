@@ -394,4 +394,295 @@ static RiftBleCallbacks ble_callbacks;
 static volatile bool ble_scan_done = false;
 static void onBleScanComplete(BLEScanResults results) { ble_scan_done = true; }
 
+
+// ------------------------------------------------------------- the scan itself
+//
+// Step two of the split. The state machine used to live in RiftRadarScreen and was
+// reached from UITask::loop() by casting the nav screen back to its own type - so the
+// loop already drove it on every iteration whichever screen was up, and had to,
+// because teardown has to keep running after the user navigates away.
+//
+// What changes here is who owns it, not when it runs. The screen now says only
+// whether scanning is wanted; the service decides what that means and how to get
+// there. The bodies below moved across unedited.
+//
+// This is what point 6 of the review needs before it can be written. Watched devices
+// are useless while COMMS is up because scanning stops when RADAR is left, and that
+// stop is onLeave clearing a flag - a screen deciding a radio's lifecycle. The flag
+// is still cleared from onLeave today, so behaviour has not moved; what has moved is
+// that it is now a request to a service rather than a field of the thing drawing.
+class RiftRadarService {
+  enum ScanState { OFF, START_WIFI, WIFI_RUNNING, START_BLE, BLE_RUNNING, STOPPING };
+
+  UITask* _task = NULL;
+  ScanState _state = OFF;
+  bool _want_active = false;
+  bool _wifi_up = false, _ble_up = false;
+  // Teardown completion must be tracked separately: _ble_up deliberately stays
+  // true after teardown (BLEDevice::deinit is avoided), so using it as the
+  // "needs teardown" test would restart the cycle forever.
+  bool _torn_down = false;
+  // wrap-safe pacing: when the wait started, and how long to wait (0 = ready
+  // now). A future deadline breaks at the millis() wrap, and here it would leave
+  // the state machine spinning.
+  unsigned long _wait_since = 0;
+  unsigned long _wait_ms = 0;
+  unsigned long _ble_started = 0;   // when the running BLE scan was started
+  // Whether any sweep has finished since the last teardown. The screen reads it to
+  // tell "listening, nothing yet" from "nothing is there".
+  bool _scanned_once = false;
+
+  void beginWifi() {
+    if (!_wifi_up) {
+      WiFi.mode(WIFI_STA);
+      WiFi.disconnect(false, false);   // never associate; listen only
+      _wifi_up = true;
+    }
+    // async=true is essential - the default-argument form blocks up to 10s.
+    // passive=true means no probe requests are transmitted.
+    WiFi.scanNetworks(true, true, true, RIFT_WIFI_DWELL_MILLIS);
+  }
+
+  void collectWifi(int n) {
+    _scanned_once = true;
+    int8_t per_channel[RIFT_WF_CHANNELS];
+    memset(per_channel, 0, sizeof(per_channel));
+
+    for (int i = 0; i < n; i++) {
+      String ssid = WiFi.SSID(i);
+      int8_t rssi = (int8_t) WiFi.RSSI(i);
+      uint8_t ch = (uint8_t) WiFi.channel(i);
+
+      // BSSID is the identity - hidden networks report an empty SSID
+      uint8_t key[6];
+      const uint8_t* bssid = WiFi.BSSID(i);
+      if (bssid != NULL) memcpy(key, bssid, 6); else memset(key, 0, 6);
+
+      rfUpsert(key, ssid.c_str(), rssi, ch, true, WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+
+      // strongest signal seen on each channel this sweep (0 means "nothing")
+      if (ch < RIFT_WF_CHANNELS && (per_channel[ch] == 0 || rssi > per_channel[ch])) {
+        per_channel[ch] = rssi;
+      }
+    }
+    WiFi.scanDelete();   // free the result array promptly
+
+    wfPushSlice(per_channel);
+  }
+
+  // Returns whether a scan is actually running. start() fails when the previous
+  // scan's stop is still in flight, and the return value was ignored: the state
+  // machine then sat in BLE_RUNNING waiting for a completion that was never
+  // coming, with no Wi-Fi sweeps, no ageing and no watch checks, until the user
+  // left the screen. Nothing on screen said so.
+  bool beginBle() {
+    if (!_ble_up) {
+      BLEDevice::init("");
+      _ble_up = true;
+    }
+    BLEScan* scan = BLEDevice::getScan();
+    scan->setActiveScan(false);   // passive: do NOT transmit SCAN_REQ
+    scan->setInterval(100);
+    scan->setWindow(99);
+    scan->setAdvertisedDeviceCallbacks(&ble_callbacks, false, true);
+    ble_scan_done = false;
+    _ble_started = millis();
+    // the function-pointer overload returns immediately; start(duration, bool)
+    // would block for the whole duration
+    if (!scan->start(RIFT_BLE_DWELL_SECS, onBleScanComplete, false)) {
+      riftLogf("radar: BLE scan start refused");
+      return false;
+    }
+    return true;
+  }
+
+  // Ask the radios to stop, but do NOT deinit yet - BLEDevice::deinit() while a
+  // scan is still winding down panics the device. The actual teardown happens
+  // in the STOPPING state after a grace period.
+  void beginTeardown() {
+    if (_ble_up) {
+      BLEDevice::getScan()->setAdvertisedDeviceCallbacks(NULL);   // no late callbacks
+      BLEDevice::getScan()->stop();
+    }
+    _state = STOPPING;
+    _wait_since = millis();
+    _wait_ms = RIFT_SCAN_STOP_GRACE_MILLIS;
+  }
+
+  void finishTeardown() {
+    if (_ble_up) {
+      // Deliberately NOT calling BLEDevice::deinit(): in this ESP32 core it
+      // panics when a scan has recently been active, and no amount of grace
+      // period made it reliable. The stack stays initialised and idle - it
+      // transmits nothing once the scan is stopped. _ble_up stays true so we
+      // don't re-init on the next visit.
+      BLEDevice::getScan()->clearResults();
+    }
+    if (_wifi_up) {
+      WiFi.scanDelete();
+      WiFi.mode(WIFI_OFF);
+      _wifi_up = false;
+    }
+    rfClear();   // hand the heap back; the mesh is the primary job
+    wfClear();   // history would be stale and misleading on return
+    // Presence is forgotten with the table it was derived from. Left set, the lamp
+    // would light on re-entry from a sighting made minutes ago in another room,
+    // before any sweep had confirmed it - which is the one thing an indicator must
+    // never do. It also means a device still in range announces itself again, which
+    // is the same choice the settings loader makes for a watch read off disk.
+    for (int i = 0; i < rf_watch_count; i++) rf_watch[i].present = false;
+    _state = OFF;
+    _torn_down = true;
+    _scanned_once = false;   // the next visit starts with "listening" again
+  }
+
+ public:
+  // Driven every main-loop iteration, whichever screen is showing, so that
+  // teardown still happens after the user navigates away.
+  void service() {
+    if (!_want_active) {
+      if (_state == STOPPING) {
+        if (millis() - _wait_since >= _wait_ms) finishTeardown();
+      } else if (!_torn_down) {
+        beginTeardown();
+      }
+      return;
+    }
+    if (_state == OFF || _state == STOPPING) {
+      _state = START_WIFI;   // came back before teardown finished
+      _wait_ms = 0;
+      _torn_down = false;
+    }
+
+    if (_wait_ms != 0) {
+      if (millis() - _wait_since < _wait_ms) return;
+      _wait_ms = 0;
+    }
+
+    switch (_state) {
+      case START_WIFI:
+        if (!riftScanWifi()) { _state = START_BLE; break; }
+        beginWifi();
+        _state = WIFI_RUNNING;
+        break;
+
+      case WIFI_RUNNING: {
+        int n = WiFi.scanComplete();
+        if (n >= 0) {
+          collectWifi(n);
+          _state = START_BLE;
+        } else if (n == WIFI_SCAN_FAILED) {
+          _state = START_BLE;   // don't get stuck; try the other radio
+        }
+        break;
+      }
+
+      case START_BLE:
+        // BLE off, or a scan that would not start: the cycle ends here instead
+        // of in BLE_RUNNING. Ageing, the presence check and the gap all have to
+        // happen exactly once per cycle, so they are duplicated here rather
+        // than being skipped. A refused start gets the gap too, which is also
+        // the time the previous stop needs to finish.
+        if (!riftScanBle() || !beginBle()) {
+          rfAgeOut();
+          rfWatchCheck(_task);
+          _state = START_WIFI;
+          _wait_since = millis();
+          _wait_ms = RIFT_SCAN_GAP_MILLIS;
+          break;
+        }
+        _state = BLE_RUNNING;
+        break;
+
+      case BLE_RUNNING: {
+        // The completion callback is the normal exit. The deadline is the other
+        // one: a scan that started but never reports done would otherwise hold
+        // this state for ever, and the screen would freeze on stale entries with
+        // every watch silent. Dwell plus a margin; stop() is what makes the
+        // callback fire if the stack is merely late.
+        bool overdue = (millis() - _ble_started) >= (RIFT_BLE_DWELL_SECS * 1000UL + 1500UL);
+        if (overdue && !ble_scan_done) {
+          riftLogf("radar: BLE scan overdue, stopping it");
+          BLEDevice::getScan()->stop();
+        }
+        if (ble_scan_done || overdue) {
+          _scanned_once = true;
+          BLEDevice::getScan()->clearResults();   // keep the internal map bounded
+          rfAgeOut();
+          // after ageing, so a device that has just dropped out of the table is
+          // judged absent rather than lingering for one more cycle
+          rfWatchCheck(_task);
+          _state = START_WIFI;
+          _wait_since = millis();
+          _wait_ms = RIFT_SCAN_GAP_MILLIS;
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  // Called once from UITask::begin. rfWatchCheck raises the proximity alert through
+  // the task, which is the service's one reach back into the UI.
+  void attach(UITask* task) { _task = task; }
+
+  // The radio source changed under a running sweep. Every line of this is about
+  // radios and the cycle, which is why it lives here and not in the screen that
+  // happens to offer the key.
+  //
+  // Wi-Fi is genuinely powered down when it is not wanted; BLE is only stopped,
+  // because BLEDevice::deinit() panics in this ESP32 core once a scan has been
+  // active - see finishTeardown(), where the same limit applies. Stopped is enough:
+  // nothing is collected and nothing is transmitted.
+  void sourceChanged() {
+    if (!riftScanWifi() && _wifi_up) {
+      WiFi.scanDelete();
+      WiFi.mode(WIFI_OFF);
+      _wifi_up = false;
+    }
+    // Only stopping is needed to re-enable: beginBle() sets the callbacks, the
+    // passive flag and the window on every call, so the next cycle restores all of
+    // it. stop() does not clear the callbacks - only beginTeardown() does that.
+    if (!riftScanBle() && _ble_up) BLEDevice::getScan()->stop();
+
+    // Drop what the disabled radio had found. Leaving it would show devices that
+    // are no longer being looked for, ageing out slowly over the next minutes,
+    // and a watch could match one of them.
+    rfDropSource(!riftScanWifi(), !riftScanBle());
+
+    // And forget that those devices were present. rfWatchCheck skips a watch whose
+    // radio is off, so the flag would freeze at true and the lamp would keep
+    // claiming "NEAR" for a device nobody is listening for - the same stale reading
+    // the teardown path clears, missed here because the two features were built
+    // hours apart.
+    for (int i = 0; i < rf_watch_count; i++) {
+      if (rf_watch[i].is_wifi ? !riftScanWifi() : !riftScanBle()) {
+        rf_watch[i].present = false;
+      }
+    }
+
+    // restart the cycle at a phase that is enabled
+    if (_state != OFF && _state != STOPPING) {
+      _state = START_WIFI;
+      _wait_ms = 0;
+    }
+  }
+
+  // Intent only. Screen changes can originate from a mesh callback, and tearing the
+  // BT controller down from inside the LoRa receive path crashes the device - so the
+  // work happens in service(), on the main loop.
+  void setWanted(bool on) { _want_active = on; }
+
+  bool idle() const { return _state == OFF; }
+  bool anyRadioUp() const { return _wifi_up || _ble_up; }
+  bool scannedOnce() const { return _scanned_once; }
+};
+
+inline RiftRadarService& riftRadarSvc() {
+  static RiftRadarService s;
+  return s;
+}
+
 #endif   // RIFT_RADAR
