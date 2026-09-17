@@ -293,11 +293,13 @@ static inline uint16_t riftChannelColour(int channel_idx) {
 // mktime()/gmtime(): those depend on a timezone database and a TZ setting that this
 // firmware never establishes, so the answer would depend on state nobody set.
 //
-// RIFT has no timezone. Every display of a timestamp is (epoch / 3600) % 24 with no
-// offset, so the clock is local time stored as an epoch. That is self-consistent -
-// what you type is what you read back - and it is what the rest of the screen
-// already assumes. The cost is that the value is not a true UTC epoch, which matters
-// only if it were compared against another node's absolute clock.
+// These two convert civil time to an epoch and back with no offset applied, and that
+// is deliberate: the timezone is a display-only offset that lives under "local time"
+// below, where riftLocalFromUtc and riftUtcFromLocal are the only two places that
+// know about it. Keeping the civil conversion offset-free is what lets it stay in
+// those two - a caller wanting local time asks for it rather than getting it by
+// accident. The epoch these produce is UTC, which is what the RTC and every stored
+// timestamp hold.
 //
 // Hinnant's days-from-civil, which is exact for the whole range and has no loops.
 

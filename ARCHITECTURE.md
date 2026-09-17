@@ -188,37 +188,54 @@ file is shared. Boot-phase timings are on the SYSTEM screen — `boot:` and
 
 | Path | What |
 |---|---|
-| `examples/companion_radio/ui-rift/UITask.cpp` | Every RIFT screen. ~2900 lines. The bulk of the work |
-| `examples/companion_radio/ui-rift/UITask.h` | Palette, boot marks, nav constants |
-| `examples/companion_radio/ui-rift/RiftLogic.h` | Pure functions extracted so they can be tested |
+| `examples/companion_radio/ui-rift/UITask.cpp` | Every RIFT screen, the message log, and most of the coordination between them. 10,189 lines |
+| `examples/companion_radio/ui-rift/UITask.h` | Palette, boot marks, nav constants, the display-only UTC offset |
+| `examples/companion_radio/ui-rift/RiftLogic.h` | Pure functions extracted so they can be tested. 2,606 lines |
+| `examples/companion_radio/ui-rift/RiftClock.h` | Mesh clock consensus: one sample per node, step on the median |
+| `examples/companion_radio/ui-rift/RiftRepeater.h` | Repeater and room login state |
+| `examples/companion_radio/ui-rift/RiftRxLog.h` | The air log, and the tropo detector's feed |
+| `examples/companion_radio/ui-rift/RiftScopes.h` | Flood scopes, named against the keys this node holds |
+| `examples/companion_radio/ui-rift/RiftMutes.h` | Per-conversation mutes |
+| `examples/companion_radio/ui-rift/RiftEventLog.h` | SYSTEM's event log |
+| `examples/companion_radio/ui-rift/RiftScreenDump.h` | Screenshot capture over serial |
 | `examples/companion_radio/MyMesh.cpp` | Channel creation, message send/receive, ack tracking |
+| `examples/companion_radio/CompanionCmdLimits.h` | Bounds on the companion protocol's parsers |
 | `examples/companion_radio/main.cpp` | `setup()`; boot screen and SPIFFS probe live here |
 | `src/helpers/ui/ST7789NativeDisplay.*` | Native 320×240 driver, double-buffered via `GFXcanvas16` |
+| `src/helpers/ui/TDeckSpeaker.*` | Alert tones over I2S to the MAX98357A |
 | `src/helpers/ui/TDeckKeyboard/Trackball/Touch.*` | Input drivers |
 | `variants/lilygo_tdeck/platformio.ini` | The `LilyGo_TDeck_rift` environment |
 | `variants/lilygo_tdeck/target.cpp` | Board init — the I²C fix lives here |
 | `design/` | `DESIGN-HANDOFF.md` is current; `handoff.md` is the original concept |
 | `flasher/` | Browser flasher page and manifest |
 | `test/` | Native googletest suites |
+| `tools/` | `run-native-tests.sh`, the flasher and screenshot scripts, palette and command-guard audits |
 
 The UI is selected purely by build flags. `ui-new`, `ui-orig`, `ui-tiny` and
 `ui-rift` are parallel implementations behind the same `UIScreen` seam.
 
 ---
 
-## The screen coming on is the notification
+## A sound, and the screen coming on
 
-`PIN_BUZZER` and `PIN_VIBRATION` are undefined for this variant, so
-`UITask::notify()` compiles to nothing - even though `MyMesh` calls it correctly.
-The whole notification path exists in software with no output device at the end.
+`PIN_BUZZER` and `PIN_VIBRATION` are undefined for this variant, so those two arms of
+`UITask::notify()` compile to nothing. What the board does have is a MAX98357A
+class-D amplifier on I2S - not a codec, and not a pin the shared `genericBuzzer` can
+square-wave, which is why `TDeckSpeaker` exists at all.
 
-So `newMsg()` calling `turnOn()` **is** the notification, and removing that line
-removes the feature. It is suppressed only when a companion app is attached, because
-then the phone is notifying. `MSG WAKE` on SYSTEM counts how often it has fired, so
-"it did not notify me" can be checked rather than argued about.
+`RIFT_SPEAKER`, set for this variant, is what enables it. `notify()` plays two notes
+for a direct message and one for a channel, at a gain chosen to be present without
+insisting, and keeps the rising three-note pattern for a proximity alert - the one
+event here worth interrupting for. `Alert sound` on SYSTEM turns it off, because a
+field device that beeps is not always wanted. There is deliberately no tone for an
+acknowledgement: you are looking at the screen when you send, and the delivery state
+is already on it.
 
-Audio through the ES8311 codec is the only route to a sound and is deliberately
-deferred: I2S and codec bring-up is work, not a flag.
+The screen coming on is the other half, and the whole of it when the sound is off. So
+`newMsg()` calling `turnOn()` **is** the notification, and removing that line removes
+the feature. It is suppressed only when a companion app is attached, because then the
+phone is notifying. `MSG WAKE` on SYSTEM counts how often it has fired, so "it did not
+notify me" can be checked rather than argued about.
 
 ## The screen design
 

@@ -146,8 +146,9 @@ than any amount of code reading.
 
 ## 4. State of play
 
-All five screens work and are verified on hardware: MESH headlines mesh receive
-activity, NODES draws hop columns with real routes, RADAR does passive Wi-Fi/BLE
+All five screens work and are verified on hardware: RIFT, the home screen, headlines
+mesh receive activity - the nav constant is still `RIFT_NAV_MESH`, only the label
+changed - NODES draws hop columns with real routes, RADAR does passive Wi-Fi/BLE
 with a waterfall and a proximity watch, COMMS shows one
 conversation at a time with a list to move between them, SYSTEM has actions, diagnostics and a 128-line event log. Boot is
 5.1 s. Screens have a lifecycle, so an arriving message no longer disturbs a scan

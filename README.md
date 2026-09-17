@@ -223,11 +223,21 @@ a shared key.
 companion app, no GPS fix — so SYSTEM has `Set time`, which shows the current reading
 in its own menu row. The field is `YYYY-MM-DD HH:MM`.
 
-RIFT has no timezone. Every timestamp on screen is the epoch divided down with no
-offset, so **enter local time**: what you type is what message timestamps will show.
-Entering UTC makes them read as UTC. An impossible date is refused rather than
-corrected — February 30th does not silently become March 2nd, because you could not
-see that happen — so check the field before pressing ENTER.
+**Set `Time zone` first.** The RTC keeps UTC and every stored timestamp stays UTC —
+message logs, advert timestamps, ack deadlines — because mesh clock consensus is
+defined against other nodes' adverts, and those are UTC. The time zone is a display
+offset in quarter hours, so +5:30 and +12:45 are expressible. There is no daylight
+saving: the firmware has no way to learn the rule or to be told when a government
+changes it, so in spring you set it again.
+
+With the offset in place, **enter local time** in `Set time`: the field is read as
+local and converted on the way to the RTC. Entering local time while the offset is
+still 0 stores local as though it were UTC, and the mesh will pull it back — the
+consensus is comparing your reading against neighbours who are on UTC.
+
+An impossible date is refused rather than corrected — February 30th does not silently
+become March 2nd, because you could not see that happen — so check the field before
+pressing ENTER.
 
 SYSTEM offers two kinds of advert, and the difference decides whether a distant node
 ever hears you:
@@ -357,8 +367,8 @@ limitations above are real.
 over the companion protocol next to `FIRMWARE_VER_CODE`.
 
 Every screen from the original design concept is implemented and verified on
-physical hardware. Resource use: ~61 % of internal static RAM, ~26 % of the 6.5 MB
-app partition. 307 native tests across eight suites.
+physical hardware. Resource use: 66.8 % of internal static RAM (218,980 of 327,680
+bytes) and 25.9 % of the 6.5 MB app partition. 366 native tests across ten suites.
 
 Worth knowing where that RAM goes: MeshCore's contact table is `MAX_CONTACTS` 350
 plus 8 anonymous slots at 184 bytes each — 65.7 KB, or a fifth of the chip's 320 KB,
