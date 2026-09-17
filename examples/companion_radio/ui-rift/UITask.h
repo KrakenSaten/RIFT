@@ -257,8 +257,10 @@ private:
   RiftScreen* discover_overlay;
   // renames a watched RF device, raised from RADAR's watch list
   RiftScreen* rename_watch;
-  // repeater control, raised with Enter on a repeater in NODES
+  // repeater control, raised from the node card
   RiftScreen* repeater_panel;
+  // everything known about one node, raised with Enter on any node in NODES
+  RiftScreen* node_card;
 
   void userLedHandler();
 
@@ -282,6 +284,7 @@ public:
     discover_overlay = NULL;
     rename_watch = NULL;
     repeater_panel = NULL;
+    node_card = NULL;
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
@@ -310,8 +313,14 @@ public:
   // broadcasts - which is often absent or duplicated.
   void openRenameWatch(int watch_idx);
 
-  // Log into a repeater and read it back. Reached with Enter on a repeater in
-  // NODES, where that key had nothing to offer before.
+  // Everything known about one node. Enter on NODES opens this rather than acting,
+  // because a row can only offer the most likely action and the facts that decide
+  // which action is wanted were spread across four places. Takes the observation by
+  // reference and copies it: the cache entry behind it is rewritten by the next
+  // advert. heard is false for a favourite listed from the contact table alone.
+  void openNodeCard(const struct AdvertPath& p, bool heard);
+
+  // Log into a repeater and read it back. Reached from the node card.
   void openRepeaterPanel(const uint8_t* pub_key);
   // The same panel, opened straight into its password prompt. COMMS calls it
   // when a message is about to go to a room server this node has not logged

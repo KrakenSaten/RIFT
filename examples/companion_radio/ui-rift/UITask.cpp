@@ -812,6 +812,61 @@ bool UITask::isChannelMuted(uint8_t channel_idx) const {
   return riftConvIsMuted(riftChannelConv(channel_idx));
 }
 
+// Which node a path hash points at, and a route as a readable line.
+//
+// Free rather than methods on NODES, because the node card draws a route too and
+// the second copy of this would be a second chance to disagree about what a route
+// is. The candidate set is the whole advert cache and the stored contact table, not
+// the nodes one screen happens to be showing - a hash colliding with a contact that
+// has not been heard recently used to resolve as unique and name the wrong node with
+// full confidence.
+static int riftResolveHash(const uint8_t* hash, uint8_t len, char* name, size_t name_len) {
+  if (len > sizeof(AdvertPath::pubkey_prefix)) len = sizeof(AdvertPath::pubkey_prefix);
+  return the_mesh.resolvePathHash(hash, len, name, name_len);
+}
+
+// path_len is Packet's raw encoding, so both the hop count and the hash size come
+// out of it - see riftHopCount. *ambiguous counts positions that could not be
+// resolved to one node; a single position may have had several candidates behind it,
+// which is why this counts positions and not candidates.
+static void riftFormatRoute(const uint8_t* path, uint8_t path_len,
+                            char* out, size_t out_size, int* ambiguous) {
+  out[0] = 0;
+  *ambiguous = 0;
+  int hops = (int) riftHopCount(path_len);
+  uint8_t hsz = riftHashSize(path_len);
+  if (path_len == RIFT_PATH_UNKNOWN || hops == 0 || hsz == 0) return;
+
+  size_t used = 0;
+  for (int k = 0; k < hops; k++) {
+    const char* label = "?";
+    char resolved[32], drawable[32];
+    int via = riftResolveHash(&path[k * hsz], hsz, resolved, sizeof(resolved));
+    if (via == RIFT_RESOLVE_AMBIGUOUS) (*ambiguous)++;
+    else if (via == RIFT_RESOLVE_UNIQUE) {
+      // Through the same translation every other name on screen goes through. Route
+      // labels were the one place that skipped it, so a repeater whose advertised
+      // name carries a Norwegian character drew its UTF-8 bytes raw - "Blystadlia
+      // rÿÇ" on the node card, and the same on the NODES route row long before the
+      // card existed. Found by reading the card off the device rather than by
+      // reading the code.
+      riftTranslateUTF8(drawable, resolved, sizeof(drawable));
+      label = drawable;
+    }
+
+    size_t need = strlen(label) + (used ? 3 : 0);
+    if (used + need >= out_size - 4) {              // room for " ..."
+      StrHelper::strncpy(out + used, " ...", out_size - used);
+      return;
+    }
+    if (used) { memcpy(out + used, " \xAF ", 3); used += 3; }   // CP437 0xAF, a right guillemet
+    size_t n = strlen(label);
+    memcpy(out + used, label, n);
+    used += n;
+    out[used] = 0;
+  }
+}
+
 
 // Break text into lines at a pixel width, calling emit() per line (NULL just
 // counts). DisplayDriver::printWordWrap() is only a default that forwards to
@@ -4919,31 +4974,7 @@ class RiftConstellationScreen : public RiftScreen {
   // `?` and never the first candidate: a hop byte is only a prefix of a repeater's
   // public key, so two nodes can share one.
   void routeText(const AdvertPath* p, char* out, size_t out_size, int* ambiguous) {
-    out[0] = 0;
-    *ambiguous = 0;
-    int hops = (int) riftHopCount(p->path_len);
-    uint8_t hsz = riftHashSize(p->path_len);
-    if (p->path_len == 0xFF || hops == 0 || hsz == 0) return;
-
-    size_t used = 0;
-    for (int k = 0; k < hops; k++) {
-      const char* label = "?";
-      char resolved[32];
-      int via = resolveHash(&p->path[k * hsz], hsz, resolved, sizeof(resolved));
-      if (via == RIFT_RESOLVE_AMBIGUOUS) (*ambiguous)++;
-      else if (via == RIFT_RESOLVE_UNIQUE) label = resolved;
-
-      size_t need = strlen(label) + (used ? 3 : 0);
-      if (used + need >= out_size - 4) {              // room for " ..."
-        StrHelper::strncpy(out + used, " ...", out_size - used);
-        return;
-      }
-      if (used) { memcpy(out + used, " \xAF ", 3); used += 3; }   // CP437 0xAF, a right guillemet
-      size_t n = strlen(label);
-      memcpy(out + used, label, n);
-      used += n;
-      out[used] = 0;
-    }
+    riftFormatRoute(p->path, p->path_len, out, out_size, ambiguous);
   }
 
   // How tall a row is: 12, or 36 for the selected one because the route and the
@@ -4953,18 +4984,6 @@ class RiftConstellationScreen : public RiftScreen {
 
   // Scrolled so the selected row *and* its two detail rows are drawn. A selection
   // that is not on screen does not exist for the user.
-  // A favourite, as a diamond. Five pixels like the freshness square beside it so
-  // the two read as one pair of marks, and a different shape so they cannot be
-  // confused: that one is an observation, this one is a choice.
-  void renderFavMark(DisplayDriver& display, int x, int y, uint16_t ink) {
-    display.setColor(ink);
-    display.fillRect(x + 2, y,     1, 1);
-    display.fillRect(x + 1, y + 1, 3, 1);
-    display.fillRect(x,     y + 2, 5, 1);
-    display.fillRect(x + 1, y + 3, 3, 1);
-    display.fillRect(x + 2, y + 4, 1, 1);
-  }
-
   void clampScroll() {
     const int TOP = 56, BOTTOM = 226;
     if (_scroll > _sel) _scroll = _sel;
@@ -4981,6 +5000,18 @@ class RiftConstellationScreen : public RiftScreen {
       if (fits || _scroll >= _sel) break;
       _scroll++;
     }
+  }
+
+  // A favourite, as a diamond. Five pixels like the freshness square beside it so
+  // the two read as one pair of marks, and a different shape so they cannot be
+  // confused: that one is an observation, this one is a choice.
+  void renderFavMark(DisplayDriver& display, int x, int y, uint16_t ink) {
+    display.setColor(ink);
+    display.fillRect(x + 2, y,     1, 1);
+    display.fillRect(x + 1, y + 1, 3, 1);
+    display.fillRect(x,     y + 2, 5, 1);
+    display.fillRect(x + 1, y + 3, 3, 1);
+    display.fillRect(x + 2, y + 4, 1, 1);
   }
 
  public:
@@ -5322,24 +5353,17 @@ class RiftConstellationScreen : public RiftScreen {
     if (c == KEY_DOWN) { if (_sel + 1 < _count) { _sel++; captureSelection(); } return true; }
     if (c == KEY_ENTER) {
       if (_count == 0) { riftLogf("NODES enter: list empty"); return true; }
-      const uint8_t* key = _paths[_sel].pubkey_prefix;
-      ContactInfo* contact = the_mesh.lookupContactByPubKey((uint8_t*) key, 6);
-      // Logged because this decision is invisible when it goes the wrong way:
-      // three outcomes look identical from the outside if none of them draws.
-      riftLogf("NODES enter %02X%02X: %s", key[0], key[1],
-               contact ? riftAdvertTypeName(contact->type) : "not a contact");
-      if (contact == NULL) {
-        _task->showAlert("Not a contact yet", 1400);
-        return true;
-      }
-      if (!riftCanDirectMessage(contact->type)) {
-        // Not a dead end any more. A repeater or room server cannot take a
-        // direct message, but it can be logged into and read, so Enter opens
-        // that panel instead of reporting what the key cannot do.
-        _task->openRepeaterPanel(key);
-        return true;
-      }
-      _task->startDirectMessage(key);
+      // Opens the card rather than acting, which is the behaviour change. Enter used
+      // to pick an action from the node's type - message, control, or an alert saying
+      // neither - and a row can only ever offer the most likely one. The facts that
+      // decide which action is actually wanted were spread across the advert cache,
+      // the contact table, the message log and the route ring; the card puts them on
+      // one screen and carries the same actions at the bottom of it.
+      //
+      // It costs one more press to send a message from here. COMMS has its own
+      // conversation list for that, and what NODES is for is deciding whether a node
+      // is worth messaging at all.
+      _task->openNodeCard(_paths[_sel], !(_sel >= _inj_lo && _sel < _inj_hi));
       return true;
     }
 
@@ -5399,6 +5423,296 @@ const int RiftConstellationScreen::BUCKET_X[RIFT_HOPB_COUNT] =
   { 2, 65, 128, 191, 254 };
 const char* RiftConstellationScreen::BUCKET_LABEL[RIFT_HOPB_COUNT] =
   { "DIRECT", "1-2", "3-5", "6+", "NO ROUTE" };
+
+// The node card: what RIFT knows about one node, on one screen.
+//
+// NODES answers how far away a node is and how recently it spoke, and its selected
+// row adds the route and one action. What it could not answer are the questions that
+// decide whether to rely on a node: have I actually reached it, how long did that
+// take, and has the way there been moving? Every one of those facts already existed
+// - in the advert cache, the contact table, the message log and now the route ring -
+// and no two of them were on the same screen.
+//
+// A graphical mesh view was the other candidate for this round. It would have drawn
+// the same data with less of it legible: a 320x240 panel cannot place forty nodes
+// faithfully, and "who is two hops away" is a question the NODES bucket band already
+// answers better than a picture would.
+//
+// Opened with the AdvertPath rather than a key. NODES has the observation in hand,
+// and looking it up again would either walk the cache a second time or hand back a
+// pointer into a table the next advert rewrites. The copy is 48 bytes and cannot go
+// stale underneath the screen.
+class RiftNodeCardScreen : public RiftScreen {
+  UITask* _task;
+  AdvertPath _p;
+  bool _have;
+  // False for a favourite listed from the contact table alone - see the injection in
+  // RiftConstellationScreen::refresh(). Everything derived from an observation has to
+  // say it has none rather than compute from a recv_millis of zero.
+  bool _heard;
+
+  // The newest delivered direct message to this node, which is the only proof the
+  // device holds that it has ever actually reached it. An advert says the node is out
+  // there; an ack says something went there and came back.
+  const RiftMsgLog::Entry* lastAck() const {
+    RiftConvKey want = riftConvDM(_p.pubkey_prefix);
+    if (want.kind == RIFT_CONV_UNKNOWN) return NULL;
+    for (int i = msg_log.count - 1; i >= 0; i--) {
+      const RiftMsgLog::Entry* e = &msg_log.entries[i];
+      if (!e->outgoing || !e->delivered) continue;
+      if (!riftConvSame(e->conv, want)) continue;
+      return e;
+    }
+    return NULL;
+  }
+
+  // Milliseconds as seconds to one decimal. A round trip is tenths of a second at
+  // best and tens at worst, and a bare "1s" cannot tell a fast mesh from a slow one.
+  static void tripText(uint32_t ms, char* out, size_t n) {
+    snprintf(out, n, "%u.%us", (unsigned) (ms / 1000u), (unsigned) ((ms % 1000u) / 100u));
+  }
+
+  // label in mid, value in fg, value ellipsized rather than wrapped - every row here
+  // is one fact and a fact that needs two lines is a fact stated badly.
+  void row(DisplayDriver& display, int y, const char* label, const char* value,
+           uint16_t value_ink) {
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, y, label);
+    display.setColor(value_ink);
+    display.drawTextEllipsized(76, y, 238, value);
+  }
+
+ public:
+  RiftNodeCardScreen(UITask* task) : _task(task), _have(false), _heard(false) {
+    memset(&_p, 0, sizeof(_p));
+  }
+
+  bool openFor(const AdvertPath& p, bool heard) {
+    _p = p;
+    _have = true;
+    _heard = heard;
+    return true;
+  }
+
+  const uint8_t* key() const { return _p.pubkey_prefix; }
+
+  int render(DisplayDriver& display) override {
+    display.setTextSize(1);
+    display.setColor(rift_pal.bg);
+    display.fillRect(0, 0, 320, 240);
+    if (!_have) { _task->dismissOverlay(); return 200; }
+
+    char tmp[80];
+    ContactInfo* c = the_mesh.lookupContactByPubKey((uint8_t*) _p.pubkey_prefix, 6);
+
+    // ---- heading
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 2, "NODE");
+    display.drawTextRightAlign(314, 2, "BACKSPACE: back");
+
+    // ---- identity
+    char shown[40];
+    riftTranslateUTF8(shown, _p.name[0] ? _p.name : "(unnamed)", sizeof(shown));
+    display.setColor(rift_pal.fg);
+    display.drawTextEllipsized(2, 16, 286, shown);
+    if (riftFavs().has(_p.pubkey_prefix)) {
+      display.setColor(rift_pal.fg);
+      display.fillRect(296 + 2, 17, 1, 1);
+      display.fillRect(296 + 1, 18, 3, 1);
+      display.fillRect(296,     19, 5, 1);
+      display.fillRect(296 + 1, 20, 3, 1);
+      display.fillRect(296 + 2, 21, 1, 1);
+    }
+
+    // The key, because it is the identity and the name is only what the node claims
+    // to be called. Two nodes may advertise the same name; these six bytes are what
+    // every other part of the firmware matches on.
+    snprintf(tmp, sizeof(tmp), "%02X%02X%02X%02X%02X%02X %s %s",
+             _p.pubkey_prefix[0], _p.pubkey_prefix[1], _p.pubkey_prefix[2],
+             _p.pubkey_prefix[3], _p.pubkey_prefix[4], _p.pubkey_prefix[5], RIFT_DOT,
+             c != NULL ? riftAdvertTypeName(c->type) : "not a contact");
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 28, tmp);
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 42, 316, 1);
+
+    // ---- what is known, one fact a row
+    int y = 50;
+
+    if (!_heard) {
+      row(display, y, "HEARD", "not since boot", rift_pal.mid);
+    } else {
+      char age[RIFT_AGE_BUF_LEN];
+      riftFormatAge((uint32_t) millis() - _p.recv_millis, age, sizeof(age));
+      uint32_t clk = the_mesh.getRTCClock()->getCurrentTime();
+      if (riftClockPlausible(clk) && _p.recv_timestamp >= 1600000000u) {
+        int hh, mm;
+        riftCivilFromEpoch(riftLocal(_p.recv_timestamp), NULL, NULL, NULL, &hh, &mm);
+        snprintf(tmp, sizeof(tmp), "%s ago %s %02d:%02d", age, RIFT_DOT, hh, mm);
+      } else {
+        snprintf(tmp, sizeof(tmp), "%s ago", age);   // no invented clock time
+      }
+      row(display, y, "HEARD", tmp, rift_pal.fg);
+    }
+    y += 14;
+
+    // The one row that says the route works in the direction that matters. "no ack
+    // yet" is not a fault - it is the state of every node nothing has been sent to -
+    // so it is drawn in mid rather than as a warning.
+    const RiftMsgLog::Entry* ack = lastAck();
+    if (ack == NULL) {
+      row(display, y, "REACHED", "no ack yet", rift_pal.mid);
+    } else {
+      char trip[12];
+      tripText(ack->trip_ms, trip, sizeof(trip));
+      uint32_t clk = the_mesh.getRTCClock()->getCurrentTime();
+      if (riftClockPlausible(clk) && ack->timestamp >= 1600000000u) {
+        int hh, mm;
+        riftCivilFromEpoch(riftLocal(ack->timestamp), NULL, NULL, NULL, &hh, &mm);
+        snprintf(tmp, sizeof(tmp), "round trip %s %s %02d:%02d", trip, RIFT_DOT, hh, mm);
+      } else {
+        snprintf(tmp, sizeof(tmp), "round trip %s", trip);
+      }
+      row(display, y, "REACHED", tmp, rift_pal.ok);
+    }
+    y += 14;
+
+    // ---- the two routes, which are not the same thing and were never shown together
+    //
+    // ADVERT is the way the node's advert reached here. OUTBOUND is the way this
+    // device would send to it, which MeshCore keeps on the contact and updates from
+    // path returns. They agree most of the time and the times they do not are the
+    // interesting ones, which is the whole reason for putting them on adjacent rows.
+    {
+      int amb = 0;
+      char route[64];
+      riftFormatRoute(_p.path, _p.path_len, route, sizeof(route), &amb);
+      if (riftHopsUnknown(_p.path_len)) {
+        row(display, y, "ADVERT", "no route - heard by flood", rift_pal.mid);
+      } else {
+        int hops = (int) riftHopCount(_p.path_len);
+        if (amb > 0) {
+          snprintf(tmp, sizeof(tmp), "%d hop%s %s %d unresolved", hops, hops == 1 ? "" : "s",
+                   RIFT_DOT, amb);
+        } else if (route[0]) {
+          snprintf(tmp, sizeof(tmp), "%d hop%s %s %s", hops, hops == 1 ? "" : "s", RIFT_DOT,
+                   route);
+        } else {
+          snprintf(tmp, sizeof(tmp), "%d hop%s %s direct", hops, hops == 1 ? "" : "s", RIFT_DOT);
+        }
+        // Confirmed means something came back through this route since the advert
+        // set it. An advert alone only says how far the node is.
+        row(display, y, "ADVERT", tmp, _p.confirmed ? rift_pal.ok : rift_pal.fg);
+      }
+    }
+    y += 14;
+
+    if (c == NULL) {
+      row(display, y, "OUTBOUND", "not a contact - nothing to send through", rift_pal.mid);
+    } else if (c->out_path_len == OUT_PATH_UNKNOWN) {
+      row(display, y, "OUTBOUND", "none stored - a send will flood", rift_pal.mid);
+    } else {
+      int amb = 0;
+      char route[64];
+      riftFormatRoute(c->out_path, c->out_path_len, route, sizeof(route), &amb);
+      int hops = (int) riftHopCount(c->out_path_len);
+      if (amb > 0) {
+        snprintf(tmp, sizeof(tmp), "%d hop%s %s %d unresolved", hops, hops == 1 ? "" : "s",
+                 RIFT_DOT, amb);
+      } else if (route[0]) {
+        snprintf(tmp, sizeof(tmp), "%d hop%s %s %s", hops, hops == 1 ? "" : "s", RIFT_DOT, route);
+      } else {
+        snprintf(tmp, sizeof(tmp), "%d hop%s %s direct", hops, hops == 1 ? "" : "s", RIFT_DOT);
+      }
+      row(display, y, "OUTBOUND", tmp, rift_pal.fg);
+    }
+    y += 14;
+
+    // ---- has the way there been moving
+    //
+    // Oldest to newest, left to right, because that is the direction a sequence is
+    // read and the question is a trend rather than a current value. Four is what the
+    // row holds; the count says whether there were more.
+    {
+      RiftRouteLog& rl = riftRoutes();
+      int n = rl.countFor(_p.pubkey_prefix);
+      if (n == 0) {
+        row(display, y, "ROUTE", "steady since boot", rift_pal.mid);
+      } else {
+        const int SHOW = 4;
+        int take = n < SHOW ? n : SHOW;
+        size_t used = 0;
+        tmp[0] = 0;
+        for (int i = take - 1; i >= 0; i--) {         // peekFor(0) is the newest
+          const RiftRouteChange* ch = rl.peekFor(_p.pubkey_prefix, i);
+          if (ch == NULL) continue;
+          used += (size_t) snprintf(tmp + used, sizeof(tmp) - used, "%s%d",
+                                    used ? " > " : "", (int) ch->hops);
+          if (used >= sizeof(tmp) - 1) break;
+        }
+        const RiftRouteChange* newest = rl.peekFor(_p.pubkey_prefix, 0);
+        char age[RIFT_AGE_BUF_LEN];
+        riftFormatAge((uint32_t) millis() - (newest ? newest->at_ms : 0), age, sizeof(age));
+        snprintf(tmp + used, sizeof(tmp) - used, " hop%s %s %d change%s, last %s ago",
+                 (used == 1 ? "" : "s"), RIFT_DOT, n, n == 1 ? "" : "s", age);
+        // Accent when it has moved more than once: a route that keeps changing is the
+        // thing this row exists to make visible.
+        row(display, y, "ROUTE", tmp, n > 1 ? rift_pal.accent : rift_pal.fg);
+      }
+    }
+
+    // ---- what can be done about it
+    //
+    // The actions live here rather than on the NODES row, which is why ENTER now
+    // opens this card. A row that offers one action can only offer the most likely
+    // one; a card has room to say which are possible and which are not.
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 208, 316, 1);
+    const char* action = "not a contact yet";
+    if (c != NULL) {
+      if (riftCanDirectMessage(c->type))          action = "ENTER: message";
+      else if (c->type == RIFT_ADV_REPEATER)      action = "ENTER: control";
+      else if (c->type == RIFT_ADV_SENSOR)        action = "ENTER: read";
+      else                                        action = "no action for this type";
+    }
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 216, action);
+    display.drawTextRightAlign(314, 216,
+                               riftFavs().has(_p.pubkey_prefix) ? "*: unfav" : "*: fav");
+
+    // A second a frame is enough: every value here is an age or a stored fact, and
+    // the blit costs 40.7ms with the SPI bus held away from the radio.
+    return 1000;
+  }
+
+  bool handleInput(char c) override {
+    if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _task->dismissOverlay(); return true; }
+
+    if (c == '*') {
+      RiftFavourites& fv = riftFavs();
+      if (!fv.has(_p.pubkey_prefix) && fv.full()) {
+        _task->showAlert("16 favourites is the limit", 1600);
+        return true;
+      }
+      fv.toggle(_p.pubkey_prefix);
+      riftSaveSettings();
+      return true;
+    }
+
+    if (c == KEY_ENTER) {
+      ContactInfo* ct = the_mesh.lookupContactByPubKey((uint8_t*) _p.pubkey_prefix, 6);
+      if (ct == NULL) { _task->showAlert("Not a contact yet", 1400); return true; }
+      // The card goes away first. Both of these raise something of their own, and
+      // openRepeaterPanel refuses outright while an overlay is up.
+      _task->dismissOverlay();
+      if (!riftCanDirectMessage(ct->type)) _task->openRepeaterPanel(_p.pubkey_prefix);
+      else                                 _task->startDirectMessage(_p.pubkey_prefix);
+      return true;
+    }
+    return false;
+  }
+};
 
 // Placeholder nav screen - visual only, real functionality lands in a later milestone.
 class RiftPlaceholderScreen : public RiftScreen {
@@ -9607,6 +9921,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   discover_overlay = new RiftDiscoverScreen(this);
   rename_watch = new RiftRenameWatchScreen(this);
   repeater_panel = new RiftRepeaterScreen(this);
+  node_card = new RiftNodeCardScreen(this);
   nav_idx = 0;
   setCurrScreen(splash);
 }
@@ -9914,6 +10229,25 @@ void UITask::openRenameWatch(int watch_idx) {
 // before, which is indistinguishable from a keypress that was never registered -
 // and that is exactly how the feature read on the device: nothing happened, and
 // nothing said anything.
+void UITask::openNodeCard(const AdvertPath& p, bool heard) {
+  if (node_card == NULL) {
+    showAlert("Node card unavailable", 1600);
+    return;
+  }
+  if (_overlay != NULL) {
+    // Logged rather than ignored, for the reason openRepeaterPanel gives: a stuck
+    // overlay is invisible from here and makes every later press do nothing.
+    riftLogf("node card: overlay already up");
+    return;
+  }
+  // No refusal for a node that is not a contact. The repeater panel has to have one
+  // because it logs in; this only reads, and "heard but never added" is a real state
+  // that the card is the right place to say out loud.
+  ((RiftNodeCardScreen *) node_card)->openFor(p, heard);
+  riftLogf("node card %02X%02X", p.pubkey_prefix[0], p.pubkey_prefix[1]);
+  pushOverlay(node_card);
+}
+
 void UITask::openRepeaterPanel(const uint8_t* pub_key) {
   if (repeater_panel == NULL) {
     showAlert("Repeater panel unavailable", 1600);

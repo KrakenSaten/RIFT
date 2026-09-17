@@ -2091,6 +2091,69 @@ TEST(Favourites, DegenerateInputs) {
     EXPECT_EQ(0, f.n);
 }
 
+TEST(RouteLog, KeepsOneNodesChangesNewestFirst) {
+    RiftRouteLog r;
+    uint8_t a[RIFT_FAV_KEY_LEN], b[RIFT_FAV_KEY_LEN];
+    favkey(a, 1); favkey(b, 2);
+
+    r.note(a, 3, 1000);
+    r.note(b, 7, 1100);      // another node's change must not appear in a's history
+    r.note(a, 5, 1200);
+
+    EXPECT_EQ(2, r.countFor(a));
+    EXPECT_EQ(1, r.countFor(b));
+    ASSERT_NE(nullptr, r.peekFor(a, 0));
+    EXPECT_EQ(5, r.peekFor(a, 0)->hops);
+    EXPECT_EQ(1200u, r.peekFor(a, 0)->at_ms);
+    ASSERT_NE(nullptr, r.peekFor(a, 1));
+    EXPECT_EQ(3, r.peekFor(a, 1)->hops);
+    EXPECT_EQ(nullptr, r.peekFor(a, 2)) << "past the end is how a caller stops";
+}
+
+TEST(RouteLog, TheSameHopCountAgainIsNotAChange) {
+    RiftRouteLog r;
+    uint8_t a[RIFT_FAV_KEY_LEN];
+    favkey(a, 1);
+
+    r.note(a, 4, 1000);
+    r.note(a, 4, 2000);
+    r.note(a, 4, 3000);
+    EXPECT_EQ(1, r.countFor(a)) << "the hook fires on re-confirmation too";
+    EXPECT_EQ(1000u, r.peekFor(a, 0)->at_ms) << "and must not restamp the original";
+
+    // But going away and coming back is two changes.
+    r.note(a, 6, 4000);
+    r.note(a, 4, 5000);
+    EXPECT_EQ(3, r.countFor(a));
+    EXPECT_EQ(4, r.peekFor(a, 0)->hops);
+    EXPECT_EQ(6, r.peekFor(a, 1)->hops);
+}
+
+TEST(RouteLog, OneThrashingNodeCanFillTheRing) {
+    // The allocation is deliberate: all of one node's changes beats a few of
+    // everyone's, because the node that is moving is the one being asked about.
+    RiftRouteLog r;
+    uint8_t a[RIFT_FAV_KEY_LEN];
+    favkey(a, 1);
+    for (int i = 0; i < RIFT_ROUTE_LOG_MAX + 6; i++) {
+        r.note(a, (uint8_t) (i % 2 ? 3 : 4), 1000u + (uint32_t) i);
+    }
+    EXPECT_EQ(RIFT_ROUTE_LOG_MAX, r.countFor(a));
+    EXPECT_EQ(nullptr, r.peekFor(a, RIFT_ROUTE_LOG_MAX));
+}
+
+TEST(RouteLog, DegenerateInputs) {
+    RiftRouteLog r;
+    uint8_t a[RIFT_FAV_KEY_LEN];
+    favkey(a, 1);
+    r.note(NULL, 3, 1000);
+    EXPECT_EQ(0, r.count);
+    EXPECT_EQ(0, r.countFor(NULL));
+    EXPECT_EQ(nullptr, r.peekFor(NULL, 0));
+    EXPECT_EQ(nullptr, r.peekFor(a, -1));
+    EXPECT_EQ(nullptr, r.peekFor(a, 0)) << "nothing noted, nothing to peek";
+}
+
 TEST(Drafts, EachConversationKeepsItsOwn) {
     RiftDrafts d;
     d.put(ch(0), "to the channel");

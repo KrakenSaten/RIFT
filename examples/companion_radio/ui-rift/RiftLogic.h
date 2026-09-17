@@ -1579,6 +1579,91 @@ inline RiftFavourites& riftFavs() {
   return t;
 }
 
+// ----------------------------------------------------------- route changes
+//
+// A route changing is the difference between a direct message that lands and one
+// that does not. onContactPathUpdated already said so and already logged a line, but
+// a line in a 128-entry event log is gone by the time anyone asks the question the
+// change raises: has the way to this node been moving, or has it been steady?
+//
+// So: a ring, keyed by node, holding the hop count each change settled on. The node
+// card reads the last few for one node and shows them as a sequence, which answers
+// "is this route stable" in a way the current hop count cannot.
+//
+// RAM only, for the reason the event log gives: this describes the session you are
+// still in, and persisting it would put a second writer on the filesystem that holds
+// the node identity.
+//
+// Twenty-four across all nodes rather than a few per node. A mesh where one node's
+// route is thrashing is exactly when you want all of that node's changes and none of
+// anyone else's, and a per-node allocation would have spent the space evenly on the
+// nodes that are not moving.
+#define RIFT_ROUTE_LOG_MAX 24
+
+struct RiftRouteChange {
+  uint8_t  key[RIFT_FAV_KEY_LEN];
+  uint8_t  hops;         // what the route settled on, already decoded from path_len
+  uint32_t at_ms;        // monotonic; the card renders an age, never a clock time
+};
+
+struct RiftRouteLog {
+  RiftRouteChange e[RIFT_ROUTE_LOG_MAX];
+  int head = RIFT_ROUTE_LOG_MAX - 1;   // index of the newest
+  int count = 0;
+
+  void reset() { head = RIFT_ROUTE_LOG_MAX - 1; count = 0; }
+
+  // now_ms is passed rather than read, so the rule has tests and this header stays
+  // free of a clock.
+  void note(const uint8_t* key, uint8_t hops, uint32_t now_ms) {
+    if (key == NULL) return;
+    // A repeat of the hop count this node is already on is not a change. The hook
+    // fires on every path update, including ones that re-confirm the same route,
+    // and recording those would fill the ring with an event that did not happen.
+    const RiftRouteChange* last = peekFor(key, 0);
+    if (last != NULL && last->hops == hops) return;
+
+    head = (head + 1) % RIFT_ROUTE_LOG_MAX;
+    if (count < RIFT_ROUTE_LOG_MAX) count++;
+    RiftRouteChange* c = &e[head];
+    memcpy(c->key, key, RIFT_FAV_KEY_LEN);
+    c->hops = hops;
+    c->at_ms = now_ms;
+  }
+
+  // back == 0 is the newest change for this node, 1 the one before it. NULL past the
+  // end, which is how a caller walks it without asking how many there are first.
+  const RiftRouteChange* peekFor(const uint8_t* key, int back) const {
+    if (key == NULL || back < 0) return NULL;
+    int seen = 0;
+    for (int i = 0; i < count; i++) {
+      const RiftRouteChange* c = &e[(head - i + RIFT_ROUTE_LOG_MAX * 2) % RIFT_ROUTE_LOG_MAX];
+      if (memcmp(c->key, key, RIFT_FAV_KEY_LEN) != 0) continue;
+      if (seen == back) return c;
+      seen++;
+    }
+    return NULL;
+  }
+
+  int countFor(const uint8_t* key) const {
+    if (key == NULL) return 0;
+    int n = 0;
+    for (int i = 0; i < count; i++) {
+      const RiftRouteChange* c = &e[(head - i + RIFT_ROUTE_LOG_MAX * 2) % RIFT_ROUTE_LOG_MAX];
+      if (memcmp(c->key, key, RIFT_FAV_KEY_LEN) == 0) n++;
+    }
+    return n;
+  }
+};
+
+// One instance across both translation units - MyMesh writes to it from the mesh
+// callbacks and the node card reads it. A function-local static in an inline
+// function is guaranteed to be one object, which a file-scope definition would not.
+inline RiftRouteLog& riftRoutes() {
+  static RiftRouteLog t;
+  return t;
+}
+
 // ------------------------------------------------------------- conversations
 //
 // Which conversation a message belongs to, carried on the log entry rather than
