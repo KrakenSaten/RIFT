@@ -49,6 +49,18 @@ class ST7789NativeDisplay : public DisplayDriver {
   //
   // The maximum is the number that matters. A mean hides the single frame that ran
   // long, and the single frame that ran long is the one that cost a packet.
+  //
+  // Measured on the device, 3125 blits across 52 minutes: 40.7ms mean, 40.8ms
+  // maximum. So the 30.7ms of SPI is three quarters of it and the remaining 10ms
+  // is the PSRAM read - the floor was a fair estimate and short by a third. The
+  // spread across three thousand frames is 0.1ms, which says this transfer is
+  // never contended and never interrupted.
+  //
+  // At roughly one blit a second that is 4.1% of wall clock with the bus held away
+  // from the SX1262. Most of those frames redrew a screen that had not changed,
+  // which is why suppressing the unchanged redraw comes before splitting the
+  // transfer into dirty rectangles: the first removes whole blits, the second only
+  // shortens them.
   uint32_t _blit_last_us;
   uint32_t _blit_max_us;
   uint64_t _blit_total_us;

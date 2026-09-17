@@ -1393,11 +1393,24 @@ uint32_t rift_last_wake_ms = 0;
 // maximum is the ordinary case or an outlier worth going after, which is the
 // difference between optimising the frame and optimising the one screen that
 // blocks.
+//
+// The turn a screen dump ran in is excluded, and this is not tidying up an
+// inconvenient number. riftStreamFrame() writes 153,600 bytes to the serial port
+// from inside this loop, and the first reading taken off a device measured a
+// maximum of 841.6ms that was the dump and nothing else - the bench command the
+// host used to read the row was the largest thing the row had ever seen. A
+// measurement whose only remote read perturbs it reports the reader, so the turn
+// is dropped rather than counted.
+//
+// Dropped turns are counted and shown, because a silent exclusion is a different
+// way of lying about the same thing: the row says how many it left out.
 static uint32_t rift_loop_prev_us = 0;
 static uint32_t rift_loop_max_us = 0;
 static uint64_t rift_loop_total_us = 0;
 static uint32_t rift_loop_count = 0;
+static uint32_t rift_loop_skipped = 0;
 static bool     rift_loop_seen = false;   // micros() can legitimately read 0 once
+static bool     rift_loop_perturbed = false;  // a dump ran in the turn just ending
 
 // Four bytes on SPIFFS: magic, version, flags. Small enough that the write cost
 // that dominates the message log does not apply, and it only happens when a
@@ -4048,7 +4061,14 @@ public:
       riftFormatMicrosMs((uint32_t) (rift_loop_total_us / rift_loop_count),
                          mean_s, sizeof(mean_s));
       riftFormatMicrosMs(rift_loop_max_us, max_s, sizeof(max_s));
-      snprintf(tmp, sizeof(tmp), "%s max %sms", mean_s, max_s);
+      // "x2" is two turns dropped because a screen dump ran in them. Shown rather
+      // than kept quiet, so the row is read knowing what it excludes.
+      if (rift_loop_skipped > 0) {
+        snprintf(tmp, sizeof(tmp), "%s max %sms x%u", mean_s, max_s,
+                 (unsigned) rift_loop_skipped);
+      } else {
+        snprintf(tmp, sizeof(tmp), "%s max %sms", mean_s, max_s);
+      }
       // 100ms: long enough that a packet can have come and gone inside it, and
       // far enough above a frame that this flags a blocking screen rather than
       // the ordinary cost of drawing one.
@@ -9646,7 +9666,10 @@ void UITask::loop() {
   // here have one the_mesh.loop() between them; see the note beside the counters.
   {
     uint32_t now_us = micros();
-    if (rift_loop_seen) {
+    if (rift_loop_perturbed) {
+      rift_loop_skipped++;            // a screen dump owned the turn just ending
+      rift_loop_perturbed = false;
+    } else if (rift_loop_seen) {
       uint32_t dt = now_us - rift_loop_prev_us;   // correct across the 71-minute wrap
       if (dt > rift_loop_max_us) rift_loop_max_us = dt;
       rift_loop_total_us += dt;
@@ -10111,7 +10134,13 @@ void UITask::loop() {
         _next_refresh = millis() + delay_millis;
       }
       _display->endFrame();
-      if (dump_now) riftStreamFrame();
+      if (dump_now) {
+        riftStreamFrame();
+        // 153,600 bytes on the serial port, inside this turn. See the LOOP
+        // counters: the next entry drops this interval instead of reporting the
+        // host's own read as the worst the radio ever waited.
+        rift_loop_perturbed = true;
+      }
     }
 #if AUTO_OFF_MILLIS > 0
 #ifdef KEEP_DISPLAY_ON_USB
