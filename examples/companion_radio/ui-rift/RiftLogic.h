@@ -1437,6 +1437,148 @@ static inline const char* riftHopBucketLabel(int bucket) {
   }
 }
 
+// --------------------------------------------------------------- finding a node
+//
+// NODES holds up to RIFT_CONST_MAX nodes and the contact table behind it holds 350,
+// on a 320x240 panel that shows fourteen rows. Scrolling was the only way to reach
+// one, which is not a way to reach one - it is a way to reach the first few.
+//
+// ASCII folding only, and deliberately. The names on a mesh arrive from other
+// people's firmware in whatever encoding they chose, and riftTranslateUTF8 already
+// has to reduce them to what a CP437 font can draw. Folding beyond ASCII would mean
+// a case table for text this device cannot render anyway; what it would buy is
+// "Ø" matching "ø" in a name that draws as a placeholder either way.
+static inline char riftFoldAscii(char c) {
+  return (c >= 'A' && c <= 'Z') ? (char) (c - 'A' + 'a') : c;
+}
+
+// Substring rather than prefix: the useful query against "SE FCC portabel" is "fcc",
+// and a prefix match would need the user to know how the name starts, which is the
+// thing they are looking it up to find out.
+static inline bool riftContainsFold(const char* hay, const char* needle) {
+  if (hay == NULL || needle == NULL) return false;
+  if (needle[0] == 0) return true;
+  for (const char* h = hay; *h != 0; h++) {
+    const char* a = h;
+    const char* b = needle;
+    while (*a != 0 && *b != 0 && riftFoldAscii(*a) == riftFoldAscii(*b)) { a++; b++; }
+    if (*b == 0) return true;
+  }
+  return false;
+}
+
+static inline bool riftIsHexQuery(const char* q) {
+  if (q == NULL || q[0] == 0) return false;
+  for (const char* p = q; *p != 0; p++) {
+    char c = riftFoldAscii(*p);
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  }
+  return true;
+}
+
+// Prefix, not substring, and that asymmetry with the name is the point: a key is
+// read off the detail row from its front, and a hex fragment matching in the middle
+// of a key would be a coincidence rather than a recognition.
+static inline bool riftKeyHexStartsWith(const uint8_t* key, size_t key_len, const char* q) {
+  if (key == NULL || q == NULL) return false;
+  // Not named HEX: Arduino's Print.h defines that as 16, so the subscript became
+  // 16[...] and only the suites that pull in the Arduino mock said so.
+  static const char hexdig[] = "0123456789abcdef";
+  size_t qi = 0;
+  for (size_t i = 0; i < key_len; i++) {
+    if (q[qi] == 0) return true;
+    if (riftFoldAscii(q[qi]) != hexdig[(key[i] >> 4) & 0x0F]) return false;
+    qi++;
+    if (q[qi] == 0) return true;
+    if (riftFoldAscii(q[qi]) != hexdig[key[i] & 0x0F]) return false;
+    qi++;
+  }
+  return q[qi] == 0;   // a query longer than the key cannot match it
+}
+
+// Both ways a node is known, because there are two and the query does not say which
+// one it is. "BE" is a plausible name fragment and a plausible key prefix, and
+// refusing either would mean deciding what the user meant.
+//
+// An empty query matches everything, so the caller can hold one filter string and
+// not branch on whether it is set.
+static inline bool riftNodeMatches(const char* name, const uint8_t* key, size_t key_len,
+                                   const char* query) {
+  if (query == NULL || query[0] == 0) return true;
+  if (name != NULL && riftContainsFold(name, query)) return true;
+  if (riftIsHexQuery(query) && riftKeyHexStartsWith(key, key_len, query)) return true;
+  return false;
+}
+
+// The nodes worth keeping hold of.
+//
+// Search answers "where is it in this list"; this answers "it should not have been
+// in a list of three hundred in the first place". The two are the same feature from
+// different ends, which is why they arrived together.
+//
+// Sixteen. Past that it is a second list to search rather than a shortlist, and the
+// cost is paid in the settings file on every save.
+#define RIFT_FAV_MAX 16
+
+// Six, not AdvertPath's seven. Six is the prefix length the rest of the firmware
+// already treats as identity - lookupContactByPubKey takes six, riftConvDM stores
+// six - and a favourite that matched on seven would fail to recognise the same node
+// arriving through any of those paths.
+#define RIFT_FAV_KEY_LEN 6
+
+struct RiftFavourites {
+  uint8_t keys[RIFT_FAV_MAX][RIFT_FAV_KEY_LEN];
+  int n = 0;
+
+  void reset() { n = 0; }
+  bool full() const { return n >= RIFT_FAV_MAX; }
+
+  int indexOf(const uint8_t* key) const {
+    if (key == NULL) return -1;
+    for (int i = 0; i < n; i++) {
+      if (memcmp(keys[i], key, RIFT_FAV_KEY_LEN) == 0) return i;
+    }
+    return -1;
+  }
+
+  bool has(const uint8_t* key) const { return indexOf(key) >= 0; }
+
+  // False when there was no room. The caller says so rather than the mark silently
+  // not appearing, which is the failure this returns a bool to prevent.
+  bool add(const uint8_t* key) {
+    if (key == NULL) return false;
+    if (indexOf(key) >= 0) return true;      // already a favourite is success
+    if (full()) return false;
+    memcpy(keys[n], key, RIFT_FAV_KEY_LEN);
+    n++;
+    return true;
+  }
+
+  bool remove(const uint8_t* key) {
+    int at = indexOf(key);
+    if (at < 0) return false;
+    // Order carries no meaning here - the list is a set - so the hole is filled
+    // from the end rather than by shifting.
+    if (at != n - 1) memcpy(keys[at], keys[n - 1], RIFT_FAV_KEY_LEN);
+    n--;
+    return true;
+  }
+
+  // The new state, so a caller can report it. A toggle that could not add because
+  // the list is full returns false, which is also the correct new state.
+  bool toggle(const uint8_t* key) {
+    if (indexOf(key) >= 0) { remove(key); return false; }
+    return add(key);
+  }
+};
+
+// One table, reached the way the mutes and the scopes are: NODES marks them, the
+// settings file loads and saves them, and neither owns the other.
+inline RiftFavourites& riftFavs() {
+  static RiftFavourites t;
+  return t;
+}
+
 // ------------------------------------------------------------- conversations
 //
 // Which conversation a message belongs to, carried on the log entry rather than

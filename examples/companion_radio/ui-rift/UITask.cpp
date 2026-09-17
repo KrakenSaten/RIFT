@@ -1527,6 +1527,27 @@ void riftLoadSettings() {
         }
       }
     }
+
+    // Favourites. Absent in any file written before they existed, and absent means
+    // none - the same bargain every section above makes, which is why none of them
+    // needed a version bump and neither does this.
+    //
+    // Through add() rather than a raw append, for the reason the scopes and the mutes
+    // give: it refuses a duplicate and it refuses to write past the array, so a
+    // truncated or hand-edited count cannot produce either. A count claiming more
+    // records than the file holds stops when the read fails and keeps what arrived.
+    {
+      RiftFavourites& fv = riftFavs();
+      fv.reset();
+      uint8_t nf = 0;
+      if (f.read(&nf, 1) == 1) {
+        for (int i = 0; i < (int) nf; i++) {
+          uint8_t k[RIFT_FAV_KEY_LEN];
+          if (f.read(k, RIFT_FAV_KEY_LEN) != RIFT_FAV_KEY_LEN) break;
+          fv.add(k);
+        }
+      }
+    }
   }
   f.close();
 
@@ -1630,6 +1651,19 @@ void riftSaveSettings() {
       uint32_t fp = mt.at(i).channel_fp;
       ok = ok && (f.write(&idx, 1) == 1);
       ok = ok && (f.write((const uint8_t*) &fp, 4) == 4);
+    }
+  }
+
+  // Favourites, appended after the mutes for the reason every section above gives:
+  // last is where a new one goes, and a file written before this existed still reads
+  // everything ahead of it. Six bytes an entry and no name - the name comes from the
+  // contact table, which is where it can change without this file going stale.
+  {
+    RiftFavourites& fv = riftFavs();
+    uint8_t nf = (uint8_t) fv.n;
+    ok = ok && (f.write(&nf, 1) == 1);
+    for (int i = 0; i < fv.n && ok; i++) {
+      ok = ok && (f.write(fv.keys[i], RIFT_FAV_KEY_LEN) == RIFT_FAV_KEY_LEN);
     }
   }
 
@@ -4627,6 +4661,38 @@ class RiftConstellationScreen : public RiftScreen {
   unsigned long _last_refresh;
   bool _refreshed_once;
 
+  // What has been typed to narrow the list. Sixteen characters, which is longer than
+  // any key prefix worth typing and past the point where a name fragment stops
+  // narrowing anything.
+  //
+  // Typing goes straight here with no mode to enter, because handleInput() returned
+  // false for every printable character and nothing else on this screen wants them.
+  // A mode would need a way in, a way out, and a way to show which one you are in,
+  // to arrive at the same place.
+  char _filter[17];
+  int _filter_len;
+
+  // The band and the heading summarise the mesh, so they are taken before the filter
+  // narrows the list - a histogram of the three nodes matching "osl" would answer a
+  // question nobody asked, and the screen's stated job is how big the mesh is and how
+  // spread out.
+  //
+  // They also moved out of render() to get here, which is worth more than it looks:
+  // this walk ran on every frame, and a frame holds the SPI bus away from the SX1262
+  // for 40.7ms. Now it runs with the three-second refresh that produced the data.
+  int _bucket[RIFT_HOPB_COUNT];
+  int _recent;
+  int _maxhop;
+  int _heard_total;      // valid entries before filtering; _count is after
+
+  // Favourites occupy the front of the list, and the ones that have not been heard
+  // since boot occupy [_inj_lo, _inj_hi) inside that. Held as a range rather than a
+  // flag on the row because AdvertPath is MyMesh's type and this is a fact about
+  // this screen's arrangement of it, not about the node.
+  int _fav_shown;
+  int _inj_lo;
+  int _inj_hi;
+
   static const int BUCKET_X[RIFT_HOPB_COUNT];
   static const char* BUCKET_LABEL[RIFT_HOPB_COUNT];
   // 58, not the 64 four columns could afford: five on a 63px pitch leaves 5px of
@@ -4724,16 +4790,107 @@ class RiftConstellationScreen : public RiftScreen {
 
   void refresh() {
     int n = the_mesh.getRecentlyHeard(_paths, RIFT_CONST_MAX);
+
+    // The summary is taken over everything heard, before the filter, because it
+    // describes the mesh rather than the query - see the fields. It has to happen
+    // here and not after the compaction below, which throws the non-matching entries
+    // away.
+    const uint32_t now_ms = (uint32_t) millis();
+    for (int b = 0; b < RIFT_HOPB_COUNT; b++) _bucket[b] = 0;
+    _recent = 0;
+    _maxhop = -1;
+    _heard_total = 0;
+    for (int i = 0; i < n; i++) {
+      if (!_paths[i].valid) continue;
+      _heard_total++;
+      _bucket[bucketOf(_paths[i].path_len)]++;
+      if ((now_ms - _paths[i].recv_millis) < 1800000u) _recent++;
+      if (_paths[i].path_len != RIFT_PATH_UNKNOWN) {
+        int h = (int) riftHopCount(_paths[i].path_len);
+        if (h > _maxhop) _maxhop = h;
+      }
+    }
+
     // Occupancy is the valid flag, not a timestamp or a name: recv_timestamp is
     // legitimately zero on a node whose RTC was never set, and inferring emptiness
     // from it hid every node this device had heard.
+    //
+    // The filter narrows the same pass. _filter is empty until something is typed and
+    // riftNodeMatches answers true for an empty query, so the unfiltered case walks
+    // the same code rather than a second copy of it.
     int live = 0;
     for (int i = 0; i < n; i++) {
       if (!_paths[i].valid) continue;
+      if (!riftNodeMatches(_paths[i].name, _paths[i].pubkey_prefix,
+                           sizeof(_paths[i].pubkey_prefix), _filter)) continue;
       if (live != i) _paths[live] = _paths[i];
       live++;
     }
     _count = live;
+
+    // ---- favourites to the front
+    //
+    // A stable partition and not a sort: getRecentlyHeard ordered this list by when
+    // each node was last heard, and that order is the screen's other answer. Rotating
+    // each favourite into place keeps the ones it passes in their own order, where
+    // swapping it with the entry at the write position would not.
+    {
+      RiftFavourites& fv = riftFavs();
+      int w = 0;
+      for (int i = 0; i < _count; i++) {
+        if (!fv.has(_paths[i].pubkey_prefix)) continue;
+        if (w != i) {
+          AdvertPath t = _paths[i];
+          memmove(&_paths[w + 1], &_paths[w], (size_t) (i - w) * sizeof(_paths[0]));
+          _paths[w] = t;
+        }
+        w++;
+      }
+      _fav_shown = w;
+    }
+
+    // ---- favourites that have not been heard since boot
+    //
+    // The cache is cleared at startup, so without this a favourite is missing exactly
+    // when it is most wanted: after a reflash, when nothing has been heard yet and
+    // the list is empty. The point of marking a node is that you can find it later,
+    // and "later" includes after a power cycle.
+    //
+    // They go after the heard favourites, because one you can reach is worth more
+    // than one you cannot, and they are drawn saying so rather than shown with an age
+    // computed from a recv_millis of zero.
+    _inj_lo = _fav_shown;
+    _inj_hi = _fav_shown;
+    {
+      RiftFavourites& fv = riftFavs();
+      for (int i = 0; i < fv.n && _count < RIFT_CONST_MAX; i++) {
+        bool present = false;
+        for (int j = 0; j < _count && !present; j++) {
+          if (memcmp(_paths[j].pubkey_prefix, fv.keys[i], RIFT_FAV_KEY_LEN) == 0) present = true;
+        }
+        if (present) continue;
+
+        // The name comes from the contact table, which is the thing that knows it and
+        // the thing that keeps knowing it across a reboot. A favourite for a key that
+        // is not a contact gets no name and is still listed: it is a key the user
+        // chose to keep, and hiding it would be deciding the choice was a mistake.
+        AdvertPath p;
+        memset(&p, 0, sizeof(p));
+        memcpy(p.pubkey_prefix, fv.keys[i], RIFT_FAV_KEY_LEN);
+        ContactInfo* c = the_mesh.lookupContactByPubKey(fv.keys[i], RIFT_FAV_KEY_LEN);
+        if (c != NULL) StrHelper::strncpy(p.name, c->name, sizeof(p.name));
+        p.path_len = RIFT_PATH_UNKNOWN;
+        p.valid = true;
+
+        if (!riftNodeMatches(p.name, p.pubkey_prefix, sizeof(p.pubkey_prefix), _filter)) continue;
+
+        memmove(&_paths[_inj_hi + 1], &_paths[_inj_hi],
+                (size_t) (_count - _inj_hi) * sizeof(_paths[0]));
+        _paths[_inj_hi] = p;
+        _inj_hi++;
+        _count++;
+      }
+    }
 
     // Re-find the selection by key. If it is gone the cursor stays where it is and
     // adopts what is there now, which is a visible change; silently carrying the
@@ -4796,6 +4953,18 @@ class RiftConstellationScreen : public RiftScreen {
 
   // Scrolled so the selected row *and* its two detail rows are drawn. A selection
   // that is not on screen does not exist for the user.
+  // A favourite, as a diamond. Five pixels like the freshness square beside it so
+  // the two read as one pair of marks, and a different shape so they cannot be
+  // confused: that one is an observation, this one is a choice.
+  void renderFavMark(DisplayDriver& display, int x, int y, uint16_t ink) {
+    display.setColor(ink);
+    display.fillRect(x + 2, y,     1, 1);
+    display.fillRect(x + 1, y + 1, 3, 1);
+    display.fillRect(x,     y + 2, 5, 1);
+    display.fillRect(x + 1, y + 3, 3, 1);
+    display.fillRect(x + 2, y + 4, 1, 1);
+  }
+
   void clampScroll() {
     const int TOP = 56, BOTTOM = 226;
     if (_scroll > _sel) _scroll = _sel;
@@ -4817,9 +4986,30 @@ class RiftConstellationScreen : public RiftScreen {
  public:
   RiftConstellationScreen(UITask* task)
      : _task(task), _count(0), _sel(0), _scroll(0), _have_sel(false),
-       _last_refresh(0), _refreshed_once(false) {
+       _last_refresh(0), _refreshed_once(false), _filter_len(0),
+       _recent(0), _maxhop(-1), _heard_total(0),
+       _fav_shown(0), _inj_lo(0), _inj_hi(0) {
     memset(_sel_key, 0, sizeof(_sel_key));
     for (int i = 0; i < RIFT_CONST_MAX; i++) _row_y[i] = -1;
+    _filter[0] = 0;
+    for (int b = 0; b < RIFT_HOPB_COUNT; b++) _bucket[b] = 0;
+  }
+
+  // Typing narrows the list as the characters go in, rather than at the next
+  // three-second refresh: a query that takes three seconds to do anything reads as
+  // one that did not work.
+  //
+  // The cursor goes to the first match. Carrying it onto whatever survived the filter
+  // was the other option and is worse - it would leave the cursor at a position in a
+  // list the user has just replaced, which is a position that no longer means
+  // anything.
+  void filterChanged() {
+    _have_sel = false;
+    _sel = 0;
+    _scroll = 0;
+    refresh();
+    _last_refresh = millis();
+    _refreshed_once = true;
   }
 
   int render(DisplayDriver& display) override {
@@ -4830,17 +5020,10 @@ class RiftConstellationScreen : public RiftScreen {
     }
     display.setTextSize(1);
 
+    // The band and the heading read _bucket, _recent and _maxhop, which refresh()
+    // computed over the unfiltered set three seconds ago at the latest. They used to
+    // be walked here, on every frame.
     char tmp[64];
-    int counts[RIFT_HOPB_COUNT];
-    for (int b = 0; b < RIFT_HOPB_COUNT; b++) counts[b] = 0;
-    int maxhop = -1;
-    for (int i = 0; i < _count; i++) {
-      counts[bucketOf(_paths[i].path_len)]++;
-      if (_paths[i].path_len != RIFT_PATH_UNKNOWN) {
-        int h = (int) riftHopCount(_paths[i].path_len);
-        if (h > maxhop) maxhop = h;
-      }
-    }
 
     // Geometry from design/redesign-2026-09/rift-nodes-spec.md: heading y 2,
     // bucket labels y 14, tracks y 24, counts y 30, column headings y 44, rows
@@ -4855,23 +5038,38 @@ class RiftConstellationScreen : public RiftScreen {
     // so on a mesh larger than it the count is not a claim about the mesh; when it
     // is at capacity the eviction count says so, because that is the number which
     // decides whether the cache is too small.
-    int recent = 0;
-    for (int i = 0; i < _count; i++) {
-      if (((uint32_t) millis() - _paths[i].recv_millis) < 1800000u) recent++;
-    }
     int cache_used = the_mesh.getPathCacheUsed(), cache_size = the_mesh.getPathCacheSize();
-    if (cache_used >= cache_size && the_mesh.getPathEvictions() > 0) {
-      snprintf(tmp, sizeof(tmp), "%d RECENT %s %d NODES %s %u EVICT", recent, RIFT_DOT, _count,
+    if (_filter_len > 0) {
+      // While a query is up it takes the heading, because it is the thing that
+      // decides what the list below contains and a filter you cannot see is a list
+      // that is lying. The trailing bar is the same caret the conversation list uses
+      // for a draft: this is a field being typed into, not a label.
+      //
+      // "3/42" and not "3 NODES", so the count that vanished is still on screen -
+      // a query matching nothing reads as 0/42 rather than as an empty mesh.
+      snprintf(tmp, sizeof(tmp), "FIND %s_ %s %d/%d", _filter, RIFT_DOT,
+               _count, _heard_total);
+      display.setColor(rift_pal.accent);
+      display.drawTextLeftAlign(2, 2, tmp);
+      display.setColor(rift_pal.mid);
+    } else if (cache_used >= cache_size && the_mesh.getPathEvictions() > 0) {
+      snprintf(tmp, sizeof(tmp), "%d RECENT %s %d NODES %s %u EVICT", _recent, RIFT_DOT, _count,
                RIFT_DOT, (unsigned) the_mesh.getPathEvictions());
+      display.drawTextLeftAlign(2, 2, tmp);
     } else if (_count == 0) {
       StrHelper::strncpy(tmp, "0 NODES", sizeof(tmp));
+      display.drawTextLeftAlign(2, 2, tmp);
     } else {
-      snprintf(tmp, sizeof(tmp), "%d RECENT %s %d NODES", recent, RIFT_DOT, _count);
+      snprintf(tmp, sizeof(tmp), "%d RECENT %s %d NODES", _recent, RIFT_DOT, _count);
+      display.drawTextLeftAlign(2, 2, tmp);
     }
-    display.drawTextLeftAlign(2, 2, tmp);
-    if (maxhop >= 0) {
-      snprintf(tmp, sizeof(tmp), "MAX %d HOPS", maxhop);
+    if (_maxhop >= 0 && _filter_len == 0) {
+      snprintf(tmp, sizeof(tmp), "MAX %d HOPS", _maxhop);
       display.drawTextRightAlign(314, 2, tmp);
+    } else if (_filter_len > 0) {
+      // The way out, said where the query is, because ESC is not a key anyone
+      // guesses at on a screen that has never taken text before.
+      display.drawTextRightAlign(314, 2, "ESC: clear");
     }
 
     // ---- bucket band. The bars compare the five with each other, not against an
@@ -4879,20 +5077,20 @@ class RiftConstellationScreen : public RiftScreen {
     // The track is always drawn, so an empty bucket is a shape rather than an
     // absence.
     int maxc = 0;
-    for (int b = 0; b < RIFT_HOPB_COUNT; b++) if (counts[b] > maxc) maxc = counts[b];
+    for (int b = 0; b < RIFT_HOPB_COUNT; b++) if (_bucket[b] > maxc) maxc = _bucket[b];
     for (int b = 0; b < RIFT_HOPB_COUNT; b++) {
       display.setColor(rift_pal.mid);
       display.drawTextLeftAlign(BUCKET_X[b], 14, BUCKET_LABEL[b]);
       display.setColor(rift_pal.rule);
       display.drawRect(BUCKET_X[b], 24, BUCKET_BAR_W, 4);
-      if (counts[b] > 0 && maxc > 0) {
-        int w = (counts[b] * BUCKET_BAR_W + maxc / 2) / maxc;
+      if (_bucket[b] > 0 && maxc > 0) {
+        int w = (_bucket[b] * BUCKET_BAR_W + maxc / 2) / maxc;
         if (w < 2) w = 2;
         display.setColor(rift_pal.fg);
         display.fillRect(BUCKET_X[b], 24, w, 4);
       }
       display.setColor(rift_pal.fg);
-      snprintf(tmp, sizeof(tmp), "%d", counts[b]);
+      snprintf(tmp, sizeof(tmp), "%d", _bucket[b]);
       display.drawTextLeftAlign(BUCKET_X[b], 30, tmp);
     }
 
@@ -4906,11 +5104,22 @@ class RiftConstellationScreen : public RiftScreen {
 
     if (_count == 0) {
       display.setColor(rift_pal.mid);
-      // "since boot" is part of the claim: this cache is cleared at startup, so an
-      // empty list after a restart is the normal state and not a fault. The second
-      // line says what to do about it.
-      display.drawTextLeftAlign(2, 56, "NO NODES HEARD SINCE BOOT");
-      display.drawTextLeftAlign(2, 68, "ADVERT NEAR on RIFT asks neighbours");
+      if (_filter_len > 0) {
+        // A different emptiness, and telling the user the mesh is silent when it is
+        // not would send them to send an advert over a spelling mistake. The nodes
+        // are there; the query is what nothing matched.
+        snprintf(tmp, sizeof(tmp), "NOTHING MATCHES \"%s\"", _filter);
+        display.drawTextLeftAlign(2, 56, tmp);
+        snprintf(tmp, sizeof(tmp), "%d node%s heard %s BACKSPACE or ESC",
+                 _heard_total, _heard_total == 1 ? "" : "s", RIFT_DOT);
+        display.drawTextLeftAlign(2, 68, tmp);
+      } else {
+        // "since boot" is part of the claim: this cache is cleared at startup, so an
+        // empty list after a restart is the normal state and not a fault. The second
+        // line says what to do about it.
+        display.drawTextLeftAlign(2, 56, "NO NODES HEARD SINCE BOOT");
+        display.drawTextLeftAlign(2, 68, "ADVERT NEAR on RIFT asks neighbours");
+      }
       renderNavBar(display, RIFT_NAV_NODES);
       return 1000;
     }
@@ -4937,17 +5146,32 @@ class RiftConstellationScreen : public RiftScreen {
       }
       uint16_t ink = sel ? rift_pal.on_accent : rift_pal.fg;
 
+      // Whether this row is a favourite the mesh has not mentioned since boot. The
+      // row is drawn from a contact record rather than an observation, so anything
+      // that would describe an observation has to say it has none.
+      const bool not_heard = (i >= _inj_lo && i < _inj_hi);
+
       // Freshness is shape, not brightness: four grey levels collapse into each
-      // other in sunlight, a filled versus hollow square does not.
+      // other in sunlight, a filled versus hollow square does not. A node never
+      // heard gets no square at all - the hollow one means "heard, a while ago", and
+      // drawing it here would claim an observation that never happened.
       display.setColor(ink);
-      uint32_t age_s = ((uint32_t) millis() - p->recv_millis) / 1000u;
-      if (age_s < 1800u) display.fillRect(2, y + 1, 5, 5);
-      else               display.drawRect(2, y + 1, 5, 5);
+      if (!not_heard) {
+        uint32_t age_s = ((uint32_t) millis() - p->recv_millis) / 1000u;
+        if (age_s < 1800u) display.fillRect(2, y + 1, 5, 5);
+        else               display.drawRect(2, y + 1, 5, 5);
+      }
 
       char shown_name[24];
       riftTranslateUTF8(shown_name, p->name, sizeof(shown_name));
       display.setColor(ink);
-      display.drawTextEllipsized(10, y, 120, shown_name);
+      // 114 rather than 120, which is the one cell the favourite mark costs. Paid
+      // from every long name to say something about a few rows, which is the trade
+      // this file argues against elsewhere - taken here because a favourite that
+      // cannot be picked out of the list is not a favourite, and the gap between the
+      // name column and the reach scale is four pixels and cannot hold a mark.
+      display.drawTextEllipsized(10, y, 114, shown_name);
+      if (riftFavs().has(p->pubkey_prefix)) renderFavMark(display, 126, y + 1, ink);
 
       // Saturating at the last cell rather than clamping the printed value: the
       // digit still says 21 where the bar has run out of room to.
@@ -4963,8 +5187,16 @@ class RiftConstellationScreen : public RiftScreen {
       }
       display.drawTextRightAlign(284, y, tmp);
 
-      ageText(p->recv_millis, tmp, sizeof(tmp));
-      display.setColor(ink);
+      if (not_heard) {
+        // An age computed from a recv_millis of zero would read as however long the
+        // device has been up, which is a measurement of the wrong thing stated with
+        // the confidence of the right one.
+        StrHelper::strncpy(tmp, "-", sizeof(tmp));
+        display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
+      } else {
+        ageText(p->recv_millis, tmp, sizeof(tmp));
+        display.setColor(ink);
+      }
       display.drawTextRightAlign(314, y, tmp);
 
       if (sel) {
@@ -5008,7 +5240,16 @@ class RiftConstellationScreen : public RiftScreen {
           else if (contact->type == RIFT_ADV_SENSOR)        action = "ENTER: read";
           else                                              action = "no action for this type";
         }
-        display.drawTextLeftAlign(10, y + 24, action);
+        // The favourite key goes on the same line, for the reason the line above it
+        // gives: repeater control shipped without a hint and was invisible. '*' is
+        // worse than that was - it is a key nobody would try on a screen that until
+        // now sent every character to the filter, so the hint is the whole of its
+        // discoverability. It says which way it will go, because a toggle whose label
+        // does not is a coin flip.
+        char act[48];
+        snprintf(act, sizeof(act), "%s %s %s", action, RIFT_DOT,
+                 riftFavs().has(p->pubkey_prefix) ? "*: unfav" : "*: fav");
+        display.drawTextLeftAlign(10, y + 24, act);
 
         // Type and the absolute time it was heard, when the clock can say. The
         // spec's "RIGHT: control" is not offered: left and right are the screen
@@ -5099,6 +5340,55 @@ class RiftConstellationScreen : public RiftScreen {
         return true;
       }
       _task->startDirectMessage(key);
+      return true;
+    }
+
+    // '*' marks the selected node, and is taken out of the query rather than given a
+    // key of its own. No node name holds one and no hex key can contain one, so it
+    // costs the search nothing - and it is the shape of the mark it sets.
+    if (c == '*') {
+      if (_count == 0 || _sel < 0 || _sel >= _count) return true;
+      RiftFavourites& fv = riftFavs();
+      const uint8_t* key = _paths[_sel].pubkey_prefix;
+      if (!fv.has(key) && fv.full()) {
+        // Said rather than swallowed: a mark that does not appear reads as a broken
+        // key, and the limit is the one thing that explains it.
+        _task->showAlert("16 favourites is the limit", 1600);
+        return true;
+      }
+      const bool now_fav = fv.toggle(key);
+      riftSaveSettings();
+      riftLogf("NODES fav %02X%02X: %s", key[0], key[1], now_fav ? "on" : "off");
+      // Rebuilt rather than redrawn: the node has just changed which group it sorts
+      // into. refresh() re-finds the selection by key, so the cursor follows it to
+      // the top instead of staying on whatever row the number used to mean.
+      refresh();
+      _last_refresh = millis();
+      return true;
+    }
+
+    // ---- the filter
+    //
+    // Both of these fall through when there is no query, so backspace and ESC keep
+    // whatever they meant on this screen before and only take over while something
+    // has been typed.
+    if (c == RIFT_KEY_BACK && _filter_len > 0) {
+      _filter[--_filter_len] = 0;
+      filterChanged();
+      return true;
+    }
+    if (c == KEY_CANCEL && _filter_len > 0) {
+      _filter[0] = 0;
+      _filter_len = 0;
+      filterChanged();
+      return true;
+    }
+    // Typing is the way in. There is no mode to enter because there was nothing to
+    // displace: every printable character reached this line and was dropped.
+    if (c >= 32 && c < 127 && _filter_len < (int) sizeof(_filter) - 1) {
+      _filter[_filter_len++] = c;
+      _filter[_filter_len] = 0;
+      filterChanged();
       return true;
     }
     return false;

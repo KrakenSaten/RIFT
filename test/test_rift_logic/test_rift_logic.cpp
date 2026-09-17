@@ -1956,6 +1956,141 @@ TEST(ConvKey, NullPeerIsUnknownRatherThanAZeroDm) {
     EXPECT_EQ(RIFT_CONV_UNKNOWN, k.kind);
 }
 
+// A key whose hex spells something a person might also type as a name fragment.
+static const uint8_t NODE_KEY[7] = { 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A };
+
+TEST(NodeMatches, AnEmptyQueryMatchesEverything) {
+    EXPECT_TRUE(riftNodeMatches("anything", NODE_KEY, 7, ""));
+    EXPECT_TRUE(riftNodeMatches("anything", NODE_KEY, 7, NULL));
+}
+
+TEST(NodeMatches, TheNameMatchesAnywhereAndInAnyCase) {
+    EXPECT_TRUE(riftNodeMatches("SE FCC portabel", NODE_KEY, 7, "fcc"));
+    EXPECT_TRUE(riftNodeMatches("SE FCC portabel", NODE_KEY, 7, "FCC"));
+    EXPECT_TRUE(riftNodeMatches("SE FCC portabel", NODE_KEY, 7, "porta"));
+    EXPECT_TRUE(riftNodeMatches("SE FCC portabel", NODE_KEY, 7, "l"));
+    EXPECT_FALSE(riftNodeMatches("SE FCC portabel", NODE_KEY, 7, "zz"));
+}
+
+TEST(NodeMatches, TheKeyMatchesFromItsFront) {
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "be"));
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "BE"));
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "beef"));
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "beef12"));
+    // A single nibble is half a byte and still a usable narrowing.
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "b"));
+    EXPECT_FALSE(riftNodeMatches("", NODE_KEY, 7, "ef"))
+        << "the middle of a key is a coincidence, not a recognition";
+    EXPECT_FALSE(riftNodeMatches("", NODE_KEY, 7, "bf"));
+}
+
+TEST(NodeMatches, AQueryLongerThanTheKeyCannotMatchIt) {
+    // 7 bytes is 14 hex digits; 16 asks for more key than there is.
+    EXPECT_FALSE(riftNodeMatches("", NODE_KEY, 7, "beef123456789abcde"));
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "beef123456789a"));
+}
+
+TEST(NodeMatches, AHexQueryIsTriedAgainstBoth) {
+    // "bee" is both the front of this key and inside this name, and either one
+    // finding it is the right answer.
+    EXPECT_TRUE(riftNodeMatches("the beech tree", NODE_KEY, 7, "bee"));
+    EXPECT_TRUE(riftNodeMatches("no match here", NODE_KEY, 7, "bee"));
+    EXPECT_TRUE(riftNodeMatches("the beech tree", (const uint8_t*) "\x00\x00", 2, "bee"));
+}
+
+TEST(NodeMatches, ANonHexQueryIsNeverTriedAgainstTheKey) {
+    EXPECT_FALSE(riftIsHexQuery("beeg"));
+    EXPECT_FALSE(riftIsHexQuery("be ef"));
+    EXPECT_FALSE(riftIsHexQuery(""));
+    EXPECT_TRUE(riftIsHexQuery("BEEF"));
+    EXPECT_FALSE(riftNodeMatches("zzz", NODE_KEY, 7, "beeg"));
+}
+
+TEST(NodeMatches, DegenerateInputs) {
+    EXPECT_TRUE(riftNodeMatches(NULL, NODE_KEY, 7, "be")) << "a nameless node is still findable by key";
+    EXPECT_FALSE(riftNodeMatches(NULL, NODE_KEY, 7, "zz"));
+    EXPECT_FALSE(riftNodeMatches("name", NULL, 0, "zz"));
+    EXPECT_TRUE(riftNodeMatches("name", NULL, 0, "nam"));
+    EXPECT_FALSE(riftKeyHexStartsWith(NODE_KEY, 0, "be")) << "no key bytes, nothing to match";
+}
+
+static void favkey(uint8_t* out, uint8_t tail) {
+    for (int i = 0; i < RIFT_FAV_KEY_LEN; i++) out[i] = 0x40;
+    out[RIFT_FAV_KEY_LEN - 1] = tail;   // differ in the last byte, like real prefixes can
+}
+
+TEST(Favourites, AddsFindsAndRemoves) {
+    RiftFavourites f;
+    uint8_t a[RIFT_FAV_KEY_LEN], b[RIFT_FAV_KEY_LEN];
+    favkey(a, 1); favkey(b, 2);
+
+    EXPECT_FALSE(f.has(a));
+    EXPECT_TRUE(f.add(a));
+    EXPECT_TRUE(f.has(a));
+    EXPECT_FALSE(f.has(b)) << "keys differing in the last byte are different nodes";
+
+    EXPECT_TRUE(f.remove(a));
+    EXPECT_FALSE(f.has(a));
+    EXPECT_FALSE(f.remove(a)) << "removing what is not there is not a removal";
+}
+
+TEST(Favourites, AddingTwiceIsStillOneEntry) {
+    RiftFavourites f;
+    uint8_t a[RIFT_FAV_KEY_LEN];
+    favkey(a, 1);
+    EXPECT_TRUE(f.add(a));
+    EXPECT_TRUE(f.add(a)) << "already a favourite is success, not failure";
+    EXPECT_EQ(1, f.n);
+}
+
+TEST(Favourites, TogglingReportsTheNewState) {
+    RiftFavourites f;
+    uint8_t a[RIFT_FAV_KEY_LEN];
+    favkey(a, 7);
+    EXPECT_TRUE(f.toggle(a));
+    EXPECT_TRUE(f.has(a));
+    EXPECT_FALSE(f.toggle(a));
+    EXPECT_FALSE(f.has(a));
+}
+
+TEST(Favourites, AFullListRefusesRatherThanDroppingOne) {
+    RiftFavourites f;
+    uint8_t k[RIFT_FAV_KEY_LEN];
+    for (int i = 0; i < RIFT_FAV_MAX; i++) { favkey(k, (uint8_t) i); EXPECT_TRUE(f.add(k)); }
+    EXPECT_TRUE(f.full());
+
+    favkey(k, 200);
+    EXPECT_FALSE(f.add(k)) << "the caller has to be told, so it can say so";
+    EXPECT_FALSE(f.has(k));
+    EXPECT_EQ(RIFT_FAV_MAX, f.n);
+
+    // And the ones already held are all still there.
+    for (int i = 0; i < RIFT_FAV_MAX; i++) { favkey(k, (uint8_t) i); EXPECT_TRUE(f.has(k)); }
+}
+
+TEST(Favourites, RemovingFromTheMiddleKeepsTheRest) {
+    RiftFavourites f;
+    uint8_t k[RIFT_FAV_KEY_LEN];
+    for (int i = 0; i < 5; i++) { favkey(k, (uint8_t) i); f.add(k); }
+    favkey(k, 2);
+    EXPECT_TRUE(f.remove(k));
+    EXPECT_EQ(4, f.n);
+    EXPECT_FALSE(f.has(k));
+    for (int i = 0; i < 5; i++) {
+        if (i == 2) continue;
+        favkey(k, (uint8_t) i);
+        EXPECT_TRUE(f.has(k)) << "removing one must not lose another, i=" << i;
+    }
+}
+
+TEST(Favourites, DegenerateInputs) {
+    RiftFavourites f;
+    EXPECT_FALSE(f.add(NULL));
+    EXPECT_FALSE(f.has(NULL));
+    EXPECT_FALSE(f.remove(NULL));
+    EXPECT_EQ(0, f.n);
+}
+
 TEST(Drafts, EachConversationKeepsItsOwn) {
     RiftDrafts d;
     d.put(ch(0), "to the channel");
