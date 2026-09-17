@@ -1956,6 +1956,116 @@ TEST(ConvKey, NullPeerIsUnknownRatherThanAZeroDm) {
     EXPECT_EQ(RIFT_CONV_UNKNOWN, k.kind);
 }
 
+TEST(Drafts, EachConversationKeepsItsOwn) {
+    RiftDrafts d;
+    d.put(ch(0), "to the channel");
+    d.put(riftConvDM(PEER_A), "to A");
+    d.put(riftConvDM(PEER_B), "to B");
+
+    EXPECT_STREQ("to the channel", d.get(ch(0)));
+    EXPECT_STREQ("to A", d.get(riftConvDM(PEER_A)));
+    EXPECT_STREQ("to B", d.get(riftConvDM(PEER_B)));
+    // The bug this replaces: PEER_B differs from PEER_A in the last byte only, and a
+    // line meant for one must not come back in the other.
+    EXPECT_STRNE(d.get(riftConvDM(PEER_A)), d.get(riftConvDM(PEER_B)));
+}
+
+TEST(Drafts, NoDraftReadsAsNullRatherThanEmpty) {
+    RiftDrafts d;
+    EXPECT_EQ(NULL, d.get(ch(0)));
+    EXPECT_FALSE(d.has(ch(0)));
+    d.put(ch(0), "something");
+    EXPECT_TRUE(d.has(ch(0)));
+}
+
+TEST(Drafts, StoringEmptyRemovesTheRowRatherThanKeepingABlankOne) {
+    RiftDrafts d;
+    d.put(ch(0), "typed then deleted");
+    EXPECT_EQ(1, d.n);
+    d.put(ch(0), "");
+    EXPECT_EQ(0, d.n) << "an empty draft is the absence of one";
+    EXPECT_FALSE(d.has(ch(0)));
+
+    // And an empty one for a conversation that never had a draft adds nothing.
+    d.put(riftConvDM(PEER_A), "");
+    EXPECT_EQ(0, d.n);
+    d.put(riftConvDM(PEER_A), NULL);
+    EXPECT_EQ(0, d.n);
+}
+
+TEST(Drafts, OverwritingKeepsOneRow) {
+    RiftDrafts d;
+    d.put(ch(0), "first");
+    d.put(ch(0), "second");
+    EXPECT_EQ(1, d.n);
+    EXPECT_STREQ("second", d.get(ch(0)));
+}
+
+TEST(Drafts, SendingClearsOnlyThatConversation) {
+    RiftDrafts d;
+    d.put(ch(0), "channel text");
+    d.put(riftConvDM(PEER_A), "dm text");
+    d.clear(ch(0));
+    EXPECT_FALSE(d.has(ch(0)));
+    EXPECT_STREQ("dm text", d.get(riftConvDM(PEER_A)));
+}
+
+TEST(Drafts, AnUnknownConversationIsRefused) {
+    RiftDrafts d;
+    d.put(riftConvUnknown(), "nowhere to come back to");
+    EXPECT_EQ(0, d.n);
+}
+
+TEST(Drafts, TheLeastRecentlyTouchedIsTheOneDropped) {
+    RiftDrafts d;
+    uint8_t peer[6] = { 9, 9, 9, 9, 9, 0 };
+
+    // Fill every slot, oldest first.
+    for (int i = 0; i < RIFT_DRAFT_MAX; i++) {
+        peer[5] = (uint8_t) i;
+        d.put(riftConvDM(peer), "held");
+    }
+    EXPECT_EQ(RIFT_DRAFT_MAX, d.n);
+
+    // Come back to the oldest, which makes it the newest.
+    peer[5] = 0;
+    RiftConvKey revisited = riftConvDM(peer);
+    d.put(revisited, "touched again");
+
+    // One more conversation than there are slots: slot 1 is now the stalest.
+    peer[5] = 200;
+    d.put(riftConvDM(peer), "the newcomer");
+
+    EXPECT_EQ(RIFT_DRAFT_MAX, d.n);
+    EXPECT_STREQ("touched again", d.get(revisited)) << "revisiting must save a draft";
+    peer[5] = 1;
+    EXPECT_EQ(NULL, d.get(riftConvDM(peer))) << "the stalest is the one that goes";
+    peer[5] = 200;
+    EXPECT_STREQ("the newcomer", d.get(riftConvDM(peer)));
+}
+
+TEST(Drafts, RemovingFromTheMiddleLosesNothingElse) {
+    RiftDrafts d;
+    d.put(ch(0), "zero");
+    d.put(ch(1), "one");
+    d.put(ch(2), "two");
+    d.clear(ch(1));
+    EXPECT_EQ(2, d.n);
+    EXPECT_STREQ("zero", d.get(ch(0)));
+    EXPECT_STREQ("two", d.get(ch(2)));
+    EXPECT_FALSE(d.has(ch(1)));
+}
+
+TEST(Drafts, AFullLengthDraftSurvivesIntact) {
+    RiftDrafts d;
+    char longest[RIFT_DRAFT_LEN + 1];
+    memset(longest, 'x', RIFT_DRAFT_LEN);
+    longest[RIFT_DRAFT_LEN] = 0;
+    d.put(ch(0), longest);
+    EXPECT_STREQ(longest, d.get(ch(0)));
+    EXPECT_EQ((size_t) RIFT_DRAFT_LEN, strlen(d.get(ch(0))));
+}
+
 TEST(LargestConv, PicksTheBusiestConversation) {
     RiftConvKey keys[6] = {
         ch(0), ch(0), ch(0),

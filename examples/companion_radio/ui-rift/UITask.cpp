@@ -22,6 +22,11 @@ static_assert(RIFT_ADV_REPEATER == ADV_TYPE_REPEATER, "advert type drift");
 static_assert(RIFT_ADV_ROOM == ADV_TYPE_ROOM, "advert type drift");
 static_assert(RIFT_ADV_SENSOR == ADV_TYPE_SENSOR, "advert type drift");
 
+// Same reason: a draft holds a whole compose line, so the store's row must be the
+// line's length. Were MAX_TEXT_LEN to grow, a draft would come back with its tail
+// cut off and nothing would say why.
+static_assert(RIFT_DRAFT_LEN == MAX_TEXT_LEN, "draft row no longer holds a full line");
+
 
 #ifdef RIFT_RADAR
   #include <WiFi.h>
@@ -6655,6 +6660,14 @@ class RiftCommsScreen : public RiftScreen, ContactVisitor {
   UITask* _task;
   char _input[MAX_TEXT_LEN + 1];
   int _len;
+
+  // The compose line, for every conversation that is not the one on screen. See
+  // RiftDrafts: a half-written line belongs to the conversation it was typed in, and
+  // used to belong to whichever one happened to be showing when Enter was pressed.
+  //
+  // A member rather than a file static, so it is on the heap with the rest of this
+  // screen and shows in FREE HEAP instead of the build's RAM figure.
+  RiftDrafts _drafts;
   // Pixels of older content scrolled into view, not messages skipped. Counting
   // messages meant one whole block moved per step whatever its height, which is
   // the jerk: a one-line reply and a six-line one moved the view by wildly
@@ -6676,10 +6689,12 @@ public:
   // the caller checks that first rather than leaving the user typing into a
   // message that can never leave.
   void setDirectTarget(const uint8_t* key6) {
+    stashDraft();                 // before the target moves; see stashDraft()
     _target_is_channel = false;
     memcpy(_target_key, key6, 6);
     _picking = false;
     _scroll = 0;   // a different conversation: land on its newest, not at some offset
+    loadDraft();
 
     // The name was never set here, only by the conversation list - so arriving from
     // NODES showed the heading of whoever was picked last, or a blank one on a fresh
@@ -6749,6 +6764,10 @@ private:
     // and ROOM reach this list at all, because riftCanDirectMessage refuses the
     // rest, so this is the one distinction the column has to carry.
     bool is_room;
+    // Something typed here and not sent. Worth a mark of its own rather than being
+    // folded into unread, because the two say opposite things: unread is what someone
+    // else is waiting for you to read, a draft is what you left unfinished.
+    bool has_draft;
     // 0 for a conversation; 1 and 2 are the two channel actions, drawn as rows at
     // the end of the CHANNELS section because that is where the channels are.
     uint8_t action;
@@ -7142,6 +7161,7 @@ private:
                                            : riftConvDM(_picks[i].key);
       _picks[i].last_ts = newestIn(k, _picks[i].name);
       _picks[i].unread = msg_unread.count(k);
+      _picks[i].has_draft = _drafts.has(k);
       _picks[i].is_room = false;
       if (!_picks[i].is_channel) {
         ContactInfo* c = the_mesh.lookupContactByPubKey(_picks[i].key, 6);
@@ -7301,7 +7321,36 @@ private:
     clearInput();
   }
 
+  // The compose line belongs to the conversation it was typed in, so changing target
+  // is two steps rather than one: what is on the line goes back to the conversation
+  // being left, and whatever the one being entered had comes forward.
+  //
+  // stash() reads currentConv(), so it has to run before _target_* moves and load()
+  // after. Both are called at all three places a target changes - the conversation
+  // list, a channel tab, and NODES offering ENTER: DM - because a draft that survived
+  // two of the three would be worse than one that survived none: it would look like a
+  // rule until the day it quietly was not.
+  void stashDraft() { _drafts.put(currentConv(), _input); }
+
+  void loadDraft() {
+    const char* s = _drafts.get(currentConv());
+    if (s == NULL) {
+      _input[0] = 0;
+      _len = 0;
+    } else {
+      StrHelper::strncpy(_input, s, sizeof(_input));
+      _len = (int) strlen(_input);
+    }
+    // A restored draft is not a keypress, so the double-tap window must not think the
+    // last character of it was just typed.
+    _last_key = 0;
+    _last_key_ms = 0;
+  }
+
   void clearInput() {
+    // A sent draft is a finished one. Cleared here rather than at the two send sites,
+    // so a third one cannot forget.
+    _drafts.clear(currentConv());
     _input[0] = 0;
     _len = 0;
     _scroll = 0;
@@ -7367,6 +7416,18 @@ private:
     // reserved for active tab, selection, warning and the wordmark.
     display.setColor(on_fill ? rift_pal.on_accent : rift_pal.fg);
     display.fillRect(x, y, 3, 3);
+  }
+
+  // A draft is a caret, not a dot, and dimmer than one.
+  //
+  // Two shapes because they are two facts, and a row can carry both: the unread dot
+  // is square and in fg because someone else is waiting on it, and this is the text
+  // cursor you walked away from, so it has a cursor's shape and sits in mid. One mark
+  // meaning "something about this row" would have been smaller and would have needed
+  // opening the row to find out which.
+  void renderDraftMark(DisplayDriver& display, int x, int y, bool on_fill = false) {
+    display.setColor(on_fill ? rift_pal.on_accent : rift_pal.mid);
+    display.fillRect(x, y, 2, 7);
   }
 
   int renderPicker(DisplayDriver& display) {
@@ -7468,6 +7529,12 @@ private:
       // right-aligned at 316, so it begins at 262 in the worst case.
       display.drawTextEllipsized(11, y, 240, filtered);
 
+      // In the slack between where the name can reach (251) and where the type column
+      // starts (258). Free space that was already there, so marking a few rows costs
+      // no cell from every name - which is the trade the selection bar was introduced
+      // to stop making.
+      if (_picks[i].has_draft) renderDraftMark(display, 252, y + 1, sel);
+
       // The right slot: what kind of thing this is, and how long ago it spoke.
       //
       // Relative, not a clock. "05:47" asks the reader to know what time it is now
@@ -7548,6 +7615,7 @@ private:
       else                                       _task->startChannelMute();
       return;
     }
+    stashDraft();                 // before the target moves; see stashDraft()
     _target_is_channel = e->is_channel;
     if (e->is_channel) {
       _target_channel_idx = e->channel_idx;
@@ -7558,6 +7626,7 @@ private:
     StrHelper::strncpy(_target_name, e->name, sizeof(_target_name));
     _picking = false;
     _scroll = 0;   // a different conversation: land on its newest
+    loadDraft();
   }
 
   // keep the selected row inside the visible window
@@ -8065,11 +8134,15 @@ public:
     }
     if (i < 0 || i >= _tab_count) return false;
 
+    // A tab tap is the switch the drafts were written for: it is one press, it moves
+    // the recipient, and nothing about the line being carried across said so.
+    stashDraft();
     _target_is_channel = true;
     _target_channel_idx = _tabs[i].idx;
     StrHelper::strncpy(_target_name, _tabs[i].name, sizeof(_target_name));
     _scroll = 0;   // a different conversation: land on its newest
     _tab_snap = true;
+    loadDraft();
     return true;
   }
 

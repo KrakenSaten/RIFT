@@ -1752,6 +1752,112 @@ struct RiftUnread {
   }
 };
 
+// Drafts, per conversation.
+//
+// COMMS has one compose line, and switching target used to leave whatever was typed
+// sitting in it. That made a half-written line movable between conversations, which
+// is occasionally what someone wants and always ambiguous: the text belonged to no
+// conversation, so a reply meant for one person could be sent to another by a tab
+// press and an Enter, with nothing on screen having changed to say so.
+//
+// A draft belongs to the conversation it was typed in. Leaving stores it, returning
+// restores it, sending clears it.
+//
+// Session-only, like the unread table above and for the same reason: persisting
+// would mean a file and a format, and unsent text that survives a power cut is worth
+// less than unsent text that is correct while the device is on.
+//
+// Eight, because that is past what anyone has in flight at once, and the cost is
+// paid whether the rows are used or not - about 1.4KB. It lives on the heap rather
+// than in .bss, because RiftCommsScreen is allocated with new, so FREE HEAP on
+// SYSTEM is where it shows and the build's RAM figure does not move.
+#define RIFT_DRAFT_MAX 8
+
+// Mirrors MAX_TEXT_LEN from BaseChatMesh.h so this header stays free of MeshCore and
+// can be tested natively; UITask.cpp static_asserts that they still agree.
+#define RIFT_DRAFT_LEN 160
+
+struct RiftDrafts {
+  RiftConvKey keys[RIFT_DRAFT_MAX];
+  char text[RIFT_DRAFT_MAX][RIFT_DRAFT_LEN + 1];
+
+  // Eviction is least-recently-touched, matching RiftUnread - the conversation not
+  // returned to in the longest is the one that loses its draft. Ordered by a counter
+  // rather than by position in the array, which is where this parts company with the
+  // unread table: that one moves its rows to keep them in order, and a row here is
+  // 161 bytes rather than one. A counter costs four bytes a row and moves nothing.
+  //
+  // A sequence and not millis(), so this header stays pure and the rule stays
+  // testable without a clock. It wraps after four billion target switches, which is
+  // not a number anyone reaches by hand.
+  uint32_t touched[RIFT_DRAFT_MAX];
+  uint32_t seq = 0;
+  int n = 0;
+
+  // Position is not meaning here, so a hole is filled from the end rather than by
+  // shifting everything down.
+  void removeAt(int i) {
+    if (i < 0 || i >= n) return;
+    if (i != n - 1) {
+      keys[i] = keys[n - 1];
+      memcpy(text[i], text[n - 1], RIFT_DRAFT_LEN + 1);
+      touched[i] = touched[n - 1];
+    }
+    n--;
+  }
+
+  int oldest() const {
+    int o = 0;
+    for (int i = 1; i < n; i++) if (touched[i] < touched[o]) o = i;
+    return o;
+  }
+
+  void store(int i, const RiftConvKey& k, const char* s) {
+    keys[i] = k;
+    size_t len = strlen(s);
+    // The caller's buffer is MAX_TEXT_LEN, which is this, so the clamp never fires
+    // in RIFT. It is here so that a future caller with a longer buffer loses the
+    // tail rather than the bytes after the array.
+    if (len > RIFT_DRAFT_LEN) len = RIFT_DRAFT_LEN;
+    memcpy(text[i], s, len);
+    text[i][len] = 0;
+    touched[i] = ++seq;
+  }
+
+  // An empty draft is the absence of one, not a row holding nothing: storing "" for
+  // a conversation removes its entry, so the conversation list stops marking it and
+  // the slot goes back to a conversation that has text in it.
+  void put(const RiftConvKey& k, const char* s) {
+    if (k.kind == RIFT_CONV_UNKNOWN) return;   // nothing to come back to
+    const bool empty = (s == NULL || s[0] == 0);
+
+    for (int i = 0; i < n; i++) {
+      if (!riftConvSame(keys[i], k)) continue;
+      if (empty) removeAt(i); else store(i, k, s);
+      return;
+    }
+    if (empty) return;
+
+    if (n >= RIFT_DRAFT_MAX) removeAt(oldest());
+    store(n, k, s);
+    n++;
+  }
+
+  // NULL when there is none, which the caller reads as "leave the line empty".
+  const char* get(const RiftConvKey& k) const {
+    for (int i = 0; i < n; i++) if (riftConvSame(keys[i], k)) return text[i];
+    return NULL;
+  }
+
+  bool has(const RiftConvKey& k) const { return get(k) != NULL; }
+
+  void clear(const RiftConvKey& k) {
+    for (int i = 0; i < n; i++) {
+      if (riftConvSame(keys[i], k)) { removeAt(i); return; }
+    }
+  }
+};
+
 // An entry with an unknown conversation goes before anything with a known one.
 //
 // Unknown is what a record restored from a pre-v3 log becomes: history that cannot
