@@ -3377,13 +3377,19 @@ public:
     // enough; then open / write / close, so a slow one can be attributed rather
     // than guessed.
     //
-    // Measured on the device across five saves of the full 48 entries: 303-305ms
-    // in the steady state, of which 285-288ms is the open and 1-2ms is the write.
-    // That settles what this row used to leave open - breaking the write into
-    // pieces would buy nothing, because writing is not what blocks. It is
-    // SPIFFS.open(path, "w") truncating the file. Creating a slot that does not
-    // exist yet costs 710-970ms, which happens twice in a device's life, once per
-    // generation.
+    // At 48 entries this read 303-305ms in the steady state, of which 285-288ms was
+    // the open and 1-2ms the write, and the conclusion drawn from it was that
+    // breaking the write into pieces would buy nothing because writing was not what
+    // blocked.
+    //
+    // At 96 the same row reads "96 msg 569ms" with phases "252 137 180". The write is
+    // no longer 1-2ms and the open is no longer the whole story: write and close
+    // together are 317 of the 569. That conclusion is withdrawn - see the note in
+    // RiftMsgLog.h - and this row is what withdrew it, which is the reason it prints
+    // the phases rather than a total.
+    //
+    // Creating a generation that does not exist yet still costs 710-970ms, which
+    // happens twice in a device's life.
     snprintf(tmp, sizeof(tmp), "%d msg %ums", msg_log.count, (unsigned) msg_log.last_save_ms);
     addReading("MSGLOG", tmp, rift_pal.fg);
     snprintf(tmp, sizeof(tmp), "%u %u %u", (unsigned) msg_log.t_open, (unsigned) msg_log.t_write,

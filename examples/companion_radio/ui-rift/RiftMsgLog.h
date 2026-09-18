@@ -40,12 +40,25 @@
 // Raised from 48, which was chosen before the device had been used daily and turned
 // out to be about half a day of a busy Public channel.
 //
-// What does NOT scale is the save. Measured on the device across a day of real
-// traffic: a save of 48 entries costs 140-368ms, of which the write is 1-2ms and
-// the rest is SPIFFS.open() truncating plus the close. Doubling the content doubles
-// the 1-2ms and leaves the rest where it is, so this number is bounded by RAM
-// rather than by how long the main loop blocks - which is not what was expected
-// before it was measured.
+// The save scales, and the comment that used to stand here said it did not.
+//
+// It reasoned from the 48-entry measurement - 140-368ms, of which the write was 1-2ms
+// and the rest SPIFFS.open() truncating plus the close - that doubling the content
+// would double the 1-2ms and leave the rest where it was, so the cost was bounded by
+// RAM rather than by how long the main loop blocks.
+//
+// Measured at 96 on a device after sixteen hours of real traffic:
+//
+//   save 96 msg 569ms gen0 o252 w137 c180
+//
+// The write went from 1-2ms to 137ms, which is not a doubling, and the total went
+// from about 303ms to 569ms, which nearly is. The open even came down. Whatever
+// SPIFFS does with a file of this size, it is not linear in the bytes, and the
+// prediction was made from a single measurement at half the size.
+//
+// So the save IS bounded by how long the main loop blocks, and it now blocks for
+// longer than the figure the flush ceiling below was chosen from. Raising this
+// constant again should not happen without another measurement at the new size.
 //
 // 255 is the ceiling without a format change: the file header carries the count in
 // a single byte. Growing and shrinking are both safe below that, because load()
@@ -73,16 +86,25 @@
 #define RIFT_MSGLOG_GEN1         "/rift_msgs.1"
 #define RIFT_MSGLOG_FLUSH_MILLIS 20000
 // The ceiling on how long the log may stay unwritten, whatever the traffic does.
-// Chosen from the cost measured on the device rather than picked: at the full 48
-// entries a save took 251ms and 380ms on two occasions in one session (SYSTEM's
-// event log records any save over 50ms), so 380ms is the figure to budget, and it
-// is 380ms with the SPI bus held away from the LoRa radio and no watchdog to catch
-// an overrun. At 120s that is 0.32% of the time under sustained traffic, against
-// 0.63% at 60s - and the exposure it bounds is two minutes of messages rather than
-// one. Two minutes is an acceptable loss on a power cut; doubling the radio's
-// blackout rate to halve it is not an obvious trade, so this takes the upper end of
-// the 60-120s range the review suggested. The debounce above still decides the
-// common case, where a burst ends and nothing has to wait for this at all.
+//
+// Chosen from the cost measured on the device rather than picked. At 48 entries that
+// cost was 251ms and 380ms on two occasions in one session (SYSTEM's event log
+// records any save over 50ms), so 380ms was the figure budgeted here, with the SPI
+// bus held away from the LoRa radio and no watchdog to catch an overrun. At 120s that
+// is 0.32% of the time under sustained traffic against 0.63% at 60s, and the exposure
+// it bounds is two minutes of messages rather than one - an acceptable loss on a
+// power cut, where doubling the radio's blackout rate to halve it is not an obvious
+// trade.
+//
+// At 96 entries the measured cost is 569ms, so that budget is out by half. The
+// arithmetic still lands in the same place - 0.47% at 120s against 0.95% at 60s - and
+// the conclusion holds for the same reason it did before, which is why the number has
+// not moved. But it is now a conclusion resting on a worse blackout than the one it
+// was reasoned about, and the honest next step is the appending journal the review
+// asks for rather than another tuning pass on this line.
+//
+// The debounce above still decides the common case, where a burst ends and nothing
+// has to wait for this at all.
 #define RIFT_MSGLOG_MAX_UNSAVED_MILLIS 120000
 
 // Shared in-memory message log. MeshCore keeps no message history of its own
