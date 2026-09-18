@@ -358,7 +358,7 @@ Boot is now 5.1 seconds. Why the probe does that is still not established — se
 
 ## Status
 
-**Current release: 0.9.4** — set by the `RIFT_VERSION` build flag and shown on the
+**Current release: 0.9.5** — set by the `RIFT_VERSION` build flag and shown on the
 boot screen and SYSTEM, alongside the MeshCore version it is built on. Deliberately
 0.x: it works and is verified on hardware, but it has had no external users and the
 limitations above are real.
@@ -367,14 +367,50 @@ limitations above are real.
 over the companion protocol next to `FIRMWARE_VER_CODE`.
 
 Every screen from the original design concept is implemented and verified on
-physical hardware. Resource use: 66.8 % of internal static RAM (218,980 of 327,680
-bytes) and 25.9 % of the 6.5 MB app partition. 369 native tests across ten suites.
+physical hardware. Resource use: 67.0 % of internal static RAM (219,484 of 327,680
+bytes) and 26.0 % of the 6.5 MB app partition. 395 native tests across ten suites.
 
 Worth knowing where that RAM goes: MeshCore's contact table is `MAX_CONTACTS` 350
 plus 8 anonymous slots at 184 bytes each — 65.7 KB, or a fifth of the chip's 320 KB,
 statically allocated whether it holds one contact or all of them. It is the single
 largest
 item in the firmware.
+
+**0.9.5** is a review round. Someone read the firmware and wrote up what it should do
+next, and this is most of it.
+
+The two that change daily use are in COMMS and NODES. A draft now belongs to the
+conversation it was typed in — the compose line used to keep whatever was in it when
+you switched target, so a reply meant for one person could be sent to another by a tab
+press and an Enter, with nothing on screen having changed to say so. And NODES can be
+searched: type and the list narrows, by name anywhere in it or by the front of a key.
+Sixteen nodes can be marked as favourites, which sort to the top, survive a reboot, and
+are listed from the contact table even when they have not been heard since boot —
+which is exactly when you are looking for one.
+
+ENTER on a node now opens a card rather than acting. The round trip of the last
+delivered message had been recorded since acks were tracked and never drawn; the
+outbound route the device would actually send through had never been on screen at all.
+Both are on the card, next to the advertised route they usually agree with.
+
+SYSTEM gained two rows, and one of them settled an argument. `FRAME` says what a full
+repaint costs: 40.7 ms, against the 30.7 ms of SPI clock the number had been reasoned
+from, with the missing 10 ms being the PSRAM read. At roughly one repaint a second that
+is 4.1 % of the time with the bus held away from the radio. `LOOP` says how long the
+main loop takes to come round.
+
+Underneath, `UITask.cpp` went from 10,989 lines to 9,763. The message log and the RADAR
+service are their own files now. The first two moves are byte-for-byte and can be
+checked by diffing; the third moves who owns the scan lifecycle and could only be
+checked on hardware.
+
+Three bugs surfaced by looking rather than reasoning. Route labels were the one place
+on screen that skipped the UTF-8 translation, so a repeater with a Norwegian character
+in its name drew its bytes raw — as long-standing as the route row itself. `LOOP` first
+reported 841 ms, which turned out to be the screen dump used to read it. And the message
+log's save was documented as not scaling with entry count: at 96 entries it costs 569 ms
+against about 303 ms at 48, with the write going from 1-2 ms to 137 ms. The review
+suspected that and the code denied it.
 
 **0.9.4** is what a session of actually using the device asked for. The new-message
 popup carries the colours the rest of COMMS uses - a channel in its channel's colour,
