@@ -1015,6 +1015,14 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
   // The hop count, not the raw path_len: bits 6-7 of that byte are the hash
   // size, so a five-hop route with two-byte hashes logged as "69 hop".
   riftLogf("path %s now %d hop", contact.name, (int) mesh::Packet::pathHashCount(contact.out_path_len));
+  // Kept as well as logged. That line scrolls out of a 128-entry ring long before
+  // anyone asks the question a change actually raises - has the way to this node been
+  // moving, or has it been steady? - and one line could not answer it anyway. The
+  // node card reads the last few. note() drops a repeat of the same hop count,
+  // because this hook fires on a route being re-confirmed unchanged too.
+  riftRoutes().note(contact.id.pub_key,
+                    (uint8_t) mesh::Packet::pathHashCount(contact.out_path_len),
+                    (uint32_t) millis());
   // A path return is the route being seen to work in one direction at least.
   markPathConfirmed(contact.id.pub_key, sizeof(AdvertPath::pubkey_prefix));
   {

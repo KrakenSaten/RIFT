@@ -293,11 +293,13 @@ static inline uint16_t riftChannelColour(int channel_idx) {
 // mktime()/gmtime(): those depend on a timezone database and a TZ setting that this
 // firmware never establishes, so the answer would depend on state nobody set.
 //
-// RIFT has no timezone. Every display of a timestamp is (epoch / 3600) % 24 with no
-// offset, so the clock is local time stored as an epoch. That is self-consistent -
-// what you type is what you read back - and it is what the rest of the screen
-// already assumes. The cost is that the value is not a true UTC epoch, which matters
-// only if it were compared against another node's absolute clock.
+// These two convert civil time to an epoch and back with no offset applied, and that
+// is deliberate: the timezone is a display-only offset that lives under "local time"
+// below, where riftLocalFromUtc and riftUtcFromLocal are the only two places that
+// know about it. Keeping the civil conversion offset-free is what lets it stay in
+// those two - a caller wanting local time asks for it rather than getting it by
+// accident. The epoch these produce is UTC, which is what the RTC and every stored
+// timestamp hold.
 //
 // Hinnant's days-from-civil, which is exact for the whole range and has no loops.
 
@@ -1106,6 +1108,24 @@ static inline void riftFormatAge(uint32_t millis_since, char* buf, size_t len) {
   riftFormatAgeSecs(millis_since / 1000, buf, len);
 }
 
+// Microseconds as milliseconds to one decimal, for the RUNTIME rows on SYSTEM.
+//
+// A whole millisecond hides the difference those rows exist to show. A full-frame
+// blit has a floor of 30.7ms of SPI clock and the question is what it costs above
+// that; "31" answers neither way. One decimal is as far as this is worth taking -
+// the jitter between two frames is wider than a hundredth of a millisecond, so
+// another digit would be presenting noise as precision.
+//
+// Truncates rather than rounds, so a figure read off the screen is never larger
+// than the one that was measured. The widest output is a full uint32 of
+// microseconds, 4294967.2, which is nine characters and a terminator.
+#define RIFT_MS_BUF_LEN  12
+
+static inline void riftFormatMicrosMs(uint32_t us, char* buf, size_t len) {
+  if (buf == NULL || len == 0) return;
+  snprintf(buf, len, "%u.%u", (unsigned) (us / 1000), (unsigned) ((us % 1000) / 100));
+}
+
 // Who can actually receive a direct message.
 //
 // NODES allowed ADV_TYPE_CHAT only while the COMMS picker allowed CHAT and ROOM,
@@ -1415,6 +1435,233 @@ static inline const char* riftHopBucketLabel(int bucket) {
     case RIFT_HOPB_6PLUS:  return "6+";
     default:               return "?";
   }
+}
+
+// --------------------------------------------------------------- finding a node
+//
+// NODES holds up to RIFT_CONST_MAX nodes and the contact table behind it holds 350,
+// on a 320x240 panel that shows fourteen rows. Scrolling was the only way to reach
+// one, which is not a way to reach one - it is a way to reach the first few.
+//
+// ASCII folding only, and deliberately. The names on a mesh arrive from other
+// people's firmware in whatever encoding they chose, and riftTranslateUTF8 already
+// has to reduce them to what a CP437 font can draw. Folding beyond ASCII would mean
+// a case table for text this device cannot render anyway; what it would buy is
+// "Ø" matching "ø" in a name that draws as a placeholder either way.
+static inline char riftFoldAscii(char c) {
+  return (c >= 'A' && c <= 'Z') ? (char) (c - 'A' + 'a') : c;
+}
+
+// Substring rather than prefix: the useful query against "SE FCC portabel" is "fcc",
+// and a prefix match would need the user to know how the name starts, which is the
+// thing they are looking it up to find out.
+static inline bool riftContainsFold(const char* hay, const char* needle) {
+  if (hay == NULL || needle == NULL) return false;
+  if (needle[0] == 0) return true;
+  for (const char* h = hay; *h != 0; h++) {
+    const char* a = h;
+    const char* b = needle;
+    while (*a != 0 && *b != 0 && riftFoldAscii(*a) == riftFoldAscii(*b)) { a++; b++; }
+    if (*b == 0) return true;
+  }
+  return false;
+}
+
+static inline bool riftIsHexQuery(const char* q) {
+  if (q == NULL || q[0] == 0) return false;
+  for (const char* p = q; *p != 0; p++) {
+    char c = riftFoldAscii(*p);
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  }
+  return true;
+}
+
+// Prefix, not substring, and that asymmetry with the name is the point: a key is
+// read off the detail row from its front, and a hex fragment matching in the middle
+// of a key would be a coincidence rather than a recognition.
+static inline bool riftKeyHexStartsWith(const uint8_t* key, size_t key_len, const char* q) {
+  if (key == NULL || q == NULL) return false;
+  // Not named HEX: Arduino's Print.h defines that as 16, so the subscript became
+  // 16[...] and only the suites that pull in the Arduino mock said so.
+  static const char hexdig[] = "0123456789abcdef";
+  size_t qi = 0;
+  for (size_t i = 0; i < key_len; i++) {
+    if (q[qi] == 0) return true;
+    if (riftFoldAscii(q[qi]) != hexdig[(key[i] >> 4) & 0x0F]) return false;
+    qi++;
+    if (q[qi] == 0) return true;
+    if (riftFoldAscii(q[qi]) != hexdig[key[i] & 0x0F]) return false;
+    qi++;
+  }
+  return q[qi] == 0;   // a query longer than the key cannot match it
+}
+
+// Both ways a node is known, because there are two and the query does not say which
+// one it is. "BE" is a plausible name fragment and a plausible key prefix, and
+// refusing either would mean deciding what the user meant.
+//
+// An empty query matches everything, so the caller can hold one filter string and
+// not branch on whether it is set.
+static inline bool riftNodeMatches(const char* name, const uint8_t* key, size_t key_len,
+                                   const char* query) {
+  if (query == NULL || query[0] == 0) return true;
+  if (name != NULL && riftContainsFold(name, query)) return true;
+  if (riftIsHexQuery(query) && riftKeyHexStartsWith(key, key_len, query)) return true;
+  return false;
+}
+
+// The nodes worth keeping hold of.
+//
+// Search answers "where is it in this list"; this answers "it should not have been
+// in a list of three hundred in the first place". The two are the same feature from
+// different ends, which is why they arrived together.
+//
+// Sixteen. Past that it is a second list to search rather than a shortlist, and the
+// cost is paid in the settings file on every save.
+#define RIFT_FAV_MAX 16
+
+// Six, not AdvertPath's seven. Six is the prefix length the rest of the firmware
+// already treats as identity - lookupContactByPubKey takes six, riftConvDM stores
+// six - and a favourite that matched on seven would fail to recognise the same node
+// arriving through any of those paths.
+#define RIFT_FAV_KEY_LEN 6
+
+struct RiftFavourites {
+  uint8_t keys[RIFT_FAV_MAX][RIFT_FAV_KEY_LEN];
+  int n = 0;
+
+  void reset() { n = 0; }
+  bool full() const { return n >= RIFT_FAV_MAX; }
+
+  int indexOf(const uint8_t* key) const {
+    if (key == NULL) return -1;
+    for (int i = 0; i < n; i++) {
+      if (memcmp(keys[i], key, RIFT_FAV_KEY_LEN) == 0) return i;
+    }
+    return -1;
+  }
+
+  bool has(const uint8_t* key) const { return indexOf(key) >= 0; }
+
+  // False when there was no room. The caller says so rather than the mark silently
+  // not appearing, which is the failure this returns a bool to prevent.
+  bool add(const uint8_t* key) {
+    if (key == NULL) return false;
+    if (indexOf(key) >= 0) return true;      // already a favourite is success
+    if (full()) return false;
+    memcpy(keys[n], key, RIFT_FAV_KEY_LEN);
+    n++;
+    return true;
+  }
+
+  bool remove(const uint8_t* key) {
+    int at = indexOf(key);
+    if (at < 0) return false;
+    // Order carries no meaning here - the list is a set - so the hole is filled
+    // from the end rather than by shifting.
+    if (at != n - 1) memcpy(keys[at], keys[n - 1], RIFT_FAV_KEY_LEN);
+    n--;
+    return true;
+  }
+
+  // The new state, so a caller can report it. A toggle that could not add because
+  // the list is full returns false, which is also the correct new state.
+  bool toggle(const uint8_t* key) {
+    if (indexOf(key) >= 0) { remove(key); return false; }
+    return add(key);
+  }
+};
+
+// One table, reached the way the mutes and the scopes are: NODES marks them, the
+// settings file loads and saves them, and neither owns the other.
+inline RiftFavourites& riftFavs() {
+  static RiftFavourites t;
+  return t;
+}
+
+// ----------------------------------------------------------- route changes
+//
+// A route changing is the difference between a direct message that lands and one
+// that does not. onContactPathUpdated already said so and already logged a line, but
+// a line in a 128-entry event log is gone by the time anyone asks the question the
+// change raises: has the way to this node been moving, or has it been steady?
+//
+// So: a ring, keyed by node, holding the hop count each change settled on. The node
+// card reads the last few for one node and shows them as a sequence, which answers
+// "is this route stable" in a way the current hop count cannot.
+//
+// RAM only, for the reason the event log gives: this describes the session you are
+// still in, and persisting it would put a second writer on the filesystem that holds
+// the node identity.
+//
+// Twenty-four across all nodes rather than a few per node. A mesh where one node's
+// route is thrashing is exactly when you want all of that node's changes and none of
+// anyone else's, and a per-node allocation would have spent the space evenly on the
+// nodes that are not moving.
+#define RIFT_ROUTE_LOG_MAX 24
+
+struct RiftRouteChange {
+  uint8_t  key[RIFT_FAV_KEY_LEN];
+  uint8_t  hops;         // what the route settled on, already decoded from path_len
+  uint32_t at_ms;        // monotonic; the card renders an age, never a clock time
+};
+
+struct RiftRouteLog {
+  RiftRouteChange e[RIFT_ROUTE_LOG_MAX];
+  int head = RIFT_ROUTE_LOG_MAX - 1;   // index of the newest
+  int count = 0;
+
+  void reset() { head = RIFT_ROUTE_LOG_MAX - 1; count = 0; }
+
+  // now_ms is passed rather than read, so the rule has tests and this header stays
+  // free of a clock.
+  void note(const uint8_t* key, uint8_t hops, uint32_t now_ms) {
+    if (key == NULL) return;
+    // A repeat of the hop count this node is already on is not a change. The hook
+    // fires on every path update, including ones that re-confirm the same route,
+    // and recording those would fill the ring with an event that did not happen.
+    const RiftRouteChange* last = peekFor(key, 0);
+    if (last != NULL && last->hops == hops) return;
+
+    head = (head + 1) % RIFT_ROUTE_LOG_MAX;
+    if (count < RIFT_ROUTE_LOG_MAX) count++;
+    RiftRouteChange* c = &e[head];
+    memcpy(c->key, key, RIFT_FAV_KEY_LEN);
+    c->hops = hops;
+    c->at_ms = now_ms;
+  }
+
+  // back == 0 is the newest change for this node, 1 the one before it. NULL past the
+  // end, which is how a caller walks it without asking how many there are first.
+  const RiftRouteChange* peekFor(const uint8_t* key, int back) const {
+    if (key == NULL || back < 0) return NULL;
+    int seen = 0;
+    for (int i = 0; i < count; i++) {
+      const RiftRouteChange* c = &e[(head - i + RIFT_ROUTE_LOG_MAX * 2) % RIFT_ROUTE_LOG_MAX];
+      if (memcmp(c->key, key, RIFT_FAV_KEY_LEN) != 0) continue;
+      if (seen == back) return c;
+      seen++;
+    }
+    return NULL;
+  }
+
+  int countFor(const uint8_t* key) const {
+    if (key == NULL) return 0;
+    int n = 0;
+    for (int i = 0; i < count; i++) {
+      const RiftRouteChange* c = &e[(head - i + RIFT_ROUTE_LOG_MAX * 2) % RIFT_ROUTE_LOG_MAX];
+      if (memcmp(c->key, key, RIFT_FAV_KEY_LEN) == 0) n++;
+    }
+    return n;
+  }
+};
+
+// One instance across both translation units - MyMesh writes to it from the mesh
+// callbacks and the node card reads it. A function-local static in an inline
+// function is guaranteed to be one object, which a file-scope definition would not.
+inline RiftRouteLog& riftRoutes() {
+  static RiftRouteLog t;
+  return t;
 }
 
 // ------------------------------------------------------------- conversations
@@ -1728,6 +1975,112 @@ struct RiftUnread {
       memmove(&counts[i], &counts[i + 1], (size_t) (n - i - 1) * sizeof(counts[0]));
       n--;
       return;
+    }
+  }
+};
+
+// Drafts, per conversation.
+//
+// COMMS has one compose line, and switching target used to leave whatever was typed
+// sitting in it. That made a half-written line movable between conversations, which
+// is occasionally what someone wants and always ambiguous: the text belonged to no
+// conversation, so a reply meant for one person could be sent to another by a tab
+// press and an Enter, with nothing on screen having changed to say so.
+//
+// A draft belongs to the conversation it was typed in. Leaving stores it, returning
+// restores it, sending clears it.
+//
+// Session-only, like the unread table above and for the same reason: persisting
+// would mean a file and a format, and unsent text that survives a power cut is worth
+// less than unsent text that is correct while the device is on.
+//
+// Eight, because that is past what anyone has in flight at once, and the cost is
+// paid whether the rows are used or not - about 1.4KB. It lives on the heap rather
+// than in .bss, because RiftCommsScreen is allocated with new, so FREE HEAP on
+// SYSTEM is where it shows and the build's RAM figure does not move.
+#define RIFT_DRAFT_MAX 8
+
+// Mirrors MAX_TEXT_LEN from BaseChatMesh.h so this header stays free of MeshCore and
+// can be tested natively; UITask.cpp static_asserts that they still agree.
+#define RIFT_DRAFT_LEN 160
+
+struct RiftDrafts {
+  RiftConvKey keys[RIFT_DRAFT_MAX];
+  char text[RIFT_DRAFT_MAX][RIFT_DRAFT_LEN + 1];
+
+  // Eviction is least-recently-touched, matching RiftUnread - the conversation not
+  // returned to in the longest is the one that loses its draft. Ordered by a counter
+  // rather than by position in the array, which is where this parts company with the
+  // unread table: that one moves its rows to keep them in order, and a row here is
+  // 161 bytes rather than one. A counter costs four bytes a row and moves nothing.
+  //
+  // A sequence and not millis(), so this header stays pure and the rule stays
+  // testable without a clock. It wraps after four billion target switches, which is
+  // not a number anyone reaches by hand.
+  uint32_t touched[RIFT_DRAFT_MAX];
+  uint32_t seq = 0;
+  int n = 0;
+
+  // Position is not meaning here, so a hole is filled from the end rather than by
+  // shifting everything down.
+  void removeAt(int i) {
+    if (i < 0 || i >= n) return;
+    if (i != n - 1) {
+      keys[i] = keys[n - 1];
+      memcpy(text[i], text[n - 1], RIFT_DRAFT_LEN + 1);
+      touched[i] = touched[n - 1];
+    }
+    n--;
+  }
+
+  int oldest() const {
+    int o = 0;
+    for (int i = 1; i < n; i++) if (touched[i] < touched[o]) o = i;
+    return o;
+  }
+
+  void store(int i, const RiftConvKey& k, const char* s) {
+    keys[i] = k;
+    size_t len = strlen(s);
+    // The caller's buffer is MAX_TEXT_LEN, which is this, so the clamp never fires
+    // in RIFT. It is here so that a future caller with a longer buffer loses the
+    // tail rather than the bytes after the array.
+    if (len > RIFT_DRAFT_LEN) len = RIFT_DRAFT_LEN;
+    memcpy(text[i], s, len);
+    text[i][len] = 0;
+    touched[i] = ++seq;
+  }
+
+  // An empty draft is the absence of one, not a row holding nothing: storing "" for
+  // a conversation removes its entry, so the conversation list stops marking it and
+  // the slot goes back to a conversation that has text in it.
+  void put(const RiftConvKey& k, const char* s) {
+    if (k.kind == RIFT_CONV_UNKNOWN) return;   // nothing to come back to
+    const bool empty = (s == NULL || s[0] == 0);
+
+    for (int i = 0; i < n; i++) {
+      if (!riftConvSame(keys[i], k)) continue;
+      if (empty) removeAt(i); else store(i, k, s);
+      return;
+    }
+    if (empty) return;
+
+    if (n >= RIFT_DRAFT_MAX) removeAt(oldest());
+    store(n, k, s);
+    n++;
+  }
+
+  // NULL when there is none, which the caller reads as "leave the line empty".
+  const char* get(const RiftConvKey& k) const {
+    for (int i = 0; i < n; i++) if (riftConvSame(keys[i], k)) return text[i];
+    return NULL;
+  }
+
+  bool has(const RiftConvKey& k) const { return get(k) != NULL; }
+
+  void clear(const RiftConvKey& k) {
+    for (int i = 0; i < n; i++) {
+      if (riftConvSame(keys[i], k)) { removeAt(i); return; }
     }
   }
 };

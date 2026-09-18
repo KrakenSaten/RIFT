@@ -7,6 +7,8 @@
 #include "RiftMutes.h"
 #include "RiftScreenDump.h"
 #include "RiftClock.h"
+#include "RiftMsgLog.h"
+#include "RiftRadar.h"
 #include <helpers/sensors/LPPDataHelpers.h>   // LPP_* type codes, for the telemetry labels
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/UTF8Helpers.h>
@@ -22,29 +24,11 @@ static_assert(RIFT_ADV_REPEATER == ADV_TYPE_REPEATER, "advert type drift");
 static_assert(RIFT_ADV_ROOM == ADV_TYPE_ROOM, "advert type drift");
 static_assert(RIFT_ADV_SENSOR == ADV_TYPE_SENSOR, "advert type drift");
 
+// Same reason: a draft holds a whole compose line, so the store's row must be the
+// line's length. Were MAX_TEXT_LEN to grow, a draft would come back with its tail
+// cut off and nothing would say why.
+static_assert(RIFT_DRAFT_LEN == MAX_TEXT_LEN, "draft row no longer holds a full line");
 
-#ifdef RIFT_RADAR
-  #include <WiFi.h>
-  #include <BLEDevice.h>
-  #include <BLEScan.h>
-  #include <BLEAdvertisedDevice.h>
-
-  #ifndef RIFT_WIFI_DWELL_MILLIS
-    #define RIFT_WIFI_DWELL_MILLIS 120    // per channel; ~1.6s for a full sweep
-  #endif
-  #ifndef RIFT_BLE_DWELL_SECS
-    #define RIFT_BLE_DWELL_SECS 3
-  #endif
-  #ifndef RIFT_SCAN_GAP_MILLIS
-    #define RIFT_SCAN_GAP_MILLIS 400      // breathing room between sweeps
-  #endif
-  #ifndef RIFT_RF_AGE_MILLIS
-    #define RIFT_RF_AGE_MILLIS 45000      // forget contacts not heard for 45s
-  #endif
-  #ifndef RIFT_SCAN_STOP_GRACE_MILLIS
-    #define RIFT_SCAN_STOP_GRACE_MILLIS 700   // let a scan wind down before deinit
-  #endif
-#endif
 
 #ifndef RIFT_VERSION
   #define RIFT_VERSION "0.0.0-dev"
@@ -98,38 +82,6 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 // still do.
 #define RIFT_DOUBLETAP_MILLIS  400
 
-// How many messages the history holds, in RAM and in the file.
-//
-// 264 bytes an entry, measured by building at 48 and at 96 and taking the
-// difference - 12,672 bytes for 48 messages. Most of that is Entry's msg[161] and
-// origin[62]; the rest is the parallel RiftConvKey array the unread tracker keeps,
-// which is sized by this same constant. Unlike RIFT_PICKER_MAX below, this one is
-// in .bss because msg_log is a file static, so the cost does show in the build's
-// RAM figure: 60.9% at 48 against 64.8% at 96.
-//
-// Raised from 48, which was chosen before the device had been used daily and turned
-// out to be about half a day of a busy Public channel.
-//
-// What does NOT scale is the save. Measured on the device across a day of real
-// traffic: a save of 48 entries costs 140-368ms, of which the write is 1-2ms and
-// the rest is SPIFFS.open() truncating plus the close. Doubling the content doubles
-// the 1-2ms and leaves the rest where it is, so this number is bounded by RAM
-// rather than by how long the main loop blocks - which is not what was expected
-// before it was measured.
-//
-// 255 is the ceiling without a format change: the file header carries the count in
-// a single byte. Growing and shrinking are both safe below that, because load()
-// clamps to this value - an older file loads whole, and a larger one loses its
-// oldest entries rather than failing.
-#define RIFT_MSG_LOG_SIZE  96
-
-// Where the message history lives, and how long a burst is allowed to settle
-// before it is written.
-//
-// 20 seconds coalesces a conversation into one write while keeping the loss
-// window on a power cut to something a user would describe as "the last thing I
-// said" rather than "this evening". A clean shutdown flushes immediately, so the
-// window only applies to power being pulled.
 // How many heard nodes NODES can hold, and how many hop columns it draws. Up here
 // rather than beside that screen because SYSTEM's diagnostics read them too, and
 // SYSTEM is defined first.
@@ -142,30 +94,6 @@ static const char* NAV_LABELS[RIFT_NAV_COUNT] = { "RIFT", "NODES", "RADAR", "COM
 static inline uint8_t riftHopCount(uint8_t path_len) { return mesh::Packet::pathHashCount(path_len); }
 static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::pathHashSize(path_len); }
 
-// The single file every build before generations wrote. No longer written, and
-// deliberately not deleted once a generation exists: load() falls back to it when
-// neither generation is usable, so it stays on as a third and older copy for the
-// one case that would want it. A few KB of SPIFFS is a fair price for that.
-#define RIFT_MSGLOG_PATH         "/rift_msgs.dat"
-// no longer written; kept so a stale one from an older build can be removed
-#define RIFT_MSGLOG_TMP          "/rift_msgs.new"
-// The two generations. A save writes whichever one is not current; the reader takes
-// the newer of the two that verify. See RiftLogic.h for why there are two.
-#define RIFT_MSGLOG_GEN0         "/rift_msgs.0"
-#define RIFT_MSGLOG_GEN1         "/rift_msgs.1"
-#define RIFT_MSGLOG_FLUSH_MILLIS 20000
-// The ceiling on how long the log may stay unwritten, whatever the traffic does.
-// Chosen from the cost measured on the device rather than picked: at the full 48
-// entries a save took 251ms and 380ms on two occasions in one session (SYSTEM's
-// event log records any save over 50ms), so 380ms is the figure to budget, and it
-// is 380ms with the SPI bus held away from the LoRa radio and no watchdog to catch
-// an overrun. At 120s that is 0.32% of the time under sustained traffic, against
-// 0.63% at 60s - and the exposure it bounds is two minutes of messages rather than
-// one. Two minutes is an acceptable loss on a power cut; doubling the radio's
-// blackout rate to halve it is not an obvious trade, so this takes the upper end of
-// the 60-120s range the review suggested. The debounce above still decides the
-// common case, where a burst ends and nothing has to wait for this at all.
-#define RIFT_MSGLOG_MAX_UNSAVED_MILLIS 120000
 #define RIFT_CHAR_W         6   // Adafruit GFX classic font cell at setTextSize(1)
 #define RIFT_LINE_H        12   // row pitch used throughout this codebase
 
@@ -177,589 +105,6 @@ static inline uint8_t riftHashSize(uint8_t path_len) { return mesh::Packet::path
 // mis-encoded by anything between here and the compiler. Used as a %s argument, not
 // concatenated, because it is an array and not a literal.
 static const char RIFT_DOT[] = { (char) 0xFA, 0 };
-
-// Shared in-memory message log. MeshCore keeps no message history of its own
-// (DataStore holds identity/prefs/contacts/channels only, and MyMesh's offline
-// queue is private raw protocol frames), so the UI owns this - same approach as
-// ui-new, just shared between the popup and the COMMS terminal.
-
-struct RiftMsgLog {
-  struct Entry {
-    uint32_t timestamp;
-    char origin[62];
-    // MAX_TEXT_LEN, not a round number: 78 silently truncated anything longer,
-    // and MeshCore allows up to 160 characters
-    char msg[MAX_TEXT_LEN + 1];
-    bool outgoing;
-    // delivery tracking, only meaningful for outgoing direct messages.
-    // expected_ack == 0 means "no ACK possible" (channel sends, incoming) and
-    // renders no delivery state at all.
-    uint32_t expected_ack;
-    uint32_t sent_at_ms;
-    uint32_t timeout_ms;
-    uint32_t trip_ms;
-    bool delivered;
-    // Not persisted. save() writes outgoing and delivered into its flags byte and
-    // deliberately drops sent_at_ms and timeout_ms - see load() - so after a reboot
-    // there is no deadline left to have passed. This only records whether the line
-    // has already been written, within one session.
-    bool timeout_logged;
-    // Which conversation this belongs to, recorded where it is known rather than
-    // recovered from origin[] afterwards. Eight bytes an entry, 384 for the log.
-    RiftConvKey conv;
-  };
-
-  // Oldest at 0, newest at count-1. This was a ring with a head index, which is the
-  // right shape when the only thing ever removed is the oldest. Per-conversation
-  // eviction removes an entry from the middle, and a ring cannot do that without
-  // moving head or leaving a hole that every reader then has to skip. A linear array
-  // makes eviction one memmove and peek() arithmetic rather than modular. The cost
-  // is moving up to 47 entries on a full log, once per message.
-  Entry entries[RIFT_MSG_LOG_SIZE];
-  int count = 0;
-
-  // Which entry to drop when the log is full. The rule itself is riftEvictIndex() in
-  // RiftLogic.h, so it is tested without a filesystem or a display; this only lifts
-  // the keys out of the entries for it.
-  int evictIndex() const {
-    RiftConvKey keys[RIFT_MSG_LOG_SIZE];
-    for (int i = 0; i < count; i++) keys[i] = entries[i].conv;
-    return riftEvictIndex(keys, count);
-  }
-
-  Entry* add(uint32_t timestamp, const RiftConvKey& conv, const char* origin,
-             const char* msg, bool outgoing) {
-    markDirty();
-    if (count >= RIFT_MSG_LOG_SIZE) {
-      int drop = evictIndex();
-      memmove(&entries[drop], &entries[drop + 1],
-              (size_t) (RIFT_MSG_LOG_SIZE - drop - 1) * sizeof(Entry));
-      count = RIFT_MSG_LOG_SIZE - 1;
-    }
-
-    Entry* p = &entries[count++];
-    p->conv = conv;
-    p->timestamp = timestamp;
-    StrHelper::strncpy(p->origin, origin, sizeof(p->origin));
-    StrHelper::strncpy(p->msg, msg, sizeof(p->msg));
-    p->outgoing = outgoing;
-    p->expected_ack = 0;
-    p->sent_at_ms = 0;
-    p->timeout_ms = 0;
-    p->trip_ms = 0;
-    p->delivered = false;
-    p->timeout_logged = false;
-    return p;
-  }
-
-  // The worst silent failure this firmware has. A direct message that never lands
-  // looks exactly like one that did until the delivery label changes from "..." to
-  // "no ack", and nothing recorded the moment it changed - so unless the user
-  // happened to be looking at that row when it flipped, an undelivered message left
-  // no trace at all. Swept rather than scheduled, because the deadline is per
-  // message and is estimated at send time.
-  void logTimeouts() {
-    for (int i = 0; i < count; i++) {
-      Entry* p = &entries[count - 1 - i];
-      if (!p->outgoing || p->expected_ack == 0 || p->delivered) continue;
-      if (p->timeout_logged || p->timeout_ms == 0) continue;
-      // subtraction, matching deliveryLabel: sent_at + timeout would overflow at
-      // the millis wrap and report a fresh send as long since timed out
-      if ((uint32_t) millis() - p->sent_at_ms <= p->timeout_ms) continue;
-      p->timeout_logged = true;
-      char who[40];
-      // "no ack" rather than "FAILED": the message may well have arrived and the
-      // acknowledgement been lost, and the log should not claim more than it knows
-      riftLogf("no ack from %s (%us)",
-               riftOriginName(p->origin, who, sizeof(who)) ? who : "?",
-               (unsigned) (p->timeout_ms / 1000u));
-    }
-  }
-
-  // mark the pending outgoing message matching this ACK hash as delivered
-  void markDelivered(uint32_t ack_hash, uint32_t trip_ms) {
-    if (ack_hash == 0) return;
-    for (int i = 0; i < count; i++) {
-      Entry* p = &entries[count - 1 - i];
-      if (p->expected_ack == ack_hash && !p->delivered) {
-        p->delivered = true;
-        p->trip_ms = trip_ms;
-        // named here rather than in msgDelivered(), which has the round trip but
-        // not the recipient
-        char who[40];
-        riftLogf("ack %s %ums",
-                 riftOriginName(p->origin, who, sizeof(who)) ? who : "?",
-                 (unsigned) trip_ms);
-        markDirty();
-        return;
-      }
-    }
-  }
-
-  // Everything belonging to one conversation, removed.
-  //
-  // The fingerprint already stops deleted-channel history being misattributed, so this
-  // is not what makes the fix correct - it is what stops dead history occupying slots
-  // in a 48-entry log that live conversations need. Called when a channel is deleted
-  // from this device; a companion app overwriting a slot behind our back is handled by
-  // the fingerprint instead, which is why that had to be the primary mechanism.
-  // Drop everything, without writing anything.
-  //
-  // For the factory reset, and the "without writing" is the whole point: dirty is
-  // cleared rather than left for the flush, so the timer in UITask::loop and the
-  // save in UITask::shutdown both find nothing to do. A log saved after the format
-  // would put the file straight back onto the filesystem that had just erased it.
-  void clearAll() {
-    count = 0;
-    dirty = false;
-  }
-
-  int purgeConversation(const RiftConvKey& k) {
-    int removed = 0;
-    for (int i = 0; i < count; ) {
-      if (!riftConvSame(entries[i].conv, k)) { i++; continue; }
-      memmove(&entries[i], &entries[i + 1], (size_t) (count - i - 1) * sizeof(Entry));
-      count--;
-      removed++;
-    }
-    if (removed > 0) markDirty();
-    return removed;
-  }
-
-  // 0 = newest, 1 = next older, ...
-  const Entry* peek(int back) const {
-    if (back < 0 || back >= count) return NULL;
-    return &entries[count - 1 - back];
-  }
-
-  // How many bytes follow the kind byte in a stored record. One place, because a
-  // writer and reader disagreeing about it would shift every field after it.
-  static uint8_t convPayloadLen(uint8_t kind) {
-    if (kind == RIFT_CONV_CHANNEL) return 5;   // slot + 4-byte fingerprint
-    if (kind == RIFT_CONV_DM) return RIFT_CONV_PEER_LEN;
-    return 0;
-  }
-
-  // ------------------------------------------------------------- persistence
-  //
-  // MeshCore stores no messages, so losing the log on every reboot was the
-  // largest gap a field user actually noticed.
-  //
-  // Three things shape how this is written, and the first is not about wear:
-  //
-  // SPIFFS is also where the private identity lives, and RIFT disables key
-  // export, so a corrupted filesystem costs the node identity permanently with
-  // no way to recover it. This used to be the argument for writing to a
-  // temporary file and renaming it over the real one. It was the wrong
-  // conclusion twice over: the swap was not atomic, because SPIFFS.remove and
-  // SPIFFS.rename are two operations with a window between them in which no log
-  // exists at all - and guarding a filesystem against a power cut by performing
-  // five write operations instead of two increases the exposure it was supposed
-  // to reduce. The log is written in place, and load() is what makes that safe:
-  // it keeps whatever records arrived and discards the rest, so an interrupted
-  // write costs the newest messages rather than the file.
-  //
-  // It is debounced rather than written per message: a conversation arrives as a
-  // burst, and coalescing a burst into one write is most of the wear saving
-  // available. The cost is a loss window, stated plainly in RIFT_MSGLOG_FLUSH.
-  //
-  // And it blocks. There is no watchdog on the main loop and a blocking call
-  // silently starves the radio, so the duration is measured rather than assumed
-  // and shown on SYSTEM as `msglog:`.
-
-  bool dirty = false;
-  unsigned long dirty_at = 0;   // when, so the write can wait for the burst to end
-  unsigned long first_dirty_at = 0;   // and when it first went dirty, for the deadline
-  uint32_t last_save_ms = 0;    // how long the last write took, for SYSTEM
-  // Phase breakdown - open / write / close. The total came out at 553ms for four
-  // messages, which is about 200 bytes: far too little data for the volume to be
-  // the cause, and long enough to starve LoRa. The cost was the number of
-  // operations. Kept on SYSTEM because it is the only evidence of whether
-  // removing four of them was enough.
-  uint32_t t_open = 0, t_write = 0, t_close = 0;
-
-  // dirty_at moves on every change; first_dirty_at is set only on the clean-to-dirty
-  // transition, because the deadline measures from the oldest unsaved change and not
-  // from the newest. The three places that clear dirty leave it stale on purpose - it
-  // is read only while dirty, and the next transition sets it again.
-  void markDirty() {
-    if (!dirty) first_dirty_at = millis();
-    dirty = true;
-    dirty_at = millis();
-  }
-
-  // Layout: "RMSG", version, count, then records oldest-first. Strings are
-  // length-prefixed rather than fixed - a typical message is a fraction of the
-  // 160-byte maximum, and the file is ~3KB instead of ~12KB because of it.
-  //
-  // Version 2 adds the conversation key. Version 1 is still read: its entries load
-  // with the conversation unknown, which places them by the existing name match and
-  // is exactly as good as it was before. A history is not worth discarding to save
-  // one branch in the reader.
-  // Version 3 adds the channel fingerprint. Versions 1 and 2 are still read.
-  //
-  // A version 2 channel entry carries a slot and no fingerprint, so it cannot prove
-  // which channel it belonged to - the whole point of the field. It loads with the
-  // fingerprint left at zero, which riftConvSame() treats as "matches on the slot
-  // alone": exactly as good as it was when it was written, and no better. For an
-  // unchanged channel the behaviour is identical; for a reused slot it is the old bug,
-  // confined to entries that predate the fix and age out of the log.
-  //
-  // Computing the fingerprint from the channel currently in the slot was the tempting
-  // alternative and is the one thing that must not be done: on a reused slot it would
-  // stamp old history with the new channel's identity and make the misattribution
-  // permanent.
-  static const uint8_t FILE_VERSION = 3;
-  static const uint8_t FILE_V1_FIXED = 11;   // record header before the key existed
-
-  // Retry accounting. save() leaves dirty set when it fails, and the flush
-  // condition is "dirty and the debounce has elapsed" - which stays true forever
-  // once it has. A persistent SPIFFS failure therefore retried on every single
-  // loop iteration, at ~553ms a go, which is a device that does nothing but
-  // hammer flash and starve the radio. Back off instead, and show the count.
-  uint8_t save_failures = 0;
-  unsigned long retry_at = 0;
-  // Which generation is on the flash and what its sequence number is. -1 and 0 mean
-  // none has been written yet, which is also the state after a migration from the
-  // legacy single file, so the first save lands in slot 0.
-  int8_t   gen_slot = -1;
-  uint32_t gen_seq = 0;
-
-  static const char* genPath(int slot) {
-    return slot == 0 ? RIFT_MSGLOG_GEN0 : RIFT_MSGLOG_GEN1;
-  }
-
-  // both in RiftLogic.h, so the backoff is tested without a filesystem
-  bool dueToSave(unsigned long now) const {
-    return riftShouldFlush(dirty, (uint32_t) now, (uint32_t) dirty_at,
-                           RIFT_MSGLOG_FLUSH_MILLIS, save_failures, (uint32_t) retry_at,
-                           (uint32_t) first_dirty_at, RIFT_MSGLOG_MAX_UNSAVED_MILLIS);
-  }
-
-  bool save() {
-    // Whichever generation is not the current one. That is the whole of the fix:
-    // SPIFFS.open(path, "w") empties its target before the new copy exists, so
-    // doing it to the live history is why a failed first write - or power going
-    // inside the 251-380ms a save of 48 entries costs on the device - used to leave
-    // no history at all rather than the previous one.
-    const int slot = (gen_slot < 0) ? 0 : riftOtherGeneration(gen_slot);
-    const uint32_t seq = riftNextGenSeq(gen_seq);
-
-    bool ok = saveInner(genPath(slot), seq);
-    if (ok) {
-      // Only now is the new generation the one to read, and only now may the next
-      // save target the other slot.
-      gen_slot = (int8_t) slot;
-      gen_seq = seq;
-      save_failures = 0;
-      // only the slow ones. A save that costs nothing is not news, and a line per
-      // save would push everything else out of a 48-line ring within an evening.
-      if (last_save_ms >= 50) {
-        // The phases as well as the total. There is no watchdog on the main loop, so
-        // a slow save is the number that decides whether the write has to be broken
-        // up, and open/write/close is what says which part was slow. They are on the
-        // readings screen too, but that shows only the most recent save; a ring entry
-        // can still be read after the next one has replaced it.
-        riftLogf("save %d msg %ums gen%d o%u w%u c%u", count, (unsigned) last_save_ms,
-                 slot, (unsigned) t_open, (unsigned) t_write, (unsigned) t_close);
-      }
-    } else {
-      // Both in RiftLogic.h, and separate on purpose: the counter saturating must
-      // not stop the deadline moving. See riftNextSaveFailures() for what that cost.
-      save_failures = riftNextSaveFailures(save_failures);
-      retry_at = riftNextRetryAt((uint32_t) millis(), save_failures);
-      // The log line is limited on its own account rather than by the counter. At
-      // the 60s ceiling a line per retry is a line a minute into a 48-line ring,
-      // which would bury everything else within the hour - and after the fourth
-      // identical failure the line has stopped being news.
-      if (save_failures <= 4) {
-        riftLogf("SAVE FAILED (%u), retry in %us", (unsigned) save_failures,
-                 (unsigned) (riftSaveBackoffMillis(save_failures) / 1000u));
-      }
-    }
-    return ok;
-  }
-
-  bool saveInner(const char* path, uint32_t seq) {
-#if defined(ESP32)
-    unsigned long began = millis();
-    // Accumulated over exactly the bytes written before the trailer, which is what
-    // the trailer then vouches for.
-    uint32_t crc = riftCrc32Init();
-    uint32_t payload_len = 0;
-
-    File f = SPIFFS.open(path, "w");
-    t_open = (uint32_t) (millis() - began);
-    if (!f) return false;
-    unsigned long t0 = millis();
-
-    // Staged rather than written field by field. Every f.write() crosses the VFS
-    // and SPIFFS layers, and the old shape made three calls per record - so a
-    // 200-byte file cost 13 calls. One call per bufferful costs 1.
-    uint8_t buf[512];
-    size_t used = 0;
-    bool ok = true;
-    // The flush below assumes a whole record always fits in an empty buffer, so
-    // a record is never split across two writes.
-    static_assert(12 + RIFT_CONV_PEER_LEN + sizeof(Entry::origin) + sizeof(Entry::msg)
-                  <= sizeof(buf), "staging buffer cannot hold one record");
-
-    const uint8_t hdr[6] = { 'R', 'M', 'S', 'G', FILE_VERSION, (uint8_t) count };
-    memcpy(buf, hdr, sizeof(hdr));
-    used = sizeof(hdr);
-
-    // oldest first, so loading can just replay add()
-    for (int i = count - 1; i >= 0; i--) {
-      const Entry* p = peek(i);
-      if (p == NULL) continue;
-
-      uint8_t olen = (uint8_t) strnlen(p->origin, sizeof(p->origin) - 1);
-      uint8_t mlen = (uint8_t) strnlen(p->msg, sizeof(p->msg) - 1);
-      uint8_t flags = (p->outgoing ? 1 : 0) | (p->delivered ? 2 : 0);
-      // The key is stored variable-length for the same reason the strings are: a
-      // channel needs one byte of it and an unknown none, so a fixed eight would add
-      // ~350 bytes to a ~3KB file, and the file size is what a save costs.
-      uint8_t clen = convPayloadLen(p->conv.kind);
-
-      size_t need = 12 + (size_t) clen + (size_t) olen + (size_t) mlen;
-      if (used + need > sizeof(buf)) {
-        if (f.write(buf, used) != used) { ok = false; break; }
-        crc = riftCrc32Update(crc, buf, used);
-        payload_len += used;
-        used = 0;
-      }
-
-      uint8_t* r = buf + used;
-      memcpy(&r[0], &p->timestamp, 4);
-      r[4] = flags;
-      memcpy(&r[5], &p->trip_ms, 4);
-      r[9] = olen;
-      r[10] = mlen;
-      r[11] = p->conv.kind;
-      if (p->conv.kind == RIFT_CONV_CHANNEL) {
-        r[12] = p->conv.channel_idx;
-        memcpy(&r[13], &p->conv.channel_fp, 4);
-      }
-      else if (p->conv.kind == RIFT_CONV_DM) memcpy(&r[12], p->conv.peer, RIFT_CONV_PEER_LEN);
-      memcpy(&r[12 + clen], p->origin, olen);
-      memcpy(&r[12 + clen + olen], p->msg, mlen);
-      used += need;
-    }
-    if (ok && used > 0) {
-      if (f.write(buf, used) != used) {
-        ok = false;
-      } else {
-        crc = riftCrc32Update(crc, buf, used);
-        payload_len += used;
-      }
-    }
-    // The trailer last, and writing it is the commit. A save interrupted before
-    // this point leaves a generation the reader refuses, and the other generation -
-    // never touched by this write - is still the one it reads.
-    if (ok) {
-      uint8_t tr[RIFT_MSGLOG_TRAILER_LEN];
-      riftMsgLogTrailerWrite(tr, seq, payload_len, riftCrc32Final(crc));
-      if (f.write(tr, sizeof(tr)) != sizeof(tr)) ok = false;
-    }
-    t_write = (uint32_t) (millis() - t0);
-
-    t0 = millis();
-    f.close();
-    t_close = (uint32_t) (millis() - t0);
-
-    if (!ok) {
-      // The partial file is kept rather than removed, and now it costs nothing to
-      // keep: it has no trailer, so the reader refuses it and reads the other
-      // generation instead. gen_slot is not moved, so the retry writes this same
-      // slot again and the good generation stays where it is.
-      //
-      // dirty stays set, so the backoff retries and a later save writes this
-      // generation whole.
-      return false;
-    }
-
-    last_save_ms = (uint32_t) (millis() - began);
-    dirty = false;
-    return true;
-#else
-    (void) path;
-    return false;
-#endif
-  }
-
-#if defined(ESP32)
-  // The trailer and the file size only, so choosing between the generations costs
-  // eighteen bytes a slot instead of reading either payload.
-  bool readTrailer(const char* path, uint32_t* seq, uint32_t* len, uint32_t* crc) {
-    File f = SPIFFS.open(path, "r");
-    if (!f) return false;
-    const uint32_t size = (uint32_t) f.size();
-    if (size < RIFT_MSGLOG_TRAILER_LEN || !f.seek(size - RIFT_MSGLOG_TRAILER_LEN)) {
-      f.close();
-      return false;
-    }
-    uint8_t tr[RIFT_MSGLOG_TRAILER_LEN];
-    const bool got = f.read(tr, sizeof(tr)) == sizeof(tr);
-    f.close();
-    return got && riftMsgLogTrailerParse(tr, size, seq, len, crc);
-  }
-
-  // Checked before a single entry is added, so a generation that fails leaves the
-  // log empty and the other one can still be tried. Streamed a bufferful at a time
-  // rather than read whole: the payload runs to about 3KB and there is no 3KB to
-  // spare at 60.8% RAM.
-  bool crcMatches(const char* path, uint32_t len, uint32_t want) {
-    File f = SPIFFS.open(path, "r");
-    if (!f) return false;
-    uint32_t crc = riftCrc32Init();
-    uint8_t buf[256];
-    uint32_t left = len;
-    while (left > 0) {
-      const size_t n = (left < sizeof(buf)) ? (size_t) left : sizeof(buf);
-      if (f.read(buf, n) != n) { f.close(); return false; }
-      crc = riftCrc32Update(crc, buf, n);
-      left -= n;
-    }
-    f.close();
-    return riftCrc32Final(crc) == want;
-  }
-#endif
-
-  void load() {
-#if defined(ESP32)
-    uint32_t seq[2] = { 0, 0 }, len[2] = { 0, 0 }, want[2] = { 0, 0 };
-    bool ok[2] = { false, false };
-    for (int s = 0; s < 2; s++) ok[s] = readTrailer(genPath(s), &seq[s], &len[s], &want[s]);
-
-    const int newest = riftPickNewerGeneration(ok[0], seq[0], ok[1], seq[1]);
-    if (newest >= 0) {
-      // Newest first, then the other one: a generation can carry a trailer that
-      // parses and still fail its CRC, and the second copy is what that case is
-      // for. Reading the older history is the right answer there - it is the
-      // newest one that is known to be whole.
-      for (int t = 0; t < 2; t++) {
-        const int s = (t == 0) ? newest : riftOtherGeneration(newest);
-        if (!ok[s]) continue;
-        if (!crcMatches(genPath(s), len[s], want[s])) {
-          riftLogf("msglog gen%d seq%u: bad CRC", s, (unsigned) seq[s]);
-          continue;
-        }
-        loadPayload(genPath(s));
-        gen_slot = (int8_t) s;
-        gen_seq = seq[s];
-        return;
-      }
-      riftLogf("msglog: both generations unreadable");
-    }
-
-    // No usable generation, which on the first boot after this change is the normal
-    // case and not a fault. gen_slot stays -1, so the first save writes slot 0, and
-    // the legacy file stays where it is as the older copy of last resort.
-    loadPayload(RIFT_MSGLOG_PATH);
-
-    // Reading a generation is not a change and loadPayload() clears dirty for that
-    // reason. Reading the *legacy* file is different: the history now exists only in
-    // the format being replaced, and nothing else would move it across until the
-    // next message happened to arrive - which on a quiet mesh is hours, all of them
-    // with no crash-safe copy. So the migration finishes itself, one debounce after
-    // boot. Only when there is something to migrate: a device with no history has
-    // nothing to gain from an empty generation, and its first message writes one.
-    if (count > 0) markDirty();
-#endif
-  }
-
-  // Reads one file that has already been established as complete, or the legacy
-  // single file. Unchanged from when there was only one: the payload format, its
-  // 6-byte header and all of its version handling are the same bytes as before, so
-  // generations wrap the old format rather than replacing it.
-  void loadPayload(const char* path) {
-#if defined(ESP32)
-    File f = SPIFFS.open(path, "r");
-    if (!f) return;
-
-    uint8_t hdr[6];
-    if (f.read(hdr, sizeof(hdr)) != sizeof(hdr)
-        || hdr[0] != 'R' || hdr[1] != 'M' || hdr[2] != 'S' || hdr[3] != 'G'
-        || (hdr[4] < 1 || hdr[4] > FILE_VERSION)) {
-      f.close();
-      return;   // absent, truncated or a format we do not know - start empty
-    }
-    bool has_conv = (hdr[4] >= 2);
-
-    int n = hdr[5];
-    if (n > RIFT_MSG_LOG_SIZE) n = RIFT_MSG_LOG_SIZE;
-
-    for (int i = 0; i < n; i++) {
-      uint8_t rec[12];
-      size_t fixed = has_conv ? sizeof(rec) : FILE_V1_FIXED;
-      if (f.read(rec, fixed) != fixed) break;   // truncated: keep what we have
-
-      uint32_t ts, trip;
-      memcpy(&ts, &rec[0], 4);
-      memcpy(&trip, &rec[5], 4);
-      uint8_t flags = rec[4], olen = rec[9], mlen = rec[10];
-
-      RiftConvKey conv = riftConvUnknown();
-      if (has_conv) {
-        uint8_t payload[RIFT_CONV_PEER_LEN];
-        // From the file's own version, not from this build's: a version 2 channel
-        // record is 1 byte where version 3 is 5, and reading 5 would swallow the
-        // start of the origin string and shift every field after it.
-        uint8_t clen = (rec[11] == RIFT_CONV_CHANNEL && hdr[4] < 3) ? 1
-                                                                    : convPayloadLen(rec[11]);
-        if (clen > 0 && f.read(payload, clen) != clen) break;
-        if (rec[11] == RIFT_CONV_CHANNEL) {
-          // A version 3 record carries the fingerprint and is trusted. A version 2 one
-          // carries only the slot, and a slot is not an identity: delete the channel
-          // that was in slot 2 and create another, and the new one inherits the old
-          // one's history. That is a private conversation shown under someone else's
-          // name, which is worse than showing it under none.
-          //
-          // So a legacy record becomes unknown rather than a channel. It is not lost:
-          // an unknown conversation falls back to matching the name in its origin
-          // string, which is the channel name as it was when the message arrived - so
-          // legacy history groups under the channel it actually came from, and a
-          // channel that no longer exists simply has no conversation to appear in.
-          if (clen >= 5) {
-            uint32_t fp = 0;
-            memcpy(&fp, &payload[1], 4);
-            conv = riftConvChannel(payload[0], fp);
-          }
-        }
-        else if (rec[11] == RIFT_CONV_DM) conv = riftConvDM(payload);
-        // an unrecognised kind - a file from a newer build - stays unknown rather
-        // than being guessed at
-      }
-
-      char origin[62], msg[MAX_TEXT_LEN + 1];
-      if (olen >= sizeof(origin) || mlen >= sizeof(msg)) break;   // corrupt length
-      if (f.read((uint8_t*) origin, olen) != olen) break;
-      if (f.read((uint8_t*) msg, mlen) != mlen) break;
-      origin[olen] = 0;
-      msg[mlen] = 0;
-
-      Entry* p = add(ts, conv, origin, msg, (flags & 1) != 0);   // clears dirty below
-      // Delivery state that survives: whether it landed, and how long it took.
-      // expected_ack, sent_at_ms and timeout_ms are millis-based and meaningless
-      // now, so they stay zero - which reads as "no ack expected" rather than as
-      // a send still waiting. A message that was pending when the power went is
-      // something this device can no longer know the fate of, and saying "..."
-      // forever would be a claim it cannot support.
-      p->delivered = (flags & 2) != 0;
-      p->trip_ms = trip;
-    }
-    f.close();
-
-    // Restoring is not a change. add() marks the log dirty because that is what
-    // it means for a new message, and load() reuses it - so a history just read
-    // back correctly was written out again twenty seconds after every boot.
-    dirty = false;
-    dirty_at = 0;
-#else
-    (void) path;
-#endif
-  }
-};
 
 static RiftMsgLog msg_log;
 
@@ -805,6 +150,61 @@ static bool riftConvIsMuted(const RiftConvKey& conv) {
 
 bool UITask::isChannelMuted(uint8_t channel_idx) const {
   return riftConvIsMuted(riftChannelConv(channel_idx));
+}
+
+// Which node a path hash points at, and a route as a readable line.
+//
+// Free rather than methods on NODES, because the node card draws a route too and
+// the second copy of this would be a second chance to disagree about what a route
+// is. The candidate set is the whole advert cache and the stored contact table, not
+// the nodes one screen happens to be showing - a hash colliding with a contact that
+// has not been heard recently used to resolve as unique and name the wrong node with
+// full confidence.
+static int riftResolveHash(const uint8_t* hash, uint8_t len, char* name, size_t name_len) {
+  if (len > sizeof(AdvertPath::pubkey_prefix)) len = sizeof(AdvertPath::pubkey_prefix);
+  return the_mesh.resolvePathHash(hash, len, name, name_len);
+}
+
+// path_len is Packet's raw encoding, so both the hop count and the hash size come
+// out of it - see riftHopCount. *ambiguous counts positions that could not be
+// resolved to one node; a single position may have had several candidates behind it,
+// which is why this counts positions and not candidates.
+static void riftFormatRoute(const uint8_t* path, uint8_t path_len,
+                            char* out, size_t out_size, int* ambiguous) {
+  out[0] = 0;
+  *ambiguous = 0;
+  int hops = (int) riftHopCount(path_len);
+  uint8_t hsz = riftHashSize(path_len);
+  if (path_len == RIFT_PATH_UNKNOWN || hops == 0 || hsz == 0) return;
+
+  size_t used = 0;
+  for (int k = 0; k < hops; k++) {
+    const char* label = "?";
+    char resolved[32], drawable[32];
+    int via = riftResolveHash(&path[k * hsz], hsz, resolved, sizeof(resolved));
+    if (via == RIFT_RESOLVE_AMBIGUOUS) (*ambiguous)++;
+    else if (via == RIFT_RESOLVE_UNIQUE) {
+      // Through the same translation every other name on screen goes through. Route
+      // labels were the one place that skipped it, so a repeater whose advertised
+      // name carries a Norwegian character drew its UTF-8 bytes raw - "Blystadlia
+      // rÿÇ" on the node card, and the same on the NODES route row long before the
+      // card existed. Found by reading the card off the device rather than by
+      // reading the code.
+      riftTranslateUTF8(drawable, resolved, sizeof(drawable));
+      label = drawable;
+    }
+
+    size_t need = strlen(label) + (used ? 3 : 0);
+    if (used + need >= out_size - 4) {              // room for " ..."
+      StrHelper::strncpy(out + used, " ...", out_size - used);
+      return;
+    }
+    if (used) { memcpy(out + used, " \xAF ", 3); used += 3; }   // CP437 0xAF, a right guillemet
+    size_t n = strlen(label);
+    memcpy(out + used, label, n);
+    used += n;
+    out[used] = 0;
+  }
 }
 
 
@@ -1269,72 +669,6 @@ static inline uint32_t riftLocal(uint32_t utc) {
   return riftLocalFromUtc(utc, rift_tz_quarters);
 }
 
-#ifdef RIFT_RADAR
-// Which radios RADAR sweeps. Three states rather than two switches: with both off
-// the screen has nothing to do, and leaving RADAR already powers everything down -
-// so a fourth state would be a way to reach a dead screen and nothing else.
-//
-// It shortens the sweep as well as the list, which is the other half of why it was
-// asked for: one radio per cycle instead of two.
-#define RIFT_SRC_BOTH 0
-#define RIFT_SRC_WIFI 1
-#define RIFT_SRC_BLE  2
-uint8_t rift_radar_src = RIFT_SRC_BOTH;
-static inline bool riftScanWifi() { return rift_radar_src != RIFT_SRC_BLE; }
-static inline bool riftScanBle()  { return rift_radar_src != RIFT_SRC_WIFI; }
-#endif
-
-#ifdef RIFT_RADAR
-// ------------------------------------------------------------- proximity watch
-//
-// A handful of RF devices marked from RADAR, and an alert when one of them turns
-// up. Declared here rather than beside the scan tables because the settings file
-// below has to write it.
-//
-// Two limits are worth stating where the code is, not only in the README:
-//
-// The key is a hardware address, and modern BLE devices rotate theirs every few
-// minutes for exactly the reason this feature exists. Marking a phone or a watch
-// will stop matching when it next re-randomises. It holds for Wi-Fi access points,
-// whose BSSID is stable, and for BLE devices with a static address - many beacons,
-// tags and headphones.
-//
-// And RADAR tears the radios down when you leave the screen, deliberately: one
-// antenna shared with LoRa and no watchdog on the main loop. So an alert fires only
-// while RADAR is open. Making it fire in the background is a separate decision with
-// a real cost to the mesh, and it has not been taken.
-// Twelve rather than four. Four was enough when a watch was only an arrival alert,
-// but a watch now also carries the name you gave the device - and "remember which is
-// which" does not work with four slots. Each entry is about forty bytes, so this
-// costs a few hundred, and the settings loader already clamps a longer file to
-// whatever this is. An older build reading a newer file keeps the first four.
-#define RIFT_WATCH_MAX 12
-// How long without a sighting before a device counts as gone. A passive scan only
-// sees a device when it chooses to transmit, and a BLE beacon can be quiet for tens
-// of seconds, so this is generous - a shorter window would report it leaving and
-// arriving repeatedly while it sat still.
-#define RIFT_WATCH_GONE_MILLIS   90000UL
-// Minimum between two alerts for the same device, so one that sits at the edge of
-// range cannot alert on every sweep.
-#define RIFT_WATCH_REARM_MILLIS 300000UL
-
-struct RfWatch {
-  uint8_t key[6];
-  bool    is_wifi;
-  char    name[24];        // display only; the key is the identity
-  bool    present;         // last known state, so only the transition alerts
-  unsigned long last_alert;
-};
-static RfWatch rf_watch[RIFT_WATCH_MAX];
-static int rf_watch_count = 0;
-
-static int rfWatchFind(const uint8_t* key, bool is_wifi) {
-  for (int i = 0; i < rf_watch_count; i++) {
-    if (rf_watch[i].is_wifi == is_wifi && memcmp(rf_watch[i].key, key, 6) == 0) return i;
-  }
-  return -1;
-}
-#endif
 #ifdef RIFT_SPEAKER
 #include <helpers/ui/TDeckSpeaker.h>
 static TDeckSpeaker rift_speaker;
@@ -1380,6 +714,37 @@ static void riftPlay(const TDeckSpeaker::Step* seq, int n, uint8_t gain) {
 
 uint16_t rift_msg_wakes = 0;
 uint32_t rift_last_wake_ms = 0;
+
+// How long the main loop takes to come round, which is how long the radio waits
+// between calls to the_mesh.loop().
+//
+// Kept here rather than in main.cpp because that file is shared with three other
+// UIs. loop() runs the mesh, then the interface manager and the sensors, then this
+// one - so the interval between two entries to UITask::loop() is one turn of the
+// whole loop, and that is the rate at which the radio is actually serviced.
+//
+// The maximum is what a missed packet is attributed to. The mean says whether that
+// maximum is the ordinary case or an outlier worth going after, which is the
+// difference between optimising the frame and optimising the one screen that
+// blocks.
+//
+// The turn a screen dump ran in is excluded, and this is not tidying up an
+// inconvenient number. riftStreamFrame() writes 153,600 bytes to the serial port
+// from inside this loop, and the first reading taken off a device measured a
+// maximum of 841.6ms that was the dump and nothing else - the bench command the
+// host used to read the row was the largest thing the row had ever seen. A
+// measurement whose only remote read perturbs it reports the reader, so the turn
+// is dropped rather than counted.
+//
+// Dropped turns are counted and shown, because a silent exclusion is a different
+// way of lying about the same thing: the row says how many it left out.
+static uint32_t rift_loop_prev_us = 0;
+static uint32_t rift_loop_max_us = 0;
+static uint64_t rift_loop_total_us = 0;
+static uint32_t rift_loop_count = 0;
+static uint32_t rift_loop_skipped = 0;
+static bool     rift_loop_seen = false;   // micros() can legitimately read 0 once
+static bool     rift_loop_perturbed = false;  // a dump ran in the turn just ending
 
 // Four bytes on SPIFFS: magic, version, flags. Small enough that the write cost
 // that dominates the message log does not apply, and it only happens when a
@@ -1491,6 +856,27 @@ void riftLoadSettings() {
         }
       }
     }
+
+    // Favourites. Absent in any file written before they existed, and absent means
+    // none - the same bargain every section above makes, which is why none of them
+    // needed a version bump and neither does this.
+    //
+    // Through add() rather than a raw append, for the reason the scopes and the mutes
+    // give: it refuses a duplicate and it refuses to write past the array, so a
+    // truncated or hand-edited count cannot produce either. A count claiming more
+    // records than the file holds stops when the read fails and keeps what arrived.
+    {
+      RiftFavourites& fv = riftFavs();
+      fv.reset();
+      uint8_t nf = 0;
+      if (f.read(&nf, 1) == 1) {
+        for (int i = 0; i < (int) nf; i++) {
+          uint8_t k[RIFT_FAV_KEY_LEN];
+          if (f.read(k, RIFT_FAV_KEY_LEN) != RIFT_FAV_KEY_LEN) break;
+          fv.add(k);
+        }
+      }
+    }
   }
   f.close();
 
@@ -1594,6 +980,19 @@ void riftSaveSettings() {
       uint32_t fp = mt.at(i).channel_fp;
       ok = ok && (f.write(&idx, 1) == 1);
       ok = ok && (f.write((const uint8_t*) &fp, 4) == 4);
+    }
+  }
+
+  // Favourites, appended after the mutes for the reason every section above gives:
+  // last is where a new one goes, and a file written before this existed still reads
+  // everything ahead of it. Six bytes an entry and no name - the name comes from the
+  // contact table, which is where it can change without this file going stale.
+  {
+    RiftFavourites& fv = riftFavs();
+    uint8_t nf = (uint8_t) fv.n;
+    ok = ok && (f.write(&nf, 1) == 1);
+    for (int i = 0; i < fv.n && ok; i++) {
+      ok = ok && (f.write(fv.keys[i], RIFT_FAV_KEY_LEN) == RIFT_FAV_KEY_LEN);
     }
   }
 
@@ -3978,13 +3377,19 @@ public:
     // enough; then open / write / close, so a slow one can be attributed rather
     // than guessed.
     //
-    // Measured on the device across five saves of the full 48 entries: 303-305ms
-    // in the steady state, of which 285-288ms is the open and 1-2ms is the write.
-    // That settles what this row used to leave open - breaking the write into
-    // pieces would buy nothing, because writing is not what blocks. It is
-    // SPIFFS.open(path, "w") truncating the file. Creating a slot that does not
-    // exist yet costs 710-970ms, which happens twice in a device's life, once per
-    // generation.
+    // At 48 entries this read 303-305ms in the steady state, of which 285-288ms was
+    // the open and 1-2ms the write, and the conclusion drawn from it was that
+    // breaking the write into pieces would buy nothing because writing was not what
+    // blocked.
+    //
+    // At 96 the same row reads "96 msg 569ms" with phases "252 137 180". The write is
+    // no longer 1-2ms and the open is no longer the whole story: write and close
+    // together are 317 of the 569. That conclusion is withdrawn - see the note in
+    // RiftMsgLog.h - and this row is what withdrew it, which is the reason it prints
+    // the phases rather than a total.
+    //
+    // Creating a generation that does not exist yet still costs 710-970ms, which
+    // happens twice in a device's life.
     snprintf(tmp, sizeof(tmp), "%d msg %ums", msg_log.count, (unsigned) msg_log.last_save_ms);
     addReading("MSGLOG", tmp, rift_pal.fg);
     snprintf(tmp, sizeof(tmp), "%u %u %u", (unsigned) msg_log.t_open, (unsigned) msg_log.t_write,
@@ -3995,6 +3400,54 @@ public:
     addRow(ROW_GROUP, -1, "RUNTIME");
     snprintf(tmp, sizeof(tmp), "%uK", (unsigned) (ESP.getFreeHeap() / 1024));
     addReading("FREE HEAP", tmp, rift_pal.fg);
+
+    // The two numbers the display work has to start from, and neither existed
+    // before this row. FRAME is what endFrame() costs - see ST7789NativeDisplay.h
+    // for why the 30.7ms of SPI clock is a floor and not the answer. LOOP is how
+    // long the radio waits between services, which is the thing the frame cost
+    // matters through: the panel and the SX1262 are on the same two wires.
+    //
+    // Tenths of a millisecond, because the interesting differences are smaller
+    // than a millisecond and a bare integer would hide them.
+#ifdef RIFT_DISPLAY
+    {
+      const uint32_t n = display.blitCount();
+      if (n == 0) {
+        // No canvas, or nothing drawn yet. The fallback path writes straight to
+        // the panel and has no bulk transfer to time.
+        addReading("FRAME", "no blit yet", rift_pal.mid);
+      } else {
+        const uint32_t mx = display.blitMaxMicros();
+        char mean_s[RIFT_MS_BUF_LEN], max_s[RIFT_MS_BUF_LEN];
+        riftFormatMicrosMs(display.blitMeanMicros(), mean_s, sizeof(mean_s));
+        riftFormatMicrosMs(mx, max_s, sizeof(max_s));
+        snprintf(tmp, sizeof(tmp), "%s max %sms n%u", mean_s, max_s, (unsigned) n);
+        // 50ms is well clear of the 30.7ms floor, so a maximum above it is the
+        // PSRAM read or a frame that was interrupted, not the transfer.
+        addReading("FRAME", tmp, mx > 50000 ? rift_pal.accent : rift_pal.fg);
+      }
+    }
+#endif
+    if (rift_loop_count == 0) {
+      addReading("LOOP", "no turn yet", rift_pal.mid);
+    } else {
+      char mean_s[RIFT_MS_BUF_LEN], max_s[RIFT_MS_BUF_LEN];
+      riftFormatMicrosMs((uint32_t) (rift_loop_total_us / rift_loop_count),
+                         mean_s, sizeof(mean_s));
+      riftFormatMicrosMs(rift_loop_max_us, max_s, sizeof(max_s));
+      // "x2" is two turns dropped because a screen dump ran in them. Shown rather
+      // than kept quiet, so the row is read knowing what it excludes.
+      if (rift_loop_skipped > 0) {
+        snprintf(tmp, sizeof(tmp), "%s max %sms x%u", mean_s, max_s,
+                 (unsigned) rift_loop_skipped);
+      } else {
+        snprintf(tmp, sizeof(tmp), "%s max %sms", mean_s, max_s);
+      }
+      // 100ms: long enough that a packet can have come and gone inside it, and
+      // far enough above a frame that this flags a blocking screen rather than
+      // the ordinary cost of drawing one.
+      addReading("LOOP", tmp, rift_loop_max_us > 100000 ? rift_pal.accent : rift_pal.fg);
+    }
     {
       esp_reset_reason_t reason = esp_reset_reason();
       const char* rr;
@@ -4543,6 +3996,38 @@ class RiftConstellationScreen : public RiftScreen {
   unsigned long _last_refresh;
   bool _refreshed_once;
 
+  // What has been typed to narrow the list. Sixteen characters, which is longer than
+  // any key prefix worth typing and past the point where a name fragment stops
+  // narrowing anything.
+  //
+  // Typing goes straight here with no mode to enter, because handleInput() returned
+  // false for every printable character and nothing else on this screen wants them.
+  // A mode would need a way in, a way out, and a way to show which one you are in,
+  // to arrive at the same place.
+  char _filter[17];
+  int _filter_len;
+
+  // The band and the heading summarise the mesh, so they are taken before the filter
+  // narrows the list - a histogram of the three nodes matching "osl" would answer a
+  // question nobody asked, and the screen's stated job is how big the mesh is and how
+  // spread out.
+  //
+  // They also moved out of render() to get here, which is worth more than it looks:
+  // this walk ran on every frame, and a frame holds the SPI bus away from the SX1262
+  // for 40.7ms. Now it runs with the three-second refresh that produced the data.
+  int _bucket[RIFT_HOPB_COUNT];
+  int _recent;
+  int _maxhop;
+  int _heard_total;      // valid entries before filtering; _count is after
+
+  // Favourites occupy the front of the list, and the ones that have not been heard
+  // since boot occupy [_inj_lo, _inj_hi) inside that. Held as a range rather than a
+  // flag on the row because AdvertPath is MyMesh's type and this is a fact about
+  // this screen's arrangement of it, not about the node.
+  int _fav_shown;
+  int _inj_lo;
+  int _inj_hi;
+
   static const int BUCKET_X[RIFT_HOPB_COUNT];
   static const char* BUCKET_LABEL[RIFT_HOPB_COUNT];
   // 58, not the 64 four columns could afford: five on a 63px pitch leaves 5px of
@@ -4640,16 +4125,107 @@ class RiftConstellationScreen : public RiftScreen {
 
   void refresh() {
     int n = the_mesh.getRecentlyHeard(_paths, RIFT_CONST_MAX);
+
+    // The summary is taken over everything heard, before the filter, because it
+    // describes the mesh rather than the query - see the fields. It has to happen
+    // here and not after the compaction below, which throws the non-matching entries
+    // away.
+    const uint32_t now_ms = (uint32_t) millis();
+    for (int b = 0; b < RIFT_HOPB_COUNT; b++) _bucket[b] = 0;
+    _recent = 0;
+    _maxhop = -1;
+    _heard_total = 0;
+    for (int i = 0; i < n; i++) {
+      if (!_paths[i].valid) continue;
+      _heard_total++;
+      _bucket[bucketOf(_paths[i].path_len)]++;
+      if ((now_ms - _paths[i].recv_millis) < 1800000u) _recent++;
+      if (_paths[i].path_len != RIFT_PATH_UNKNOWN) {
+        int h = (int) riftHopCount(_paths[i].path_len);
+        if (h > _maxhop) _maxhop = h;
+      }
+    }
+
     // Occupancy is the valid flag, not a timestamp or a name: recv_timestamp is
     // legitimately zero on a node whose RTC was never set, and inferring emptiness
     // from it hid every node this device had heard.
+    //
+    // The filter narrows the same pass. _filter is empty until something is typed and
+    // riftNodeMatches answers true for an empty query, so the unfiltered case walks
+    // the same code rather than a second copy of it.
     int live = 0;
     for (int i = 0; i < n; i++) {
       if (!_paths[i].valid) continue;
+      if (!riftNodeMatches(_paths[i].name, _paths[i].pubkey_prefix,
+                           sizeof(_paths[i].pubkey_prefix), _filter)) continue;
       if (live != i) _paths[live] = _paths[i];
       live++;
     }
     _count = live;
+
+    // ---- favourites to the front
+    //
+    // A stable partition and not a sort: getRecentlyHeard ordered this list by when
+    // each node was last heard, and that order is the screen's other answer. Rotating
+    // each favourite into place keeps the ones it passes in their own order, where
+    // swapping it with the entry at the write position would not.
+    {
+      RiftFavourites& fv = riftFavs();
+      int w = 0;
+      for (int i = 0; i < _count; i++) {
+        if (!fv.has(_paths[i].pubkey_prefix)) continue;
+        if (w != i) {
+          AdvertPath t = _paths[i];
+          memmove(&_paths[w + 1], &_paths[w], (size_t) (i - w) * sizeof(_paths[0]));
+          _paths[w] = t;
+        }
+        w++;
+      }
+      _fav_shown = w;
+    }
+
+    // ---- favourites that have not been heard since boot
+    //
+    // The cache is cleared at startup, so without this a favourite is missing exactly
+    // when it is most wanted: after a reflash, when nothing has been heard yet and
+    // the list is empty. The point of marking a node is that you can find it later,
+    // and "later" includes after a power cycle.
+    //
+    // They go after the heard favourites, because one you can reach is worth more
+    // than one you cannot, and they are drawn saying so rather than shown with an age
+    // computed from a recv_millis of zero.
+    _inj_lo = _fav_shown;
+    _inj_hi = _fav_shown;
+    {
+      RiftFavourites& fv = riftFavs();
+      for (int i = 0; i < fv.n && _count < RIFT_CONST_MAX; i++) {
+        bool present = false;
+        for (int j = 0; j < _count && !present; j++) {
+          if (memcmp(_paths[j].pubkey_prefix, fv.keys[i], RIFT_FAV_KEY_LEN) == 0) present = true;
+        }
+        if (present) continue;
+
+        // The name comes from the contact table, which is the thing that knows it and
+        // the thing that keeps knowing it across a reboot. A favourite for a key that
+        // is not a contact gets no name and is still listed: it is a key the user
+        // chose to keep, and hiding it would be deciding the choice was a mistake.
+        AdvertPath p;
+        memset(&p, 0, sizeof(p));
+        memcpy(p.pubkey_prefix, fv.keys[i], RIFT_FAV_KEY_LEN);
+        ContactInfo* c = the_mesh.lookupContactByPubKey(fv.keys[i], RIFT_FAV_KEY_LEN);
+        if (c != NULL) StrHelper::strncpy(p.name, c->name, sizeof(p.name));
+        p.path_len = RIFT_PATH_UNKNOWN;
+        p.valid = true;
+
+        if (!riftNodeMatches(p.name, p.pubkey_prefix, sizeof(p.pubkey_prefix), _filter)) continue;
+
+        memmove(&_paths[_inj_hi + 1], &_paths[_inj_hi],
+                (size_t) (_count - _inj_hi) * sizeof(_paths[0]));
+        _paths[_inj_hi] = p;
+        _inj_hi++;
+        _count++;
+      }
+    }
 
     // Re-find the selection by key. If it is gone the cursor stays where it is and
     // adopts what is there now, which is a visible change; silently carrying the
@@ -4678,31 +4254,7 @@ class RiftConstellationScreen : public RiftScreen {
   // `?` and never the first candidate: a hop byte is only a prefix of a repeater's
   // public key, so two nodes can share one.
   void routeText(const AdvertPath* p, char* out, size_t out_size, int* ambiguous) {
-    out[0] = 0;
-    *ambiguous = 0;
-    int hops = (int) riftHopCount(p->path_len);
-    uint8_t hsz = riftHashSize(p->path_len);
-    if (p->path_len == 0xFF || hops == 0 || hsz == 0) return;
-
-    size_t used = 0;
-    for (int k = 0; k < hops; k++) {
-      const char* label = "?";
-      char resolved[32];
-      int via = resolveHash(&p->path[k * hsz], hsz, resolved, sizeof(resolved));
-      if (via == RIFT_RESOLVE_AMBIGUOUS) (*ambiguous)++;
-      else if (via == RIFT_RESOLVE_UNIQUE) label = resolved;
-
-      size_t need = strlen(label) + (used ? 3 : 0);
-      if (used + need >= out_size - 4) {              // room for " ..."
-        StrHelper::strncpy(out + used, " ...", out_size - used);
-        return;
-      }
-      if (used) { memcpy(out + used, " \xAF ", 3); used += 3; }   // CP437 0xAF, a right guillemet
-      size_t n = strlen(label);
-      memcpy(out + used, label, n);
-      used += n;
-      out[used] = 0;
-    }
+    riftFormatRoute(p->path, p->path_len, out, out_size, ambiguous);
   }
 
   // How tall a row is: 12, or 36 for the selected one because the route and the
@@ -4730,12 +4282,45 @@ class RiftConstellationScreen : public RiftScreen {
     }
   }
 
+  // A favourite, as a diamond. Five pixels like the freshness square beside it so
+  // the two read as one pair of marks, and a different shape so they cannot be
+  // confused: that one is an observation, this one is a choice.
+  void renderFavMark(DisplayDriver& display, int x, int y, uint16_t ink) {
+    display.setColor(ink);
+    display.fillRect(x + 2, y,     1, 1);
+    display.fillRect(x + 1, y + 1, 3, 1);
+    display.fillRect(x,     y + 2, 5, 1);
+    display.fillRect(x + 1, y + 3, 3, 1);
+    display.fillRect(x + 2, y + 4, 1, 1);
+  }
+
  public:
   RiftConstellationScreen(UITask* task)
      : _task(task), _count(0), _sel(0), _scroll(0), _have_sel(false),
-       _last_refresh(0), _refreshed_once(false) {
+       _last_refresh(0), _refreshed_once(false), _filter_len(0),
+       _recent(0), _maxhop(-1), _heard_total(0),
+       _fav_shown(0), _inj_lo(0), _inj_hi(0) {
     memset(_sel_key, 0, sizeof(_sel_key));
     for (int i = 0; i < RIFT_CONST_MAX; i++) _row_y[i] = -1;
+    _filter[0] = 0;
+    for (int b = 0; b < RIFT_HOPB_COUNT; b++) _bucket[b] = 0;
+  }
+
+  // Typing narrows the list as the characters go in, rather than at the next
+  // three-second refresh: a query that takes three seconds to do anything reads as
+  // one that did not work.
+  //
+  // The cursor goes to the first match. Carrying it onto whatever survived the filter
+  // was the other option and is worse - it would leave the cursor at a position in a
+  // list the user has just replaced, which is a position that no longer means
+  // anything.
+  void filterChanged() {
+    _have_sel = false;
+    _sel = 0;
+    _scroll = 0;
+    refresh();
+    _last_refresh = millis();
+    _refreshed_once = true;
   }
 
   int render(DisplayDriver& display) override {
@@ -4746,17 +4331,10 @@ class RiftConstellationScreen : public RiftScreen {
     }
     display.setTextSize(1);
 
+    // The band and the heading read _bucket, _recent and _maxhop, which refresh()
+    // computed over the unfiltered set three seconds ago at the latest. They used to
+    // be walked here, on every frame.
     char tmp[64];
-    int counts[RIFT_HOPB_COUNT];
-    for (int b = 0; b < RIFT_HOPB_COUNT; b++) counts[b] = 0;
-    int maxhop = -1;
-    for (int i = 0; i < _count; i++) {
-      counts[bucketOf(_paths[i].path_len)]++;
-      if (_paths[i].path_len != RIFT_PATH_UNKNOWN) {
-        int h = (int) riftHopCount(_paths[i].path_len);
-        if (h > maxhop) maxhop = h;
-      }
-    }
 
     // Geometry from design/redesign-2026-09/rift-nodes-spec.md: heading y 2,
     // bucket labels y 14, tracks y 24, counts y 30, column headings y 44, rows
@@ -4771,23 +4349,38 @@ class RiftConstellationScreen : public RiftScreen {
     // so on a mesh larger than it the count is not a claim about the mesh; when it
     // is at capacity the eviction count says so, because that is the number which
     // decides whether the cache is too small.
-    int recent = 0;
-    for (int i = 0; i < _count; i++) {
-      if (((uint32_t) millis() - _paths[i].recv_millis) < 1800000u) recent++;
-    }
     int cache_used = the_mesh.getPathCacheUsed(), cache_size = the_mesh.getPathCacheSize();
-    if (cache_used >= cache_size && the_mesh.getPathEvictions() > 0) {
-      snprintf(tmp, sizeof(tmp), "%d RECENT %s %d NODES %s %u EVICT", recent, RIFT_DOT, _count,
+    if (_filter_len > 0) {
+      // While a query is up it takes the heading, because it is the thing that
+      // decides what the list below contains and a filter you cannot see is a list
+      // that is lying. The trailing bar is the same caret the conversation list uses
+      // for a draft: this is a field being typed into, not a label.
+      //
+      // "3/42" and not "3 NODES", so the count that vanished is still on screen -
+      // a query matching nothing reads as 0/42 rather than as an empty mesh.
+      snprintf(tmp, sizeof(tmp), "FIND %s_ %s %d/%d", _filter, RIFT_DOT,
+               _count, _heard_total);
+      display.setColor(rift_pal.accent);
+      display.drawTextLeftAlign(2, 2, tmp);
+      display.setColor(rift_pal.mid);
+    } else if (cache_used >= cache_size && the_mesh.getPathEvictions() > 0) {
+      snprintf(tmp, sizeof(tmp), "%d RECENT %s %d NODES %s %u EVICT", _recent, RIFT_DOT, _count,
                RIFT_DOT, (unsigned) the_mesh.getPathEvictions());
+      display.drawTextLeftAlign(2, 2, tmp);
     } else if (_count == 0) {
       StrHelper::strncpy(tmp, "0 NODES", sizeof(tmp));
+      display.drawTextLeftAlign(2, 2, tmp);
     } else {
-      snprintf(tmp, sizeof(tmp), "%d RECENT %s %d NODES", recent, RIFT_DOT, _count);
+      snprintf(tmp, sizeof(tmp), "%d RECENT %s %d NODES", _recent, RIFT_DOT, _count);
+      display.drawTextLeftAlign(2, 2, tmp);
     }
-    display.drawTextLeftAlign(2, 2, tmp);
-    if (maxhop >= 0) {
-      snprintf(tmp, sizeof(tmp), "MAX %d HOPS", maxhop);
+    if (_maxhop >= 0 && _filter_len == 0) {
+      snprintf(tmp, sizeof(tmp), "MAX %d HOPS", _maxhop);
       display.drawTextRightAlign(314, 2, tmp);
+    } else if (_filter_len > 0) {
+      // The way out, said where the query is, because ESC is not a key anyone
+      // guesses at on a screen that has never taken text before.
+      display.drawTextRightAlign(314, 2, "ESC: clear");
     }
 
     // ---- bucket band. The bars compare the five with each other, not against an
@@ -4795,20 +4388,20 @@ class RiftConstellationScreen : public RiftScreen {
     // The track is always drawn, so an empty bucket is a shape rather than an
     // absence.
     int maxc = 0;
-    for (int b = 0; b < RIFT_HOPB_COUNT; b++) if (counts[b] > maxc) maxc = counts[b];
+    for (int b = 0; b < RIFT_HOPB_COUNT; b++) if (_bucket[b] > maxc) maxc = _bucket[b];
     for (int b = 0; b < RIFT_HOPB_COUNT; b++) {
       display.setColor(rift_pal.mid);
       display.drawTextLeftAlign(BUCKET_X[b], 14, BUCKET_LABEL[b]);
       display.setColor(rift_pal.rule);
       display.drawRect(BUCKET_X[b], 24, BUCKET_BAR_W, 4);
-      if (counts[b] > 0 && maxc > 0) {
-        int w = (counts[b] * BUCKET_BAR_W + maxc / 2) / maxc;
+      if (_bucket[b] > 0 && maxc > 0) {
+        int w = (_bucket[b] * BUCKET_BAR_W + maxc / 2) / maxc;
         if (w < 2) w = 2;
         display.setColor(rift_pal.fg);
         display.fillRect(BUCKET_X[b], 24, w, 4);
       }
       display.setColor(rift_pal.fg);
-      snprintf(tmp, sizeof(tmp), "%d", counts[b]);
+      snprintf(tmp, sizeof(tmp), "%d", _bucket[b]);
       display.drawTextLeftAlign(BUCKET_X[b], 30, tmp);
     }
 
@@ -4822,11 +4415,22 @@ class RiftConstellationScreen : public RiftScreen {
 
     if (_count == 0) {
       display.setColor(rift_pal.mid);
-      // "since boot" is part of the claim: this cache is cleared at startup, so an
-      // empty list after a restart is the normal state and not a fault. The second
-      // line says what to do about it.
-      display.drawTextLeftAlign(2, 56, "NO NODES HEARD SINCE BOOT");
-      display.drawTextLeftAlign(2, 68, "ADVERT NEAR on RIFT asks neighbours");
+      if (_filter_len > 0) {
+        // A different emptiness, and telling the user the mesh is silent when it is
+        // not would send them to send an advert over a spelling mistake. The nodes
+        // are there; the query is what nothing matched.
+        snprintf(tmp, sizeof(tmp), "NOTHING MATCHES \"%s\"", _filter);
+        display.drawTextLeftAlign(2, 56, tmp);
+        snprintf(tmp, sizeof(tmp), "%d node%s heard %s BACKSPACE or ESC",
+                 _heard_total, _heard_total == 1 ? "" : "s", RIFT_DOT);
+        display.drawTextLeftAlign(2, 68, tmp);
+      } else {
+        // "since boot" is part of the claim: this cache is cleared at startup, so an
+        // empty list after a restart is the normal state and not a fault. The second
+        // line says what to do about it.
+        display.drawTextLeftAlign(2, 56, "NO NODES HEARD SINCE BOOT");
+        display.drawTextLeftAlign(2, 68, "ADVERT NEAR on RIFT asks neighbours");
+      }
       renderNavBar(display, RIFT_NAV_NODES);
       return 1000;
     }
@@ -4853,17 +4457,32 @@ class RiftConstellationScreen : public RiftScreen {
       }
       uint16_t ink = sel ? rift_pal.on_accent : rift_pal.fg;
 
+      // Whether this row is a favourite the mesh has not mentioned since boot. The
+      // row is drawn from a contact record rather than an observation, so anything
+      // that would describe an observation has to say it has none.
+      const bool not_heard = (i >= _inj_lo && i < _inj_hi);
+
       // Freshness is shape, not brightness: four grey levels collapse into each
-      // other in sunlight, a filled versus hollow square does not.
+      // other in sunlight, a filled versus hollow square does not. A node never
+      // heard gets no square at all - the hollow one means "heard, a while ago", and
+      // drawing it here would claim an observation that never happened.
       display.setColor(ink);
-      uint32_t age_s = ((uint32_t) millis() - p->recv_millis) / 1000u;
-      if (age_s < 1800u) display.fillRect(2, y + 1, 5, 5);
-      else               display.drawRect(2, y + 1, 5, 5);
+      if (!not_heard) {
+        uint32_t age_s = ((uint32_t) millis() - p->recv_millis) / 1000u;
+        if (age_s < 1800u) display.fillRect(2, y + 1, 5, 5);
+        else               display.drawRect(2, y + 1, 5, 5);
+      }
 
       char shown_name[24];
       riftTranslateUTF8(shown_name, p->name, sizeof(shown_name));
       display.setColor(ink);
-      display.drawTextEllipsized(10, y, 120, shown_name);
+      // 114 rather than 120, which is the one cell the favourite mark costs. Paid
+      // from every long name to say something about a few rows, which is the trade
+      // this file argues against elsewhere - taken here because a favourite that
+      // cannot be picked out of the list is not a favourite, and the gap between the
+      // name column and the reach scale is four pixels and cannot hold a mark.
+      display.drawTextEllipsized(10, y, 114, shown_name);
+      if (riftFavs().has(p->pubkey_prefix)) renderFavMark(display, 126, y + 1, ink);
 
       // Saturating at the last cell rather than clamping the printed value: the
       // digit still says 21 where the bar has run out of room to.
@@ -4879,8 +4498,16 @@ class RiftConstellationScreen : public RiftScreen {
       }
       display.drawTextRightAlign(284, y, tmp);
 
-      ageText(p->recv_millis, tmp, sizeof(tmp));
-      display.setColor(ink);
+      if (not_heard) {
+        // An age computed from a recv_millis of zero would read as however long the
+        // device has been up, which is a measurement of the wrong thing stated with
+        // the confidence of the right one.
+        StrHelper::strncpy(tmp, "-", sizeof(tmp));
+        display.setColor(sel ? rift_pal.on_accent : rift_pal.mid);
+      } else {
+        ageText(p->recv_millis, tmp, sizeof(tmp));
+        display.setColor(ink);
+      }
       display.drawTextRightAlign(314, y, tmp);
 
       if (sel) {
@@ -4924,7 +4551,16 @@ class RiftConstellationScreen : public RiftScreen {
           else if (contact->type == RIFT_ADV_SENSOR)        action = "ENTER: read";
           else                                              action = "no action for this type";
         }
-        display.drawTextLeftAlign(10, y + 24, action);
+        // The favourite key goes on the same line, for the reason the line above it
+        // gives: repeater control shipped without a hint and was invisible. '*' is
+        // worse than that was - it is a key nobody would try on a screen that until
+        // now sent every character to the filter, so the hint is the whole of its
+        // discoverability. It says which way it will go, because a toggle whose label
+        // does not is a coin flip.
+        char act[48];
+        snprintf(act, sizeof(act), "%s %s %s", action, RIFT_DOT,
+                 riftFavs().has(p->pubkey_prefix) ? "*: unfav" : "*: fav");
+        display.drawTextLeftAlign(10, y + 24, act);
 
         // Type and the absolute time it was heard, when the clock can say. The
         // spec's "RIGHT: control" is not offered: left and right are the screen
@@ -4997,24 +4633,66 @@ class RiftConstellationScreen : public RiftScreen {
     if (c == KEY_DOWN) { if (_sel + 1 < _count) { _sel++; captureSelection(); } return true; }
     if (c == KEY_ENTER) {
       if (_count == 0) { riftLogf("NODES enter: list empty"); return true; }
+      // Opens the card rather than acting, which is the behaviour change. Enter used
+      // to pick an action from the node's type - message, control, or an alert saying
+      // neither - and a row can only ever offer the most likely one. The facts that
+      // decide which action is actually wanted were spread across the advert cache,
+      // the contact table, the message log and the route ring; the card puts them on
+      // one screen and carries the same actions at the bottom of it.
+      //
+      // It costs one more press to send a message from here. COMMS has its own
+      // conversation list for that, and what NODES is for is deciding whether a node
+      // is worth messaging at all.
+      _task->openNodeCard(_paths[_sel], !(_sel >= _inj_lo && _sel < _inj_hi));
+      return true;
+    }
+
+    // '*' marks the selected node, and is taken out of the query rather than given a
+    // key of its own. No node name holds one and no hex key can contain one, so it
+    // costs the search nothing - and it is the shape of the mark it sets.
+    if (c == '*') {
+      if (_count == 0 || _sel < 0 || _sel >= _count) return true;
+      RiftFavourites& fv = riftFavs();
       const uint8_t* key = _paths[_sel].pubkey_prefix;
-      ContactInfo* contact = the_mesh.lookupContactByPubKey((uint8_t*) key, 6);
-      // Logged because this decision is invisible when it goes the wrong way:
-      // three outcomes look identical from the outside if none of them draws.
-      riftLogf("NODES enter %02X%02X: %s", key[0], key[1],
-               contact ? riftAdvertTypeName(contact->type) : "not a contact");
-      if (contact == NULL) {
-        _task->showAlert("Not a contact yet", 1400);
+      if (!fv.has(key) && fv.full()) {
+        // Said rather than swallowed: a mark that does not appear reads as a broken
+        // key, and the limit is the one thing that explains it.
+        _task->showAlert("16 favourites is the limit", 1600);
         return true;
       }
-      if (!riftCanDirectMessage(contact->type)) {
-        // Not a dead end any more. A repeater or room server cannot take a
-        // direct message, but it can be logged into and read, so Enter opens
-        // that panel instead of reporting what the key cannot do.
-        _task->openRepeaterPanel(key);
-        return true;
-      }
-      _task->startDirectMessage(key);
+      const bool now_fav = fv.toggle(key);
+      riftSaveSettings();
+      riftLogf("NODES fav %02X%02X: %s", key[0], key[1], now_fav ? "on" : "off");
+      // Rebuilt rather than redrawn: the node has just changed which group it sorts
+      // into. refresh() re-finds the selection by key, so the cursor follows it to
+      // the top instead of staying on whatever row the number used to mean.
+      refresh();
+      _last_refresh = millis();
+      return true;
+    }
+
+    // ---- the filter
+    //
+    // Both of these fall through when there is no query, so backspace and ESC keep
+    // whatever they meant on this screen before and only take over while something
+    // has been typed.
+    if (c == RIFT_KEY_BACK && _filter_len > 0) {
+      _filter[--_filter_len] = 0;
+      filterChanged();
+      return true;
+    }
+    if (c == KEY_CANCEL && _filter_len > 0) {
+      _filter[0] = 0;
+      _filter_len = 0;
+      filterChanged();
+      return true;
+    }
+    // Typing is the way in. There is no mode to enter because there was nothing to
+    // displace: every printable character reached this line and was dropped.
+    if (c >= 32 && c < 127 && _filter_len < (int) sizeof(_filter) - 1) {
+      _filter[_filter_len++] = c;
+      _filter[_filter_len] = 0;
+      filterChanged();
       return true;
     }
     return false;
@@ -5025,6 +4703,296 @@ const int RiftConstellationScreen::BUCKET_X[RIFT_HOPB_COUNT] =
   { 2, 65, 128, 191, 254 };
 const char* RiftConstellationScreen::BUCKET_LABEL[RIFT_HOPB_COUNT] =
   { "DIRECT", "1-2", "3-5", "6+", "NO ROUTE" };
+
+// The node card: what RIFT knows about one node, on one screen.
+//
+// NODES answers how far away a node is and how recently it spoke, and its selected
+// row adds the route and one action. What it could not answer are the questions that
+// decide whether to rely on a node: have I actually reached it, how long did that
+// take, and has the way there been moving? Every one of those facts already existed
+// - in the advert cache, the contact table, the message log and now the route ring -
+// and no two of them were on the same screen.
+//
+// A graphical mesh view was the other candidate for this round. It would have drawn
+// the same data with less of it legible: a 320x240 panel cannot place forty nodes
+// faithfully, and "who is two hops away" is a question the NODES bucket band already
+// answers better than a picture would.
+//
+// Opened with the AdvertPath rather than a key. NODES has the observation in hand,
+// and looking it up again would either walk the cache a second time or hand back a
+// pointer into a table the next advert rewrites. The copy is 48 bytes and cannot go
+// stale underneath the screen.
+class RiftNodeCardScreen : public RiftScreen {
+  UITask* _task;
+  AdvertPath _p;
+  bool _have;
+  // False for a favourite listed from the contact table alone - see the injection in
+  // RiftConstellationScreen::refresh(). Everything derived from an observation has to
+  // say it has none rather than compute from a recv_millis of zero.
+  bool _heard;
+
+  // The newest delivered direct message to this node, which is the only proof the
+  // device holds that it has ever actually reached it. An advert says the node is out
+  // there; an ack says something went there and came back.
+  const RiftMsgLog::Entry* lastAck() const {
+    RiftConvKey want = riftConvDM(_p.pubkey_prefix);
+    if (want.kind == RIFT_CONV_UNKNOWN) return NULL;
+    for (int i = msg_log.count - 1; i >= 0; i--) {
+      const RiftMsgLog::Entry* e = &msg_log.entries[i];
+      if (!e->outgoing || !e->delivered) continue;
+      if (!riftConvSame(e->conv, want)) continue;
+      return e;
+    }
+    return NULL;
+  }
+
+  // Milliseconds as seconds to one decimal. A round trip is tenths of a second at
+  // best and tens at worst, and a bare "1s" cannot tell a fast mesh from a slow one.
+  static void tripText(uint32_t ms, char* out, size_t n) {
+    snprintf(out, n, "%u.%us", (unsigned) (ms / 1000u), (unsigned) ((ms % 1000u) / 100u));
+  }
+
+  // label in mid, value in fg, value ellipsized rather than wrapped - every row here
+  // is one fact and a fact that needs two lines is a fact stated badly.
+  void row(DisplayDriver& display, int y, const char* label, const char* value,
+           uint16_t value_ink) {
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, y, label);
+    display.setColor(value_ink);
+    display.drawTextEllipsized(76, y, 238, value);
+  }
+
+ public:
+  RiftNodeCardScreen(UITask* task) : _task(task), _have(false), _heard(false) {
+    memset(&_p, 0, sizeof(_p));
+  }
+
+  bool openFor(const AdvertPath& p, bool heard) {
+    _p = p;
+    _have = true;
+    _heard = heard;
+    return true;
+  }
+
+  const uint8_t* key() const { return _p.pubkey_prefix; }
+
+  int render(DisplayDriver& display) override {
+    display.setTextSize(1);
+    display.setColor(rift_pal.bg);
+    display.fillRect(0, 0, 320, 240);
+    if (!_have) { _task->dismissOverlay(); return 200; }
+
+    char tmp[80];
+    ContactInfo* c = the_mesh.lookupContactByPubKey((uint8_t*) _p.pubkey_prefix, 6);
+
+    // ---- heading
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 2, "NODE");
+    display.drawTextRightAlign(314, 2, "BACKSPACE: back");
+
+    // ---- identity
+    char shown[40];
+    riftTranslateUTF8(shown, _p.name[0] ? _p.name : "(unnamed)", sizeof(shown));
+    display.setColor(rift_pal.fg);
+    display.drawTextEllipsized(2, 16, 286, shown);
+    if (riftFavs().has(_p.pubkey_prefix)) {
+      display.setColor(rift_pal.fg);
+      display.fillRect(296 + 2, 17, 1, 1);
+      display.fillRect(296 + 1, 18, 3, 1);
+      display.fillRect(296,     19, 5, 1);
+      display.fillRect(296 + 1, 20, 3, 1);
+      display.fillRect(296 + 2, 21, 1, 1);
+    }
+
+    // The key, because it is the identity and the name is only what the node claims
+    // to be called. Two nodes may advertise the same name; these six bytes are what
+    // every other part of the firmware matches on.
+    snprintf(tmp, sizeof(tmp), "%02X%02X%02X%02X%02X%02X %s %s",
+             _p.pubkey_prefix[0], _p.pubkey_prefix[1], _p.pubkey_prefix[2],
+             _p.pubkey_prefix[3], _p.pubkey_prefix[4], _p.pubkey_prefix[5], RIFT_DOT,
+             c != NULL ? riftAdvertTypeName(c->type) : "not a contact");
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 28, tmp);
+
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 42, 316, 1);
+
+    // ---- what is known, one fact a row
+    int y = 50;
+
+    if (!_heard) {
+      row(display, y, "HEARD", "not since boot", rift_pal.mid);
+    } else {
+      char age[RIFT_AGE_BUF_LEN];
+      riftFormatAge((uint32_t) millis() - _p.recv_millis, age, sizeof(age));
+      uint32_t clk = the_mesh.getRTCClock()->getCurrentTime();
+      if (riftClockPlausible(clk) && _p.recv_timestamp >= 1600000000u) {
+        int hh, mm;
+        riftCivilFromEpoch(riftLocal(_p.recv_timestamp), NULL, NULL, NULL, &hh, &mm);
+        snprintf(tmp, sizeof(tmp), "%s ago %s %02d:%02d", age, RIFT_DOT, hh, mm);
+      } else {
+        snprintf(tmp, sizeof(tmp), "%s ago", age);   // no invented clock time
+      }
+      row(display, y, "HEARD", tmp, rift_pal.fg);
+    }
+    y += 14;
+
+    // The one row that says the route works in the direction that matters. "no ack
+    // yet" is not a fault - it is the state of every node nothing has been sent to -
+    // so it is drawn in mid rather than as a warning.
+    const RiftMsgLog::Entry* ack = lastAck();
+    if (ack == NULL) {
+      row(display, y, "REACHED", "no ack yet", rift_pal.mid);
+    } else {
+      char trip[12];
+      tripText(ack->trip_ms, trip, sizeof(trip));
+      uint32_t clk = the_mesh.getRTCClock()->getCurrentTime();
+      if (riftClockPlausible(clk) && ack->timestamp >= 1600000000u) {
+        int hh, mm;
+        riftCivilFromEpoch(riftLocal(ack->timestamp), NULL, NULL, NULL, &hh, &mm);
+        snprintf(tmp, sizeof(tmp), "round trip %s %s %02d:%02d", trip, RIFT_DOT, hh, mm);
+      } else {
+        snprintf(tmp, sizeof(tmp), "round trip %s", trip);
+      }
+      row(display, y, "REACHED", tmp, rift_pal.ok);
+    }
+    y += 14;
+
+    // ---- the two routes, which are not the same thing and were never shown together
+    //
+    // ADVERT is the way the node's advert reached here. OUTBOUND is the way this
+    // device would send to it, which MeshCore keeps on the contact and updates from
+    // path returns. They agree most of the time and the times they do not are the
+    // interesting ones, which is the whole reason for putting them on adjacent rows.
+    {
+      int amb = 0;
+      char route[64];
+      riftFormatRoute(_p.path, _p.path_len, route, sizeof(route), &amb);
+      if (riftHopsUnknown(_p.path_len)) {
+        row(display, y, "ADVERT", "no route - heard by flood", rift_pal.mid);
+      } else {
+        int hops = (int) riftHopCount(_p.path_len);
+        if (amb > 0) {
+          snprintf(tmp, sizeof(tmp), "%d hop%s %s %d unresolved", hops, hops == 1 ? "" : "s",
+                   RIFT_DOT, amb);
+        } else if (route[0]) {
+          snprintf(tmp, sizeof(tmp), "%d hop%s %s %s", hops, hops == 1 ? "" : "s", RIFT_DOT,
+                   route);
+        } else {
+          snprintf(tmp, sizeof(tmp), "%d hop%s %s direct", hops, hops == 1 ? "" : "s", RIFT_DOT);
+        }
+        // Confirmed means something came back through this route since the advert
+        // set it. An advert alone only says how far the node is.
+        row(display, y, "ADVERT", tmp, _p.confirmed ? rift_pal.ok : rift_pal.fg);
+      }
+    }
+    y += 14;
+
+    if (c == NULL) {
+      row(display, y, "OUTBOUND", "not a contact - nothing to send through", rift_pal.mid);
+    } else if (c->out_path_len == OUT_PATH_UNKNOWN) {
+      row(display, y, "OUTBOUND", "none stored - a send will flood", rift_pal.mid);
+    } else {
+      int amb = 0;
+      char route[64];
+      riftFormatRoute(c->out_path, c->out_path_len, route, sizeof(route), &amb);
+      int hops = (int) riftHopCount(c->out_path_len);
+      if (amb > 0) {
+        snprintf(tmp, sizeof(tmp), "%d hop%s %s %d unresolved", hops, hops == 1 ? "" : "s",
+                 RIFT_DOT, amb);
+      } else if (route[0]) {
+        snprintf(tmp, sizeof(tmp), "%d hop%s %s %s", hops, hops == 1 ? "" : "s", RIFT_DOT, route);
+      } else {
+        snprintf(tmp, sizeof(tmp), "%d hop%s %s direct", hops, hops == 1 ? "" : "s", RIFT_DOT);
+      }
+      row(display, y, "OUTBOUND", tmp, rift_pal.fg);
+    }
+    y += 14;
+
+    // ---- has the way there been moving
+    //
+    // Oldest to newest, left to right, because that is the direction a sequence is
+    // read and the question is a trend rather than a current value. Four is what the
+    // row holds; the count says whether there were more.
+    {
+      RiftRouteLog& rl = riftRoutes();
+      int n = rl.countFor(_p.pubkey_prefix);
+      if (n == 0) {
+        row(display, y, "ROUTE", "steady since boot", rift_pal.mid);
+      } else {
+        const int SHOW = 4;
+        int take = n < SHOW ? n : SHOW;
+        size_t used = 0;
+        tmp[0] = 0;
+        for (int i = take - 1; i >= 0; i--) {         // peekFor(0) is the newest
+          const RiftRouteChange* ch = rl.peekFor(_p.pubkey_prefix, i);
+          if (ch == NULL) continue;
+          used += (size_t) snprintf(tmp + used, sizeof(tmp) - used, "%s%d",
+                                    used ? " > " : "", (int) ch->hops);
+          if (used >= sizeof(tmp) - 1) break;
+        }
+        const RiftRouteChange* newest = rl.peekFor(_p.pubkey_prefix, 0);
+        char age[RIFT_AGE_BUF_LEN];
+        riftFormatAge((uint32_t) millis() - (newest ? newest->at_ms : 0), age, sizeof(age));
+        snprintf(tmp + used, sizeof(tmp) - used, " hop%s %s %d change%s, last %s ago",
+                 (used == 1 ? "" : "s"), RIFT_DOT, n, n == 1 ? "" : "s", age);
+        // Accent when it has moved more than once: a route that keeps changing is the
+        // thing this row exists to make visible.
+        row(display, y, "ROUTE", tmp, n > 1 ? rift_pal.accent : rift_pal.fg);
+      }
+    }
+
+    // ---- what can be done about it
+    //
+    // The actions live here rather than on the NODES row, which is why ENTER now
+    // opens this card. A row that offers one action can only offer the most likely
+    // one; a card has room to say which are possible and which are not.
+    display.setColor(rift_pal.rule);
+    display.fillRect(0, 208, 316, 1);
+    const char* action = "not a contact yet";
+    if (c != NULL) {
+      if (riftCanDirectMessage(c->type))          action = "ENTER: message";
+      else if (c->type == RIFT_ADV_REPEATER)      action = "ENTER: control";
+      else if (c->type == RIFT_ADV_SENSOR)        action = "ENTER: read";
+      else                                        action = "no action for this type";
+    }
+    display.setColor(rift_pal.mid);
+    display.drawTextLeftAlign(2, 216, action);
+    display.drawTextRightAlign(314, 216,
+                               riftFavs().has(_p.pubkey_prefix) ? "*: unfav" : "*: fav");
+
+    // A second a frame is enough: every value here is an age or a stored fact, and
+    // the blit costs 40.7ms with the SPI bus held away from the radio.
+    return 1000;
+  }
+
+  bool handleInput(char c) override {
+    if (c == RIFT_KEY_BACK || c == KEY_CANCEL) { _task->dismissOverlay(); return true; }
+
+    if (c == '*') {
+      RiftFavourites& fv = riftFavs();
+      if (!fv.has(_p.pubkey_prefix) && fv.full()) {
+        _task->showAlert("16 favourites is the limit", 1600);
+        return true;
+      }
+      fv.toggle(_p.pubkey_prefix);
+      riftSaveSettings();
+      return true;
+    }
+
+    if (c == KEY_ENTER) {
+      ContactInfo* ct = the_mesh.lookupContactByPubKey((uint8_t*) _p.pubkey_prefix, 6);
+      if (ct == NULL) { _task->showAlert("Not a contact yet", 1400); return true; }
+      // The card goes away first. Both of these raise something of their own, and
+      // openRepeaterPanel refuses outright while an overlay is up.
+      _task->dismissOverlay();
+      if (!riftCanDirectMessage(ct->type)) _task->openRepeaterPanel(_p.pubkey_prefix);
+      else                                 _task->startDirectMessage(_p.pubkey_prefix);
+      return true;
+    }
+    return false;
+  }
+};
 
 // Placeholder nav screen - visual only, real functionality lands in a later milestone.
 class RiftPlaceholderScreen : public RiftScreen {
@@ -5060,285 +5028,6 @@ public:
 };
 
 #ifdef RIFT_RADAR
-
-// Shared scan result table. BLE advertisement callbacks fire on the Bluedroid
-// task (core 0) while rendering happens on the loop task (core 1), so every
-// touch of this table is inside the spinlock.
-//
-// 88 bytes a finding: 44 for RfContact, doubled because the render keeps a
-// snapshot of the same size. Measured by building at 48 and 96 and taking the
-// difference. 48 was reported full almost all the time in an ordinary urban
-// place, which makes the number a floor on what is audible rather than a count of
-// it - and RIFT_RF_AGE_MILLIS already forgets anything unheard for 45s, so this is
-// a window on what is around right now, not a log that fills up.
-//
-// The constraint used to be the stack, not RAM: the render's snapshot was a local,
-// 2.1KB of the loop task's 8KB, so doubling this would have taken half the stack
-// before it bought a single extra finding. That snapshot is static now, which is
-// what makes this number free to raise.
-//
-// Not taken past 96 yet for one reason: RADAR is the screen that scans Wi-Fi and
-// BLE, so it is where the heap is under most pressure, and FREE HEAP on the
-// diagnostics screen has not been read while a scan is running. 128 would cost
-// 67.6% against 66.7%, so the room is there if that number says it is safe.
-#define RIFT_RF_MAX 96
-
-struct RfContact {
-  uint8_t key[6];     // BSSID for Wi-Fi, MAC for BLE - the actual identity
-  char name[24];      // display only; may be empty, duplicated or absent
-  int8_t rssi;
-  uint8_t channel;    // wifi only
-  bool is_wifi;
-  bool encrypted;     // wifi only
-  unsigned long seen_at;
-  unsigned long first_seen;   // for the "+N new" figure; set once, never refreshed
-};
-
-static RfContact rf_table[RIFT_RF_MAX];
-static int rf_count = 0;
-static portMUX_TYPE rf_mux = portMUX_INITIALIZER_UNLOCKED;
-
-// Waterfall history: strongest signal seen per Wi-Fi channel, one column per
-// completed sweep. This is not an SDR spectrum - the ESP32 gives no access to
-// raw RF - it is observed 802.11 channel occupancy over time, which is what
-// actually matters for picking a clear channel or spotting congestion.
-#define RIFT_WF_CHANNELS 14    // index 1..13 used
-#define RIFT_WF_SLICES   40
-
-static int8_t wf_hist[RIFT_WF_SLICES][RIFT_WF_CHANNELS];
-static int wf_count = 0;
-static int wf_head = RIFT_WF_SLICES - 1;   // newest slice
-
-static void wfPushSlice(const int8_t* per_channel) {
-  wf_head = (wf_head + 1) % RIFT_WF_SLICES;
-  if (wf_count < RIFT_WF_SLICES) wf_count++;
-  memcpy(wf_hist[wf_head], per_channel, RIFT_WF_CHANNELS);
-}
-
-static void wfClear() {
-  wf_count = 0;
-  wf_head = RIFT_WF_SLICES - 1;
-  memset(wf_hist, 0, sizeof(wf_hist));
-}
-
-// Insert or refresh, keyed on hardware address rather than display name. Names
-// are unreliable as identity: hidden Wi-Fi networks report an empty SSID, and
-// BLE devices frequently share a name (several "AirPods" in one room), so
-// keying on the name both duplicated hidden networks on every sweep and
-// collapsed distinct BLE devices into one row.
-static void rfUpsert(const uint8_t* key, const char* name, int8_t rssi, uint8_t channel,
-                     bool is_wifi, bool encrypted) {
-  portENTER_CRITICAL(&rf_mux);
-  int slot = -1;
-  for (int i = 0; i < rf_count; i++) {
-    if (rf_table[i].is_wifi == is_wifi && memcmp(rf_table[i].key, key, 6) == 0) {
-      slot = i;
-      break;
-    }
-  }
-  bool is_new = (slot < 0);
-  if (slot < 0) {
-    if (rf_count < RIFT_RF_MAX) {
-      slot = rf_count++;
-    } else {
-      // Table full - let stronger signals displace weaker, but never a watched
-      // device. A watched one is usually the weak one: it is being tracked because
-      // it comes and goes, and in a crowded room it would be pushed out by whatever
-      // is nearer, after which the presence check would report it gone while the
-      // radio was still hearing it. That would look exactly like a broken alert.
-      int weakest = -1;
-      for (int i = 0; i < rf_count; i++) {
-        if (rfWatchFind(rf_table[i].key, rf_table[i].is_wifi) >= 0) continue;
-        if (weakest < 0 || rf_table[i].rssi < rf_table[weakest].rssi) weakest = i;
-      }
-      // every slot is watched, which needs the watch list to be as large as the
-      // table; impossible today, but it must not index -1 if that ever changes
-      if (weakest < 0) { portEXIT_CRITICAL(&rf_mux); return; }
-      // The guard above only protected a watched device already in the table. A
-      // watched one arriving weaker than everything present was turned away here,
-      // and the presence check then said "not heard" while the radio heard it -
-      // the exact failure the comment above says this code prevents. A watched
-      // arrival takes the weakest slot whatever its signal.
-      bool watched = rfWatchFind(key, is_wifi) >= 0;
-      if (!watched && rssi <= rf_table[weakest].rssi) { portEXIT_CRITICAL(&rf_mux); return; }
-      slot = weakest;
-    }
-  }
-  RfContact* e = &rf_table[slot];
-  memcpy(e->key, key, 6);
-  StrHelper::strncpy(e->name, (name && name[0]) ? name : "(hidden)", sizeof(e->name));
-  e->rssi = rssi;
-  e->channel = channel;
-  e->is_wifi = is_wifi;
-  e->encrypted = encrypted;
-  e->seen_at = millis();
-  if (is_new) e->first_seen = e->seen_at;
-  portEXIT_CRITICAL(&rf_mux);
-}
-
-// Drop everything a now-disabled radio had found. Ageing would remove it eventually,
-// but "eventually" is minutes of showing devices nobody is looking for any more.
-static void rfDropSource(bool drop_wifi, bool drop_ble) {
-  if (!drop_wifi && !drop_ble) return;
-  portENTER_CRITICAL(&rf_mux);
-  int w = 0;
-  for (int i = 0; i < rf_count; i++) {
-    bool drop = rf_table[i].is_wifi ? drop_wifi : drop_ble;
-    if (drop) continue;
-    if (w != i) rf_table[w] = rf_table[i];
-    w++;
-  }
-  rf_count = w;
-  portEXIT_CRITICAL(&rf_mux);
-}
-
-static void rfClear() {
-  portENTER_CRITICAL(&rf_mux);
-  rf_count = 0;
-  portEXIT_CRITICAL(&rf_mux);
-}
-
-// drop entries not heard recently, so the picture reflects what's here now
-//
-// A watched device is kept for RIFT_WATCH_GONE_MILLIS rather than the table's
-// own age. rfWatchCheck judges presence by the entry's age against that longer
-// window, and this ran first with the shorter one, so an entry could never be
-// found aged between 45 and 90 seconds: the 90-second window was dead code and
-// a beacon quiet for a minute was reported gone, then alerted on again.
-static void rfAgeOut() {
-  unsigned long now = millis();
-  portENTER_CRITICAL(&rf_mux);
-  int w = 0;
-  for (int i = 0; i < rf_count; i++) {
-    unsigned long keep = rfWatchFind(rf_table[i].key, rf_table[i].is_wifi) >= 0
-                         ? RIFT_WATCH_GONE_MILLIS : RIFT_RF_AGE_MILLIS;
-    if (now - rf_table[i].seen_at <= keep) {
-      if (w != i) rf_table[w] = rf_table[i];
-      w++;
-    }
-  }
-  rf_count = w;
-  portEXIT_CRITICAL(&rf_mux);
-}
-
-// Toggle a mark. Returns true if it is now watched, false if it was removed or
-// there was no room. The name is copied for display only - the address is what is
-// matched, because a BLE name is often absent, duplicated, or a rendering of the
-// address itself.
-// Three outcomes, not two. A bool could not distinguish "removed" from "refused
-// because the list is full" - both leave the device absent from the list, so the
-// caller's rfWatchFind check reported a full list as a removal and told the user
-// something had been taken off when nothing had changed.
-enum RfWatchResult { RF_WATCH_ADDED, RF_WATCH_REMOVED, RF_WATCH_FULL };
-
-static RfWatchResult rfWatchToggle(const uint8_t* key, bool is_wifi, const char* name) {
-  // Under rf_mux because rfUpsert reads this table from the BLE advertisement
-  // callback on core 0, inside that same lock, to decide what it may evict. Taking
-  // it there and not here meant the reader was holding a lock the writer ignored,
-  // which is no protection: the shift below could be observed half done.
-  portENTER_CRITICAL(&rf_mux);
-  int at = rfWatchFind(key, is_wifi);
-  if (at >= 0) {
-    for (int i = at; i + 1 < rf_watch_count; i++) rf_watch[i] = rf_watch[i + 1];
-    rf_watch_count--;
-    portEXIT_CRITICAL(&rf_mux);
-    return RF_WATCH_REMOVED;
-  }
-  if (rf_watch_count >= RIFT_WATCH_MAX) {
-    portEXIT_CRITICAL(&rf_mux);
-    return RF_WATCH_FULL;
-  }
-  RfWatch* w = &rf_watch[rf_watch_count++];
-  memset(w, 0, sizeof(*w));
-  memcpy(w->key, key, 6);
-  w->is_wifi = is_wifi;
-  StrHelper::strncpy(w->name, (name != NULL && name[0]) ? name : "(unnamed)", sizeof(w->name));
-  // present false, so a device already in range announces itself on the next sweep
-  // rather than being silently assumed present from the moment it was marked
-  portEXIT_CRITICAL(&rf_mux);
-  return RF_WATCH_ADDED;
-}
-
-// How many watched devices are currently present, and the name of one of them. The
-// present flag is maintained by rfWatchCheck below, so this reads a decision that
-// has already been made rather than re-scanning the table on every frame - render
-// runs several times a second and shares its SPI bus with the radio.
-static int rfWatchPresent(const char** name_out) {
-  int n = 0;
-  const char* first = NULL;
-  for (int i = 0; i < rf_watch_count; i++) {
-    if (!rf_watch[i].present) continue;
-    if (first == NULL) first = rf_watch[i].name;
-    n++;
-  }
-  if (name_out) *name_out = first;
-  return n;
-}
-
-// Called after each completed sweep. Only the transition alerts: a device sitting
-// in range must not alert every 700ms, and one at the edge of range must not alert
-// every time a sweep happens to catch it.
-static void rfWatchCheck(UITask* task) {
-  unsigned long now = millis();
-  for (int i = 0; i < rf_watch_count; i++) {
-    RfWatch* w = &rf_watch[i];
-
-    // A watch on a radio that is currently switched off is left alone. Judging it
-    // absent would report a device as gone because the user stopped listening, and
-    // then alert again the moment they switched the radio back on.
-    if (w->is_wifi ? !riftScanWifi() : !riftScanBle()) continue;
-
-    bool seen = false;
-    portENTER_CRITICAL(&rf_mux);
-    for (int j = 0; j < rf_count; j++) {
-      if (rf_table[j].is_wifi == w->is_wifi && memcmp(rf_table[j].key, w->key, 6) == 0) {
-        seen = (now - rf_table[j].seen_at) <= RIFT_WATCH_GONE_MILLIS;
-        break;
-      }
-    }
-    portEXIT_CRITICAL(&rf_mux);
-
-    if (seen && !w->present) {
-      w->present = true;
-      if (w->last_alert == 0 || (now - w->last_alert) >= RIFT_WATCH_REARM_MILLIS) {
-        w->last_alert = now;
-        task->proximityAlert(w->name, w->is_wifi);
-      } else {
-        // suppressed, but recorded - otherwise a missing alert and a device that
-        // never arrived look the same afterwards
-        riftLogf("watch %s back, alert held", w->name);
-      }
-    } else if (!seen && w->present) {
-      w->present = false;
-      riftLogf("watch gone: %s", w->name);
-    }
-  }
-}
-
-class RiftBleCallbacks : public BLEAdvertisedDeviceCallbacks {
-  void onResult(BLEAdvertisedDevice dev) override {
-    // copy immediately - getName()/toString() return temporaries whose c_str()
-    // would dangle past the end of this statement
-    BLEAddress addr = dev.getAddress();
-
-    char name[24];
-    if (dev.haveName()) {
-      StrHelper::strncpy(name, dev.getName().c_str(), sizeof(name));
-    } else {
-      StrHelper::strncpy(name, addr.toString().c_str(), sizeof(name));
-    }
-
-    uint8_t key[6];
-    memcpy(key, addr.getNative(), 6);   // MAC is the identity, not the name
-    rfUpsert(key, name, (int8_t) dev.getRSSI(), 0, false, false);
-  }
-};
-static RiftBleCallbacks ble_callbacks;
-
-// set on core 0 by the scan-completion callback, consumed by poll() on core 1
-static volatile bool ble_scan_done = false;
-static void onBleScanComplete(BLEScanResults results) { ble_scan_done = true; }
-
 // RADAR: passive Wi-Fi + BLE situational awareness.
 //
 // Wi-Fi and BLE share one 2.4GHz PHY and antenna on the ESP32-S3, and the
@@ -5353,22 +5042,13 @@ static void onBleScanComplete(BLEScanResults results) { ble_scan_done = true; }
 class RiftRadarScreen : public RiftScreen {
   UITask* _task;
 
-  enum ScanState { OFF, START_WIFI, WIFI_RUNNING, START_BLE, BLE_RUNNING, STOPPING };
+  // What is left here is what this screen draws with. Which radio is up, what the
+  // state machine is doing and when its next step is due all belong to
+  // RiftRadarService now, and are read back through its accessors. A screen holding a
+  // radio's lifecycle is what makes a watched device stop being watched the moment
+  // you look at something else.
   enum View { VIEW_BANDS, VIEW_WATERFALL, VIEW_WATCHES };
-  ScanState _state;
   View _view;
-  bool _want_active;   // set by screen changes; acted on from the main loop
-  bool _wifi_up, _ble_up;
-  // Teardown completion must be tracked separately: _ble_up deliberately stays
-  // true after teardown (BLEDevice::deinit is avoided), so using it as the
-  // "needs teardown" test would restart the cycle forever.
-  bool _torn_down;
-  // wrap-safe pacing: when the wait started, and how long to wait (0 = ready
-  // now). Same reason as _last_refresh - a future deadline breaks at the
-  // millis() wrap, and here it would leave the scan state machine spinning.
-  unsigned long _wait_since;
-  unsigned long _wait_ms;
-  unsigned long _ble_started;   // when the running BLE scan was started, for its deadline
   int _scroll;
   int _last_n;
   int _watch_sel;      // cursor in the watch list
@@ -5384,81 +5064,12 @@ class RiftRadarScreen : public RiftScreen {
   bool _have_sel;
   int  _sel_idx;
   bool _resel;        // set by up/down: adopt whatever is at _sel_idx next frame
-  // Whether any sweep has reported since the radios came up, so an empty table can
-  // say "listening" rather than "nothing found" while the first one is running.
-  bool _scanned_once = false;
   int _watch_first = 0;   // first watched entry drawn; the window follows _watch_sel
 
 
-  void beginWifi() {
-    if (!_wifi_up) {
-      WiFi.mode(WIFI_STA);
-      WiFi.disconnect(false, false);   // never associate; listen only
-      _wifi_up = true;
-    }
-    // async=true is essential - the default-argument form blocks up to 10s.
-    // passive=true means no probe requests are transmitted.
-    WiFi.scanNetworks(true, true, true, RIFT_WIFI_DWELL_MILLIS);
-  }
-
-  void collectWifi(int n) {
-    _scanned_once = true;
-    int8_t per_channel[RIFT_WF_CHANNELS];
-    memset(per_channel, 0, sizeof(per_channel));
-
-    for (int i = 0; i < n; i++) {
-      String ssid = WiFi.SSID(i);
-      int8_t rssi = (int8_t) WiFi.RSSI(i);
-      uint8_t ch = (uint8_t) WiFi.channel(i);
-
-      // BSSID is the identity - hidden networks report an empty SSID
-      uint8_t key[6];
-      const uint8_t* bssid = WiFi.BSSID(i);
-      if (bssid != NULL) memcpy(key, bssid, 6); else memset(key, 0, 6);
-
-      rfUpsert(key, ssid.c_str(), rssi, ch, true, WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-
-      // strongest signal seen on each channel this sweep (0 means "nothing")
-      if (ch < RIFT_WF_CHANNELS && (per_channel[ch] == 0 || rssi > per_channel[ch])) {
-        per_channel[ch] = rssi;
-      }
-    }
-    WiFi.scanDelete();   // free the result array promptly
-
-    wfPushSlice(per_channel);
-  }
-
-  // Returns whether a scan is actually running. start() fails when the previous
-  // scan's stop is still in flight, and the return value was ignored: the state
-  // machine then sat in BLE_RUNNING waiting for a completion that was never
-  // coming, with no Wi-Fi sweeps, no ageing and no watch checks, until the user
-  // left the screen. Nothing on screen said so.
-  bool beginBle() {
-    if (!_ble_up) {
-      BLEDevice::init("");
-      _ble_up = true;
-    }
-    BLEScan* scan = BLEDevice::getScan();
-    scan->setActiveScan(false);   // passive: do NOT transmit SCAN_REQ
-    scan->setInterval(100);
-    scan->setWindow(99);
-    scan->setAdvertisedDeviceCallbacks(&ble_callbacks, false, true);
-    ble_scan_done = false;
-    _ble_started = millis();
-    // the function-pointer overload returns immediately; start(duration, bool)
-    // would block for the whole duration
-    if (!scan->start(RIFT_BLE_DWELL_SECS, onBleScanComplete, false)) {
-      riftLogf("radar: BLE scan start refused");
-      return false;
-    }
-    return true;
-  }
-
 public:
   RiftRadarScreen(UITask* task)
-     : _task(task), _state(OFF), _view(VIEW_BANDS), _want_active(false),
-       _wifi_up(false), _ble_up(false), _torn_down(true),
-       _wait_since(0), _wait_ms(0), _ble_started(0), _scroll(0), _last_n(0),
+     : _task(task), _view(VIEW_BANDS), _scroll(0), _last_n(0),
        _watch_sel(0), _sel_is_wifi(false), _have_sel(false), _sel_idx(0), _resel(false) {
     memset(_sel_key, 0, sizeof(_sel_key));
     _sel_name[0] = 0;
@@ -5472,135 +5083,8 @@ public:
   // screen is showing. It must not move in here: teardown has to keep running
   // after the user has navigated away, which is exactly when onLeave() has
   // already fired.
-  void onEnter() override { _want_active = true; }
-  void onLeave() override { _want_active = false; }
-
-  // Ask the radios to stop, but do NOT deinit yet - BLEDevice::deinit() while a
-  // scan is still winding down panics the device. The actual teardown happens
-  // in the STOPPING state after a grace period.
-  void beginTeardown() {
-    if (_ble_up) {
-      BLEDevice::getScan()->setAdvertisedDeviceCallbacks(NULL);   // no late callbacks
-      BLEDevice::getScan()->stop();
-    }
-    _state = STOPPING;
-    _wait_since = millis();
-    _wait_ms = RIFT_SCAN_STOP_GRACE_MILLIS;
-  }
-
-  void finishTeardown() {
-    if (_ble_up) {
-      // Deliberately NOT calling BLEDevice::deinit(): in this ESP32 core it
-      // panics when a scan has recently been active, and no amount of grace
-      // period made it reliable. The stack stays initialised and idle - it
-      // transmits nothing once the scan is stopped. _ble_up stays true so we
-      // don't re-init on the next visit.
-      BLEDevice::getScan()->clearResults();
-    }
-    if (_wifi_up) {
-      WiFi.scanDelete();
-      WiFi.mode(WIFI_OFF);
-      _wifi_up = false;
-    }
-    rfClear();   // hand the heap back; the mesh is the primary job
-    wfClear();   // history would be stale and misleading on return
-    // Presence is forgotten with the table it was derived from. Left set, the lamp
-    // would light on re-entry from a sighting made minutes ago in another room,
-    // before any sweep had confirmed it - which is the one thing an indicator must
-    // never do. It also means a device still in range announces itself again, which
-    // is the same choice the settings loader makes for a watch read off disk.
-    for (int i = 0; i < rf_watch_count; i++) rf_watch[i].present = false;
-    _state = OFF;
-    _torn_down = true;
-    _scanned_once = false;   // the next visit starts with "listening" again
-  }
-
-  // Driven every main-loop iteration, whichever screen is showing, so that
-  // teardown still happens after the user navigates away.
-  void service() {
-    if (!_want_active) {
-      if (_state == STOPPING) {
-        if (millis() - _wait_since >= _wait_ms) finishTeardown();
-      } else if (!_torn_down) {
-        beginTeardown();
-      }
-      return;
-    }
-    if (_state == OFF || _state == STOPPING) {
-      _state = START_WIFI;   // came back before teardown finished
-      _wait_ms = 0;
-      _torn_down = false;
-    }
-
-    if (_wait_ms != 0) {
-      if (millis() - _wait_since < _wait_ms) return;
-      _wait_ms = 0;
-    }
-
-    switch (_state) {
-      case START_WIFI:
-        if (!riftScanWifi()) { _state = START_BLE; break; }
-        beginWifi();
-        _state = WIFI_RUNNING;
-        break;
-
-      case WIFI_RUNNING: {
-        int n = WiFi.scanComplete();
-        if (n >= 0) {
-          collectWifi(n);
-          _state = START_BLE;
-        } else if (n == WIFI_SCAN_FAILED) {
-          _state = START_BLE;   // don't get stuck; try the other radio
-        }
-        break;
-      }
-
-      case START_BLE:
-        // BLE off, or a scan that would not start: the cycle ends here instead
-        // of in BLE_RUNNING. Ageing, the presence check and the gap all have to
-        // happen exactly once per cycle, so they are duplicated here rather
-        // than being skipped. A refused start gets the gap too, which is also
-        // the time the previous stop needs to finish.
-        if (!riftScanBle() || !beginBle()) {
-          rfAgeOut();
-          rfWatchCheck(_task);
-          _state = START_WIFI;
-          _wait_since = millis();
-          _wait_ms = RIFT_SCAN_GAP_MILLIS;
-          break;
-        }
-        _state = BLE_RUNNING;
-        break;
-
-      case BLE_RUNNING: {
-        // The completion callback is the normal exit. The deadline is the other
-        // one: a scan that started but never reports done would otherwise hold
-        // this state for ever, and the screen would freeze on stale entries with
-        // every watch silent. Dwell plus a margin; stop() is what makes the
-        // callback fire if the stack is merely late.
-        bool overdue = (millis() - _ble_started) >= (RIFT_BLE_DWELL_SECS * 1000UL + 1500UL);
-        if (overdue && !ble_scan_done) {
-          riftLogf("radar: BLE scan overdue, stopping it");
-          BLEDevice::getScan()->stop();
-        }
-        if (ble_scan_done || overdue) {
-          _scanned_once = true;
-          BLEDevice::getScan()->clearResults();   // keep the internal map bounded
-          rfAgeOut();
-          // after ageing, so a device that has just dropped out of the table is
-          // judged absent rather than lingering for one more cycle
-          rfWatchCheck(_task);
-          _state = START_WIFI;
-          _wait_since = millis();
-          _wait_ms = RIFT_SCAN_GAP_MILLIS;
-        }
-        break;
-      }
-
-      default:
-        break;
-    }
-  }
+  void onEnter() override { riftRadarSvc().setWanted(true); }
+  void onLeave() override { riftRadarSvc().setWanted(false); }
 
   // colour ramp for observed signal strength; 0 means nothing heard
   // This is the one place brightness genuinely is the quantity, so it is the one
@@ -5628,7 +5112,7 @@ public:
     // know whether the thing they marked has turned up, and "WATERFALL" is a label
     // for a view they are already looking at.
     if (!renderWatchLamp(display)) {
-      renderHeading(display, (_state == OFF) ? "IDLE" : "WATERFALL");
+      renderHeading(display, riftRadarSvc().idle() ? "IDLE" : "WATERFALL");
     }
 
     display.setTextSize(1);
@@ -5746,8 +5230,8 @@ public:
     if (!renderWatchLamp(display)) {
       const char* src = (rift_radar_src == RIFT_SRC_BOTH) ? "WIFI+BLE"
                       : (rift_radar_src == RIFT_SRC_WIFI) ? "WIFI" : "BLE";
-      const char* st = (_state == OFF) ? "IDLE"
-                     : (!_wifi_up && !_ble_up) ? "INITIALISING" : "SCANNING";
+      const char* st = riftRadarSvc().idle() ? "IDLE"
+                     : !riftRadarSvc().anyRadioUp() ? "INITIALISING" : "SCANNING";
       snprintf(tmp, sizeof(tmp), "%s %s %s", src, RIFT_DOT, st);
       display.setColor(rift_pal.mid);
       display.drawTextLeftAlign(2, 2, tmp);
@@ -5786,7 +5270,7 @@ public:
     // dots in a scatter plot. "--" until the first sweep has reported.
     display.setTextSize(3);
     display.setColor(rift_pal.fg);
-    bool first_sweep_pending = (_state != OFF && n == 0 && !_scanned_once);
+    bool first_sweep_pending = (!riftRadarSvc().idle() && n == 0 && !riftRadarSvc().scannedOnce());
     if (first_sweep_pending) strcpy(tmp, "--"); else sprintf(tmp, "%d", n);
     display.drawTextLeftAlign(2, 16, tmp);
     int count_w = (int) strlen(tmp) * 18;
@@ -5940,7 +5424,7 @@ public:
       display.setColor(rift_pal.mid);
       if (first_sweep_pending) {
         display.drawTextLeftAlign(2, LIST_TOP, "listening...");
-      } else if (_state == OFF) {
+      } else if (riftRadarSvc().idle()) {
         display.drawTextLeftAlign(2, LIST_TOP, "Not scanning.");
       } else {
         display.drawTextLeftAlign(2, LIST_TOP, "No devices in the last scan.");
@@ -5972,7 +5456,7 @@ public:
     if (rf_watch_count == 0) return false;      // no chrome for an unused feature
     // Not scanning: the lamp cannot know, so it does not claim. IDLE and
     // INITIALISING own the row in that case and say something truer.
-    if (_state == OFF || (!_wifi_up && !_ble_up)) return false;
+    if (riftRadarSvc().idle() || !riftRadarSvc().anyRadioUp()) return false;
 
     const char* who = NULL;
     int near = rfWatchPresent(&who);
@@ -6154,47 +5638,16 @@ public:
     // this firmware. The waterfall moves to W - it is a view swap, not a row action,
     // and having ENTER mean two different things depending on which view you were in
     // is how a keypress ends up doing the wrong thing.
-    // Cycles the source. Wi-Fi is genuinely powered down when it is not wanted;
-    // BLE is only stopped, because BLEDevice::deinit() panics in this ESP32 core
-    // once a scan has been active - see finishTeardown(), where the same limit
-    // applies. Stopped is enough: nothing is collected and nothing is transmitted.
+    // Cycles the source. What that costs the radios and the running sweep is
+    // RiftRadarService::sourceChanged(); what is left here is the setting, the
+    // saving and the saying so.
     if (c == 's' || c == 'S') {
       rift_radar_src = (rift_radar_src == RIFT_SRC_BOTH) ? RIFT_SRC_WIFI
                      : (rift_radar_src == RIFT_SRC_WIFI) ? RIFT_SRC_BLE
                                                          : RIFT_SRC_BOTH;
       riftSaveSettings();
+      riftRadarSvc().sourceChanged();
 
-      if (!riftScanWifi() && _wifi_up) {
-        WiFi.scanDelete();
-        WiFi.mode(WIFI_OFF);
-        _wifi_up = false;
-      }
-      // Only stopping is needed to re-enable: beginBle() sets the callbacks, the
-      // passive flag and the window on every call, so the next cycle restores all of
-      // it. stop() does not clear the callbacks - only beginTeardown() does that.
-      if (!riftScanBle() && _ble_up) BLEDevice::getScan()->stop();
-
-      // Drop what the disabled radio had found. Leaving it would show devices that
-      // are no longer being looked for, ageing out slowly over the next minutes,
-      // and a watch could match one of them.
-      rfDropSource(!riftScanWifi(), !riftScanBle());
-
-      // And forget that those devices were present. rfWatchCheck skips a watch whose
-      // radio is off, so the flag would freeze at true and the lamp would keep
-      // claiming "NEAR" for a device nobody is listening for - the same stale reading
-      // the teardown path clears, missed here because the two features were built
-      // hours apart.
-      for (int i = 0; i < rf_watch_count; i++) {
-        if (rf_watch[i].is_wifi ? !riftScanWifi() : !riftScanBle()) {
-          rf_watch[i].present = false;
-        }
-      }
-
-      // restart the cycle at a phase that is enabled
-      if (_state != OFF && _state != STOPPING) {
-        _state = START_WIFI;
-        _wait_ms = 0;
-      }
       const char* label = (rift_radar_src == RIFT_SRC_BOTH) ? "WIFI + BLE"
                         : (rift_radar_src == RIFT_SRC_WIFI) ? "WIFI only" : "BLE only";
       _task->showAlert(label, 1400);
@@ -6576,6 +6029,14 @@ class RiftCommsScreen : public RiftScreen, ContactVisitor {
   UITask* _task;
   char _input[MAX_TEXT_LEN + 1];
   int _len;
+
+  // The compose line, for every conversation that is not the one on screen. See
+  // RiftDrafts: a half-written line belongs to the conversation it was typed in, and
+  // used to belong to whichever one happened to be showing when Enter was pressed.
+  //
+  // A member rather than a file static, so it is on the heap with the rest of this
+  // screen and shows in FREE HEAP instead of the build's RAM figure.
+  RiftDrafts _drafts;
   // Pixels of older content scrolled into view, not messages skipped. Counting
   // messages meant one whole block moved per step whatever its height, which is
   // the jerk: a one-line reply and a six-line one moved the view by wildly
@@ -6597,10 +6058,12 @@ public:
   // the caller checks that first rather than leaving the user typing into a
   // message that can never leave.
   void setDirectTarget(const uint8_t* key6) {
+    stashDraft();                 // before the target moves; see stashDraft()
     _target_is_channel = false;
     memcpy(_target_key, key6, 6);
     _picking = false;
     _scroll = 0;   // a different conversation: land on its newest, not at some offset
+    loadDraft();
 
     // The name was never set here, only by the conversation list - so arriving from
     // NODES showed the heading of whoever was picked last, or a blank one on a fresh
@@ -6670,6 +6133,10 @@ private:
     // and ROOM reach this list at all, because riftCanDirectMessage refuses the
     // rest, so this is the one distinction the column has to carry.
     bool is_room;
+    // Something typed here and not sent. Worth a mark of its own rather than being
+    // folded into unread, because the two say opposite things: unread is what someone
+    // else is waiting for you to read, a draft is what you left unfinished.
+    bool has_draft;
     // 0 for a conversation; 1 and 2 are the two channel actions, drawn as rows at
     // the end of the CHANNELS section because that is where the channels are.
     uint8_t action;
@@ -7063,6 +6530,7 @@ private:
                                            : riftConvDM(_picks[i].key);
       _picks[i].last_ts = newestIn(k, _picks[i].name);
       _picks[i].unread = msg_unread.count(k);
+      _picks[i].has_draft = _drafts.has(k);
       _picks[i].is_room = false;
       if (!_picks[i].is_channel) {
         ContactInfo* c = the_mesh.lookupContactByPubKey(_picks[i].key, 6);
@@ -7222,7 +6690,36 @@ private:
     clearInput();
   }
 
+  // The compose line belongs to the conversation it was typed in, so changing target
+  // is two steps rather than one: what is on the line goes back to the conversation
+  // being left, and whatever the one being entered had comes forward.
+  //
+  // stash() reads currentConv(), so it has to run before _target_* moves and load()
+  // after. Both are called at all three places a target changes - the conversation
+  // list, a channel tab, and NODES offering ENTER: DM - because a draft that survived
+  // two of the three would be worse than one that survived none: it would look like a
+  // rule until the day it quietly was not.
+  void stashDraft() { _drafts.put(currentConv(), _input); }
+
+  void loadDraft() {
+    const char* s = _drafts.get(currentConv());
+    if (s == NULL) {
+      _input[0] = 0;
+      _len = 0;
+    } else {
+      StrHelper::strncpy(_input, s, sizeof(_input));
+      _len = (int) strlen(_input);
+    }
+    // A restored draft is not a keypress, so the double-tap window must not think the
+    // last character of it was just typed.
+    _last_key = 0;
+    _last_key_ms = 0;
+  }
+
   void clearInput() {
+    // A sent draft is a finished one. Cleared here rather than at the two send sites,
+    // so a third one cannot forget.
+    _drafts.clear(currentConv());
     _input[0] = 0;
     _len = 0;
     _scroll = 0;
@@ -7288,6 +6785,18 @@ private:
     // reserved for active tab, selection, warning and the wordmark.
     display.setColor(on_fill ? rift_pal.on_accent : rift_pal.fg);
     display.fillRect(x, y, 3, 3);
+  }
+
+  // A draft is a caret, not a dot, and dimmer than one.
+  //
+  // Two shapes because they are two facts, and a row can carry both: the unread dot
+  // is square and in fg because someone else is waiting on it, and this is the text
+  // cursor you walked away from, so it has a cursor's shape and sits in mid. One mark
+  // meaning "something about this row" would have been smaller and would have needed
+  // opening the row to find out which.
+  void renderDraftMark(DisplayDriver& display, int x, int y, bool on_fill = false) {
+    display.setColor(on_fill ? rift_pal.on_accent : rift_pal.mid);
+    display.fillRect(x, y, 2, 7);
   }
 
   int renderPicker(DisplayDriver& display) {
@@ -7389,6 +6898,12 @@ private:
       // right-aligned at 316, so it begins at 262 in the worst case.
       display.drawTextEllipsized(11, y, 240, filtered);
 
+      // In the slack between where the name can reach (251) and where the type column
+      // starts (258). Free space that was already there, so marking a few rows costs
+      // no cell from every name - which is the trade the selection bar was introduced
+      // to stop making.
+      if (_picks[i].has_draft) renderDraftMark(display, 252, y + 1, sel);
+
       // The right slot: what kind of thing this is, and how long ago it spoke.
       //
       // Relative, not a clock. "05:47" asks the reader to know what time it is now
@@ -7469,6 +6984,7 @@ private:
       else                                       _task->startChannelMute();
       return;
     }
+    stashDraft();                 // before the target moves; see stashDraft()
     _target_is_channel = e->is_channel;
     if (e->is_channel) {
       _target_channel_idx = e->channel_idx;
@@ -7479,6 +6995,7 @@ private:
     StrHelper::strncpy(_target_name, e->name, sizeof(_target_name));
     _picking = false;
     _scroll = 0;   // a different conversation: land on its newest
+    loadDraft();
   }
 
   // keep the selected row inside the visible window
@@ -7986,11 +7503,15 @@ public:
     }
     if (i < 0 || i >= _tab_count) return false;
 
+    // A tab tap is the switch the drafts were written for: it is one press, it moves
+    // the recipient, and nothing about the line being carried across said so.
+    stashDraft();
     _target_is_channel = true;
     _target_channel_idx = _tabs[i].idx;
     StrHelper::strncpy(_target_name, _tabs[i].name, sizeof(_target_name));
     _scroll = 0;   // a different conversation: land on its newest
     _tab_snap = true;
+    loadDraft();
     return true;
   }
 
@@ -9165,6 +8686,13 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   discover_overlay = new RiftDiscoverScreen(this);
   rename_watch = new RiftRenameWatchScreen(this);
   repeater_panel = new RiftRepeaterScreen(this);
+  node_card = new RiftNodeCardScreen(this);
+#ifdef RIFT_RADAR
+  // The service's one reach back into the UI: rfWatchCheck raises the proximity
+  // alert. Attached here rather than taken in a constructor, because the service is
+  // a function-local static that exists before this runs.
+  riftRadarSvc().attach(this);
+#endif
   nav_idx = 0;
   setCurrScreen(splash);
 }
@@ -9472,6 +9000,25 @@ void UITask::openRenameWatch(int watch_idx) {
 // before, which is indistinguishable from a keypress that was never registered -
 // and that is exactly how the feature read on the device: nothing happened, and
 // nothing said anything.
+void UITask::openNodeCard(const AdvertPath& p, bool heard) {
+  if (node_card == NULL) {
+    showAlert("Node card unavailable", 1600);
+    return;
+  }
+  if (_overlay != NULL) {
+    // Logged rather than ignored, for the reason openRepeaterPanel gives: a stuck
+    // overlay is invisible from here and makes every later press do nothing.
+    riftLogf("node card: overlay already up");
+    return;
+  }
+  // No refusal for a node that is not a contact. The repeater panel has to have one
+  // because it logs in; this only reads, and "heard but never added" is a real state
+  // that the card is the right place to say out loud.
+  ((RiftNodeCardScreen *) node_card)->openFor(p, heard);
+  riftLogf("node card %02X%02X", p.pubkey_prefix[0], p.pubkey_prefix[1]);
+  pushOverlay(node_card);
+}
+
 void UITask::openRepeaterPanel(const uint8_t* pub_key) {
   if (repeater_panel == NULL) {
     showAlert("Repeater panel unavailable", 1600);
@@ -9582,6 +9129,24 @@ bool UITask::isButtonPressed() const {
 }
 
 void UITask::loop() {
+  // First statement in the function, so the interval spans a whole turn of the
+  // main loop rather than the part of it after the battery sample. Two entries
+  // here have one the_mesh.loop() between them; see the note beside the counters.
+  {
+    uint32_t now_us = micros();
+    if (rift_loop_perturbed) {
+      rift_loop_skipped++;            // a screen dump owned the turn just ending
+      rift_loop_perturbed = false;
+    } else if (rift_loop_seen) {
+      uint32_t dt = now_us - rift_loop_prev_us;   // correct across the 71-minute wrap
+      if (dt > rift_loop_max_us) rift_loop_max_us = dt;
+      rift_loop_total_us += dt;
+      rift_loop_count++;
+    }
+    rift_loop_prev_us = now_us;
+    rift_loop_seen = true;
+  }
+
   // Ahead of everything that reads it. Two seconds is far slower than the frame
   // rate and far faster than a battery changes, and the ADC conversion is eight
   // samples on a bus the radio also uses - there is no reason to pay for it per
@@ -9887,9 +9452,12 @@ void UITask::loop() {
   if (riftRepeater().checkTimeout()) riftLogf("repeater: no answer");
 
 #ifdef RIFT_RADAR
-  // serviced unconditionally, not via curr->poll(), so RF teardown still runs
-  // after navigating away from RADAR
-  if (nav_screens[RIFT_NAV_RADAR] != NULL) ((RiftRadarScreen *) nav_screens[RIFT_NAV_RADAR])->service();
+  // Serviced unconditionally, not via curr->poll(), so RF teardown still runs after
+  // navigating away from RADAR. That was already true when the state machine lived in
+  // the screen and this line had to cast the nav screen back to its own type to reach
+  // it - the loop was driving something the screen owned. It now asks the service
+  // directly, and no longer needs to know that RADAR is a screen at all.
+  riftRadarSvc().service();
 #endif
 
 #ifdef RIFT_SPEAKER
@@ -10037,7 +9605,13 @@ void UITask::loop() {
         _next_refresh = millis() + delay_millis;
       }
       _display->endFrame();
-      if (dump_now) riftStreamFrame();
+      if (dump_now) {
+        riftStreamFrame();
+        // 153,600 bytes on the serial port, inside this turn. See the LOOP
+        // counters: the next entry drops this interval instead of reporting the
+        // host's own read as the worst the radio ever waited.
+        rift_loop_perturbed = true;
+      }
     }
 #if AUTO_OFF_MILLIS > 0
 #ifdef KEEP_DISPLAY_ON_USB

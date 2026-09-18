@@ -1011,6 +1011,37 @@ TEST(OriginHops, RefusesWhatCarriesNoCount) {
     EXPECT_EQ(99, h) << "a refusal must not write to the output";
 }
 
+TEST(FormatMicrosMs, OneDecimalAndNeverLargerThanMeasured) {
+    char b[RIFT_MS_BUF_LEN];
+    riftFormatMicrosMs(0, b, sizeof(b));        EXPECT_STREQ("0.0", b);
+    riftFormatMicrosMs(99, b, sizeof(b));       EXPECT_STREQ("0.0", b);
+    riftFormatMicrosMs(100, b, sizeof(b));      EXPECT_STREQ("0.1", b);
+    riftFormatMicrosMs(1000, b, sizeof(b));     EXPECT_STREQ("1.0", b);
+    // The number this row exists for: 153,600 bytes at 40MHz is 30.72ms of SPI
+    // clock, and a whole-millisecond field could not tell that from 31.4.
+    riftFormatMicrosMs(30720, b, sizeof(b));    EXPECT_STREQ("30.7", b);
+    riftFormatMicrosMs(31400, b, sizeof(b));    EXPECT_STREQ("31.4", b);
+    // Truncation, not rounding, in both directions from a half.
+    riftFormatMicrosMs(1999, b, sizeof(b));     EXPECT_STREQ("1.9", b);
+    riftFormatMicrosMs(1950, b, sizeof(b));     EXPECT_STREQ("1.9", b);
+    riftFormatMicrosMs(1050, b, sizeof(b));     EXPECT_STREQ("1.0", b);
+}
+
+TEST(FormatMicrosMs, TheWidestOutputStillFitsTheBuffer) {
+    char b[RIFT_MS_BUF_LEN];
+    riftFormatMicrosMs(0xFFFFFFFFu, b, sizeof(b));
+    EXPECT_STREQ("4294967.2", b) << "a full uint32 of microseconds must not be truncated";
+    EXPECT_LT(strlen(b), (size_t) RIFT_MS_BUF_LEN);
+}
+
+TEST(FormatMicrosMs, RefusesWithoutWriting) {
+    char b[RIFT_MS_BUF_LEN];
+    memset(b, 'x', sizeof(b));
+    riftFormatMicrosMs(1000, b, 0);
+    EXPECT_EQ('x', b[0]) << "a zero-length buffer must not be written to";
+    riftFormatMicrosMs(1000, NULL, sizeof(b));   // must not crash
+}
+
 TEST(FormatAgeSecs, TakesSecondsWithoutTheMillisRoundTrip) {
     char b[RIFT_AGE_BUF_LEN];
     riftFormatAgeSecs(0, b, sizeof(b));      EXPECT_STREQ("0s", b);
@@ -1923,6 +1954,314 @@ TEST(ConvKey, TwoUnknownsAreNotTheSameConversation) {
 TEST(ConvKey, NullPeerIsUnknownRatherThanAZeroDm) {
     RiftConvKey k = riftConvDM(NULL);
     EXPECT_EQ(RIFT_CONV_UNKNOWN, k.kind);
+}
+
+// A key whose hex spells something a person might also type as a name fragment.
+static const uint8_t NODE_KEY[7] = { 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A };
+
+TEST(NodeMatches, AnEmptyQueryMatchesEverything) {
+    EXPECT_TRUE(riftNodeMatches("anything", NODE_KEY, 7, ""));
+    EXPECT_TRUE(riftNodeMatches("anything", NODE_KEY, 7, NULL));
+}
+
+TEST(NodeMatches, TheNameMatchesAnywhereAndInAnyCase) {
+    EXPECT_TRUE(riftNodeMatches("SE FCC portabel", NODE_KEY, 7, "fcc"));
+    EXPECT_TRUE(riftNodeMatches("SE FCC portabel", NODE_KEY, 7, "FCC"));
+    EXPECT_TRUE(riftNodeMatches("SE FCC portabel", NODE_KEY, 7, "porta"));
+    EXPECT_TRUE(riftNodeMatches("SE FCC portabel", NODE_KEY, 7, "l"));
+    EXPECT_FALSE(riftNodeMatches("SE FCC portabel", NODE_KEY, 7, "zz"));
+}
+
+TEST(NodeMatches, TheKeyMatchesFromItsFront) {
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "be"));
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "BE"));
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "beef"));
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "beef12"));
+    // A single nibble is half a byte and still a usable narrowing.
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "b"));
+    EXPECT_FALSE(riftNodeMatches("", NODE_KEY, 7, "ef"))
+        << "the middle of a key is a coincidence, not a recognition";
+    EXPECT_FALSE(riftNodeMatches("", NODE_KEY, 7, "bf"));
+}
+
+TEST(NodeMatches, AQueryLongerThanTheKeyCannotMatchIt) {
+    // 7 bytes is 14 hex digits; 16 asks for more key than there is.
+    EXPECT_FALSE(riftNodeMatches("", NODE_KEY, 7, "beef123456789abcde"));
+    EXPECT_TRUE(riftNodeMatches("", NODE_KEY, 7, "beef123456789a"));
+}
+
+TEST(NodeMatches, AHexQueryIsTriedAgainstBoth) {
+    // "bee" is both the front of this key and inside this name, and either one
+    // finding it is the right answer.
+    EXPECT_TRUE(riftNodeMatches("the beech tree", NODE_KEY, 7, "bee"));
+    EXPECT_TRUE(riftNodeMatches("no match here", NODE_KEY, 7, "bee"));
+    EXPECT_TRUE(riftNodeMatches("the beech tree", (const uint8_t*) "\x00\x00", 2, "bee"));
+}
+
+TEST(NodeMatches, ANonHexQueryIsNeverTriedAgainstTheKey) {
+    EXPECT_FALSE(riftIsHexQuery("beeg"));
+    EXPECT_FALSE(riftIsHexQuery("be ef"));
+    EXPECT_FALSE(riftIsHexQuery(""));
+    EXPECT_TRUE(riftIsHexQuery("BEEF"));
+    EXPECT_FALSE(riftNodeMatches("zzz", NODE_KEY, 7, "beeg"));
+}
+
+TEST(NodeMatches, DegenerateInputs) {
+    EXPECT_TRUE(riftNodeMatches(NULL, NODE_KEY, 7, "be")) << "a nameless node is still findable by key";
+    EXPECT_FALSE(riftNodeMatches(NULL, NODE_KEY, 7, "zz"));
+    EXPECT_FALSE(riftNodeMatches("name", NULL, 0, "zz"));
+    EXPECT_TRUE(riftNodeMatches("name", NULL, 0, "nam"));
+    EXPECT_FALSE(riftKeyHexStartsWith(NODE_KEY, 0, "be")) << "no key bytes, nothing to match";
+}
+
+static void favkey(uint8_t* out, uint8_t tail) {
+    for (int i = 0; i < RIFT_FAV_KEY_LEN; i++) out[i] = 0x40;
+    out[RIFT_FAV_KEY_LEN - 1] = tail;   // differ in the last byte, like real prefixes can
+}
+
+TEST(Favourites, AddsFindsAndRemoves) {
+    RiftFavourites f;
+    uint8_t a[RIFT_FAV_KEY_LEN], b[RIFT_FAV_KEY_LEN];
+    favkey(a, 1); favkey(b, 2);
+
+    EXPECT_FALSE(f.has(a));
+    EXPECT_TRUE(f.add(a));
+    EXPECT_TRUE(f.has(a));
+    EXPECT_FALSE(f.has(b)) << "keys differing in the last byte are different nodes";
+
+    EXPECT_TRUE(f.remove(a));
+    EXPECT_FALSE(f.has(a));
+    EXPECT_FALSE(f.remove(a)) << "removing what is not there is not a removal";
+}
+
+TEST(Favourites, AddingTwiceIsStillOneEntry) {
+    RiftFavourites f;
+    uint8_t a[RIFT_FAV_KEY_LEN];
+    favkey(a, 1);
+    EXPECT_TRUE(f.add(a));
+    EXPECT_TRUE(f.add(a)) << "already a favourite is success, not failure";
+    EXPECT_EQ(1, f.n);
+}
+
+TEST(Favourites, TogglingReportsTheNewState) {
+    RiftFavourites f;
+    uint8_t a[RIFT_FAV_KEY_LEN];
+    favkey(a, 7);
+    EXPECT_TRUE(f.toggle(a));
+    EXPECT_TRUE(f.has(a));
+    EXPECT_FALSE(f.toggle(a));
+    EXPECT_FALSE(f.has(a));
+}
+
+TEST(Favourites, AFullListRefusesRatherThanDroppingOne) {
+    RiftFavourites f;
+    uint8_t k[RIFT_FAV_KEY_LEN];
+    for (int i = 0; i < RIFT_FAV_MAX; i++) { favkey(k, (uint8_t) i); EXPECT_TRUE(f.add(k)); }
+    EXPECT_TRUE(f.full());
+
+    favkey(k, 200);
+    EXPECT_FALSE(f.add(k)) << "the caller has to be told, so it can say so";
+    EXPECT_FALSE(f.has(k));
+    EXPECT_EQ(RIFT_FAV_MAX, f.n);
+
+    // And the ones already held are all still there.
+    for (int i = 0; i < RIFT_FAV_MAX; i++) { favkey(k, (uint8_t) i); EXPECT_TRUE(f.has(k)); }
+}
+
+TEST(Favourites, RemovingFromTheMiddleKeepsTheRest) {
+    RiftFavourites f;
+    uint8_t k[RIFT_FAV_KEY_LEN];
+    for (int i = 0; i < 5; i++) { favkey(k, (uint8_t) i); f.add(k); }
+    favkey(k, 2);
+    EXPECT_TRUE(f.remove(k));
+    EXPECT_EQ(4, f.n);
+    EXPECT_FALSE(f.has(k));
+    for (int i = 0; i < 5; i++) {
+        if (i == 2) continue;
+        favkey(k, (uint8_t) i);
+        EXPECT_TRUE(f.has(k)) << "removing one must not lose another, i=" << i;
+    }
+}
+
+TEST(Favourites, DegenerateInputs) {
+    RiftFavourites f;
+    EXPECT_FALSE(f.add(NULL));
+    EXPECT_FALSE(f.has(NULL));
+    EXPECT_FALSE(f.remove(NULL));
+    EXPECT_EQ(0, f.n);
+}
+
+TEST(RouteLog, KeepsOneNodesChangesNewestFirst) {
+    RiftRouteLog r;
+    uint8_t a[RIFT_FAV_KEY_LEN], b[RIFT_FAV_KEY_LEN];
+    favkey(a, 1); favkey(b, 2);
+
+    r.note(a, 3, 1000);
+    r.note(b, 7, 1100);      // another node's change must not appear in a's history
+    r.note(a, 5, 1200);
+
+    EXPECT_EQ(2, r.countFor(a));
+    EXPECT_EQ(1, r.countFor(b));
+    ASSERT_NE(nullptr, r.peekFor(a, 0));
+    EXPECT_EQ(5, r.peekFor(a, 0)->hops);
+    EXPECT_EQ(1200u, r.peekFor(a, 0)->at_ms);
+    ASSERT_NE(nullptr, r.peekFor(a, 1));
+    EXPECT_EQ(3, r.peekFor(a, 1)->hops);
+    EXPECT_EQ(nullptr, r.peekFor(a, 2)) << "past the end is how a caller stops";
+}
+
+TEST(RouteLog, TheSameHopCountAgainIsNotAChange) {
+    RiftRouteLog r;
+    uint8_t a[RIFT_FAV_KEY_LEN];
+    favkey(a, 1);
+
+    r.note(a, 4, 1000);
+    r.note(a, 4, 2000);
+    r.note(a, 4, 3000);
+    EXPECT_EQ(1, r.countFor(a)) << "the hook fires on re-confirmation too";
+    EXPECT_EQ(1000u, r.peekFor(a, 0)->at_ms) << "and must not restamp the original";
+
+    // But going away and coming back is two changes.
+    r.note(a, 6, 4000);
+    r.note(a, 4, 5000);
+    EXPECT_EQ(3, r.countFor(a));
+    EXPECT_EQ(4, r.peekFor(a, 0)->hops);
+    EXPECT_EQ(6, r.peekFor(a, 1)->hops);
+}
+
+TEST(RouteLog, OneThrashingNodeCanFillTheRing) {
+    // The allocation is deliberate: all of one node's changes beats a few of
+    // everyone's, because the node that is moving is the one being asked about.
+    RiftRouteLog r;
+    uint8_t a[RIFT_FAV_KEY_LEN];
+    favkey(a, 1);
+    for (int i = 0; i < RIFT_ROUTE_LOG_MAX + 6; i++) {
+        r.note(a, (uint8_t) (i % 2 ? 3 : 4), 1000u + (uint32_t) i);
+    }
+    EXPECT_EQ(RIFT_ROUTE_LOG_MAX, r.countFor(a));
+    EXPECT_EQ(nullptr, r.peekFor(a, RIFT_ROUTE_LOG_MAX));
+}
+
+TEST(RouteLog, DegenerateInputs) {
+    RiftRouteLog r;
+    uint8_t a[RIFT_FAV_KEY_LEN];
+    favkey(a, 1);
+    r.note(NULL, 3, 1000);
+    EXPECT_EQ(0, r.count);
+    EXPECT_EQ(0, r.countFor(NULL));
+    EXPECT_EQ(nullptr, r.peekFor(NULL, 0));
+    EXPECT_EQ(nullptr, r.peekFor(a, -1));
+    EXPECT_EQ(nullptr, r.peekFor(a, 0)) << "nothing noted, nothing to peek";
+}
+
+TEST(Drafts, EachConversationKeepsItsOwn) {
+    RiftDrafts d;
+    d.put(ch(0), "to the channel");
+    d.put(riftConvDM(PEER_A), "to A");
+    d.put(riftConvDM(PEER_B), "to B");
+
+    EXPECT_STREQ("to the channel", d.get(ch(0)));
+    EXPECT_STREQ("to A", d.get(riftConvDM(PEER_A)));
+    EXPECT_STREQ("to B", d.get(riftConvDM(PEER_B)));
+    // The bug this replaces: PEER_B differs from PEER_A in the last byte only, and a
+    // line meant for one must not come back in the other.
+    EXPECT_STRNE(d.get(riftConvDM(PEER_A)), d.get(riftConvDM(PEER_B)));
+}
+
+TEST(Drafts, NoDraftReadsAsNullRatherThanEmpty) {
+    RiftDrafts d;
+    EXPECT_EQ(NULL, d.get(ch(0)));
+    EXPECT_FALSE(d.has(ch(0)));
+    d.put(ch(0), "something");
+    EXPECT_TRUE(d.has(ch(0)));
+}
+
+TEST(Drafts, StoringEmptyRemovesTheRowRatherThanKeepingABlankOne) {
+    RiftDrafts d;
+    d.put(ch(0), "typed then deleted");
+    EXPECT_EQ(1, d.n);
+    d.put(ch(0), "");
+    EXPECT_EQ(0, d.n) << "an empty draft is the absence of one";
+    EXPECT_FALSE(d.has(ch(0)));
+
+    // And an empty one for a conversation that never had a draft adds nothing.
+    d.put(riftConvDM(PEER_A), "");
+    EXPECT_EQ(0, d.n);
+    d.put(riftConvDM(PEER_A), NULL);
+    EXPECT_EQ(0, d.n);
+}
+
+TEST(Drafts, OverwritingKeepsOneRow) {
+    RiftDrafts d;
+    d.put(ch(0), "first");
+    d.put(ch(0), "second");
+    EXPECT_EQ(1, d.n);
+    EXPECT_STREQ("second", d.get(ch(0)));
+}
+
+TEST(Drafts, SendingClearsOnlyThatConversation) {
+    RiftDrafts d;
+    d.put(ch(0), "channel text");
+    d.put(riftConvDM(PEER_A), "dm text");
+    d.clear(ch(0));
+    EXPECT_FALSE(d.has(ch(0)));
+    EXPECT_STREQ("dm text", d.get(riftConvDM(PEER_A)));
+}
+
+TEST(Drafts, AnUnknownConversationIsRefused) {
+    RiftDrafts d;
+    d.put(riftConvUnknown(), "nowhere to come back to");
+    EXPECT_EQ(0, d.n);
+}
+
+TEST(Drafts, TheLeastRecentlyTouchedIsTheOneDropped) {
+    RiftDrafts d;
+    uint8_t peer[6] = { 9, 9, 9, 9, 9, 0 };
+
+    // Fill every slot, oldest first.
+    for (int i = 0; i < RIFT_DRAFT_MAX; i++) {
+        peer[5] = (uint8_t) i;
+        d.put(riftConvDM(peer), "held");
+    }
+    EXPECT_EQ(RIFT_DRAFT_MAX, d.n);
+
+    // Come back to the oldest, which makes it the newest.
+    peer[5] = 0;
+    RiftConvKey revisited = riftConvDM(peer);
+    d.put(revisited, "touched again");
+
+    // One more conversation than there are slots: slot 1 is now the stalest.
+    peer[5] = 200;
+    d.put(riftConvDM(peer), "the newcomer");
+
+    EXPECT_EQ(RIFT_DRAFT_MAX, d.n);
+    EXPECT_STREQ("touched again", d.get(revisited)) << "revisiting must save a draft";
+    peer[5] = 1;
+    EXPECT_EQ(NULL, d.get(riftConvDM(peer))) << "the stalest is the one that goes";
+    peer[5] = 200;
+    EXPECT_STREQ("the newcomer", d.get(riftConvDM(peer)));
+}
+
+TEST(Drafts, RemovingFromTheMiddleLosesNothingElse) {
+    RiftDrafts d;
+    d.put(ch(0), "zero");
+    d.put(ch(1), "one");
+    d.put(ch(2), "two");
+    d.clear(ch(1));
+    EXPECT_EQ(2, d.n);
+    EXPECT_STREQ("zero", d.get(ch(0)));
+    EXPECT_STREQ("two", d.get(ch(2)));
+    EXPECT_FALSE(d.has(ch(1)));
+}
+
+TEST(Drafts, AFullLengthDraftSurvivesIntact) {
+    RiftDrafts d;
+    char longest[RIFT_DRAFT_LEN + 1];
+    memset(longest, 'x', RIFT_DRAFT_LEN);
+    longest[RIFT_DRAFT_LEN] = 0;
+    d.put(ch(0), longest);
+    EXPECT_STREQ(longest, d.get(ch(0)));
+    EXPECT_EQ((size_t) RIFT_DRAFT_LEN, strlen(d.get(ch(0))));
 }
 
 TEST(LargestConv, PicksTheBusiestConversation) {
