@@ -654,6 +654,11 @@ static void riftStreamFrame() {
 }
 bool rift_screen_always_on = false;
 
+// Whether a message arriving over another screen raises the preview popup. Off by
+// default: the unread dot in COMMS and the screen wake still announce it, and a
+// popup taking over whatever is on screen is the more intrusive of the three.
+bool rift_msg_popup_on = false;
+
 // Display offset from UTC, in quarter hours. See riftLocalFromUtc in RiftLogic.h for
 // why this is display-only and never reaches the RTC: mesh consensus compares this
 // node's clock against other nodes' advert timestamps, which are UTC, so a stored
@@ -767,6 +772,7 @@ void riftLoadSettings() {
       && riftDecodeSettings(b[2], b[3], &st)) {
     riftApplyPalette(st.day_mode);
     rift_screen_always_on = st.always_on;
+    rift_msg_popup_on = st.popup_on;
     migrated = st.migrated;
 #ifdef RIFT_SPEAKER
     rift_sound_on = st.sound_on;
@@ -902,6 +908,7 @@ void riftSaveSettings() {
   RiftSettings st;
   st.day_mode  = rift_day_mode;
   st.always_on = rift_screen_always_on;
+  st.popup_on  = rift_msg_popup_on;
   st.migrated  = false;
 #ifdef RIFT_RADAR
   st.radar_src = rift_radar_src;
@@ -1827,7 +1834,7 @@ class RiftSystemScreen : public RiftScreen {
   // here and are entered from there. Moved rather than copied: the same action
   // reachable from two places is two code paths that drift.
   enum Item { IT_NAME, IT_CHANNEL, IT_DELCHANNEL, IT_SCOPE, IT_MUTE,
-              IT_PATHMODE, IT_SCREEN, IT_SOUND, IT_DAYMODE, IT_SETTIME, IT_TIMEZONE,
+              IT_PATHMODE, IT_SCREEN, IT_SOUND, IT_POPUP, IT_DAYMODE, IT_SETTIME, IT_TIMEZONE,
               IT_DIAG, IT_LOG, IT_RXLOG, IT_RESET, IT_COUNT };
   bool _return_to_comms = false;   // a channel flow entered from COMMS goes back there
 
@@ -1858,7 +1865,7 @@ class RiftSystemScreen : public RiftScreen {
   static const char* itemLabel(int i) {
     static const char* LABEL[IT_COUNT] = {
       "Edit node name", "Add channel", "Delete channel", "Channel scope", "Channel mute",
-      "Path hash size", "Screen", "Alert sound", "Display", "Set time", "Time zone",
+      "Path hash size", "Screen", "Alert sound", "Message popup", "Display", "Set time", "Time zone",
       "Diagnostics", "View log", "View air log", "Factory reset",
     };
     return (i >= 0 && i < IT_COUNT) ? LABEL[i] : "";
@@ -1916,6 +1923,9 @@ class RiftSystemScreen : public RiftScreen {
 #else
         StrHelper::strncpy(buf, "unavailable", len);
 #endif
+        break;
+      case IT_POPUP:
+        StrHelper::strncpy(buf, rift_msg_popup_on ? "on" : "off", len);
         break;
       case IT_DAYMODE:
         // the design binds this to backlight level; this panel's backlight is on or
@@ -2041,6 +2051,13 @@ private:
 #else
         _task->showAlert("No speaker in this build", 1400);
 #endif
+        break;
+
+      case IT_POPUP:
+        rift_msg_popup_on = !rift_msg_popup_on;
+        riftSaveSettings();
+        _task->showAlert(rift_msg_popup_on ? "Message popup on" : "Message popup off", 1200);
+        riftLogf("msg popup %s", rift_msg_popup_on ? "on" : "off");
         break;
 
       case IT_DELCHANNEL:
@@ -8844,7 +8861,10 @@ void UITask::newMsgConv(uint8_t path_len, const char* from_name, const char* tex
   // conversation, so a message arriving in a different one has to announce itself
   // even though COMMS is on screen. showsConversation() defaults to false, so every
   // other screen behaves exactly as before.
-  if (!muted && _overlay == NULL && curr != NULL && !curr->isModal()
+  //
+  // And only when the popup is switched on in SYSTEM. Off, the unread mark above and
+  // the wake below still announce the message; only the overlay is skipped.
+  if (rift_msg_popup_on && !muted && _overlay == NULL && curr != NULL && !curr->isModal()
       && !curr->showsConversation(conv)) {
     pushOverlay(msg_preview);
   }

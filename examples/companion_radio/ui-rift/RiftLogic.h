@@ -1802,7 +1802,11 @@ static inline int riftLargestConv(const RiftConvKey* keys, int n, RiftConvKey* o
 // an argument - which is what this needed, because the bug it fixes was a comment
 // reasoning about the wrong thing.
 //
-// Bit layout: 0 day mode, 1 screen always on, 2-3 radar source, 4 sound.
+// Bit layout: 0 day mode, 1 screen always on, 2-3 radar source, 4 sound,
+// 5 new-message popup.
+//
+// The popup bit needed no version bump, by the rule below: it defaults to off, and
+// every file written before it existed has bit 5 clear, which already means off.
 //
 // VERSION 1 vs 2, AND WHY THE BUMP WAS OWED. Sound arrived in v0.8 on bit 4 and the
 // file stayed at version 1, on the reasoning that the low four bits were already
@@ -1835,6 +1839,7 @@ struct RiftSettings {
   bool    always_on;
   uint8_t radar_src;
   bool    sound_on;
+  bool    popup_on;   // the new-message popup; off by default
   bool    migrated;   // the file was an older version and should be rewritten
 };
 
@@ -1847,6 +1852,7 @@ static inline bool riftDecodeSettings(uint8_t version, uint8_t flags, RiftSettin
 
   out->day_mode  = (flags & 1) != 0;
   out->always_on = (flags & 2) != 0;
+  out->popup_on  = (flags & 32) != 0;
 
   uint8_t src = (uint8_t) ((flags >> 2) & 3);
   // 3 is not a state this ever writes; treat it as both rather than trusting it
@@ -1865,7 +1871,8 @@ static inline bool riftDecodeSettings(uint8_t version, uint8_t flags, RiftSettin
 
 static inline uint8_t riftEncodeSettings(const RiftSettings& s) {
   return (uint8_t) ((s.day_mode ? 1 : 0) | (s.always_on ? 2 : 0)
-                    | ((s.radar_src & 3) << 2) | (s.sound_on ? 16 : 0));
+                    | ((s.radar_src & 3) << 2) | (s.sound_on ? 16 : 0)
+                    | (s.popup_on ? 32 : 0));
 }
 
 // Which entry a full log should drop. keys are the conversations of the stored
