@@ -263,11 +263,14 @@ struct RiftRxLog {
     if (text != NULL) snprintf(e->text, sizeof(e->text), "%s", text);
   }
 
-  void add(float snr, float rssi, uint8_t header, uint8_t path_len, int len) {
+  void add(float snr, float rssi, uint8_t header, uint8_t path_len, int len,
+           int activity_class = RIFT_ACT_UNKNOWN) {
     // Counted before the entry is filled in, and counted whatever happens to the
     // entry afterwards: this number is the twenty-minute strip, and it must not
     // depend on the row surviving in the ring.
-    riftActivityNote(&riftActivity(), (uint32_t) millis(), riftHeaderPayloadType(header));
+    // Metadata alone cannot establish a well-formed envelope. The raw receive
+    // hook supplies its read-only classification; other callers default UNKNOWN.
+    riftActivityNote(&riftActivity(), (uint32_t) millis(), activity_class);
 
     Entry* e = alloc(RIFT_AIR_RX, header, path_len, len);
     // clamped rather than cast: a bad reading should not wrap into a plausible one
