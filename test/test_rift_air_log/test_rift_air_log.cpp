@@ -151,6 +151,24 @@ TEST(AirLogRow, EachHeldPacketGetsItsOwnRow) {
     EXPECT_STREQ("ay",  log->peek(2)->who);   EXPECT_EQ(41, (int) log->peek(2)->len);
 }
 
+TEST(AirLogActivity, RxTypesSurviveRingEvictionAndTxDoesNotInflateTheGraph) {
+    riftActivity() = {};
+    g_mock_millis = 60000;
+    auto log = freshLog();
+    for (int n = 0; n < 200; n++) {
+        int k = n % RIFT_ACT_CLASSES;
+        log->add(5, -90, 0x09, 0, 22, k);
+        log->addTx(true, 120, 0x09, 0, 22);
+        log->addTx(false, 0, 0x09, 0, 22);
+    }
+    const auto* bin = riftActivityAt(&riftActivity(), 19);
+    EXPECT_EQ(200u, riftActivityTotal(bin));
+    for (int k = 0; k < RIFT_ACT_CLASSES; k++) EXPECT_EQ(k < 4 ? 15 : 14, bin[k]);
+    // Header metadata without the raw envelope cannot establish a valid type.
+    log->add(5, -90, 0x09, 0, 22);
+    EXPECT_EQ(15, bin[RIFT_ACT_UNKNOWN]);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

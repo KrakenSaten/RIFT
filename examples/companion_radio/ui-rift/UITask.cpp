@@ -326,6 +326,7 @@ struct RiftTextInput {
 static const int NAV_CENTRE_X[RIFT_NAV_COUNT] = { 20, 81, 145, 209, 270 };
 
 #define NAV_RULE_Y 226
+#define HOME_NAV_Y 216
 
 // The marker under a nav label, sized to the label rather than to a 64px column.
 //
@@ -341,9 +342,9 @@ static const int NAV_CENTRE_X[RIFT_NAV_COUNT] = { 20, 81, 145, 209, 270 };
 // grey step between active and inactive vanishes in sunlight, and a 64px bar under
 // a 30px word is ambiguous about which word it belongs to - which is exactly what
 // sunlight was going to add anyway.
-static void navMarkerSpan(int i, int* x, int* w) {
+static void navMarkerSpan(int i, int* x, int* w, bool home = false) {
   *w = (int) strlen(NAV_LABELS[i]) * RIFT_CHAR_W + 8;
-  *x = NAV_CENTRE_X[i] - *w / 2;
+  *x = (home ? 32 + 64 * i : NAV_CENTRE_X[i]) - *w / 2;
 }
 
 // The one window pattern every list with a cursor uses, from the September
@@ -422,8 +423,30 @@ static int riftWarnChip(DisplayDriver& display, int x, int y, const char* text) 
   return w;
 }
 
-static void renderNavBar(DisplayDriver& display, int curr_idx) {
-  const int y_rule = NAV_RULE_Y;
+// Battery moves into the home masthead; other screens retain their nav reading.
+// CHG denotes a held battery estimate, not a live voltage-derived percentage.
+static void renderBattery(DisplayDriver& display, int y) {
+  display.setTextSize(1);
+  char batt[12];
+  if (rift_nav_batt_ext) {
+    if (rift_nav_batt_pct > 0) snprintf(batt, sizeof(batt), "CHG %d%%", rift_nav_batt_pct);
+    else                       snprintf(batt, sizeof(batt), "CHG");
+  } else {
+    snprintf(batt, sizeof(batt), "%d%%", rift_nav_batt_pct);
+  }
+  // Not warned about while charging. The held figure can be low and still be the
+  // wrong thing to interrupt over - the cable is in and the number is going up.
+  if (rift_nav_batt_pct <= 15 && !rift_nav_batt_ext) {
+    riftWarnText(display, display.width() - 2, y, batt, 1, true);
+  } else {
+    display.setColor(rift_pal.mid);
+    display.drawTextRightAlign(display.width() - 2, y, batt);
+  }
+}
+
+static void renderNavBar(DisplayDriver& display, int curr_idx, bool home = false) {
+  const int y_rule = home ? HOME_NAV_Y : NAV_RULE_Y;
+  const int text_y = home ? 225 : 228;
 
   display.setColor(rift_pal.rule);
   display.fillRect(0, y_rule, display.width(), 1);
@@ -432,7 +455,7 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   // between active and inactive disappears. The underline is the second cue.
   display.setColor(rift_pal.accent);
   int mark_x, mark_w;
-  navMarkerSpan(curr_idx, &mark_x, &mark_w);
+  navMarkerSpan(curr_idx, &mark_x, &mark_w, home);
   display.fillRect(mark_x, y_rule, mark_w, 2);
 
   display.setTextSize(1);
@@ -448,9 +471,9 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
     if (i == RIFT_NAV_MESH && i == curr_idx) {
       if (rift_day_mode) {
         int chip_x, chip_w;
-        navMarkerSpan(i, &chip_x, &chip_w);
+        navMarkerSpan(i, &chip_x, &chip_w, home);
         display.setColor(rift_pal.accent);
-        display.fillRect(chip_x, y_rule + 2, chip_w, 12);
+        display.fillRect(chip_x, home ? text_y - 2 : y_rule + 2, chip_w, 12);
         display.setColor(rift_pal.on_accent);
       } else {
         display.setColor(rift_pal.accent);
@@ -458,7 +481,7 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
     } else {
       display.setColor(i == curr_idx ? rift_pal.fg : rift_pal.dim);
     }
-    display.drawTextCentered(NAV_CENTRE_X[i], 228, NAV_LABELS[i]);
+    display.drawTextCentered(home ? 32 + 64 * i : NAV_CENTRE_X[i], text_y, NAV_LABELS[i]);
   }
 
   // Straight from the unread model, which is the only thing that tracks this now.
@@ -474,54 +497,17 @@ static void renderNavBar(DisplayDriver& display, int curr_idx) {
   // September design round. Vertically centred on the label row.
   if (msg_unread.any()) {
     display.setColor(rift_pal.fg);
-    display.fillRect(240, 231, 3, 3);
+    display.fillRect(home ? 246 : 240, text_y + 3, 3, 3);
   }
   // A tropo opening is worth seeing from every screen, not only from the home
   // row: a small triangle in the accent beside the unread mark while one runs.
   // Warning is one of the accent's four meanings, and an opening is the one
   // radio condition worth interrupting for.
   if (riftTropoState().active) {
-    riftDrawTriangle(display, 228, 230, 5, rift_pal.accent);
+    riftDrawTriangle(display, home ? 244 : 228, home ? 218 : 230, 5, rift_pal.accent);
   }
 
-  // Battery, moved down from the title bar into space that was already here:
-  // SYSTEM is centred at 270 and ends at 287, leaving 32px to the right edge, and
-  // "100%" is 24px. SYSTEM's marker now ends at 291 rather than running to the
-  // screen edge, and sits at y 226..227 while this text occupies 228..236, so they
-  // do not touch on either axis.
-  //
-  // mid rather than fg: this is chrome, and fg would make it compete with the
-  // active nav label. accent when low, which is the one case worth interrupting.
-  // snprintf, and not because the values can overflow it today - the percentage
-  // is clamped to 0..100 where it is set. The compiler cannot see that clamp, and
-  // said so; a bound that depends on a clamp somewhere else is one edit away from
-  // being wrong.
-  // On every screen, SYSTEM included: it used to borrow this slot for its page
-  // number, and it has no pages now.
-  // "CHG" while a charger is driving the pin, because the percentage beside it is
-  // then the last reading taken on the battery and not a current one. It used to
-  // print the live conversion, which with a cable in is the system rail: plugging in
-  // took the number from 50 to 99 without the cell gaining anything. Measured at
-  // 4.61V on this board, where a cell cannot pass 4.20.
-  //
-  // The held number is kept rather than blanked - "CHG 47%" says more than "CHG",
-  // and what it says is true as of when the cable went in. Before any reading has
-  // been taken on battery there is nothing to hold, and it says so.
-  char batt[12];
-  if (rift_nav_batt_ext) {
-    if (rift_nav_batt_pct > 0) snprintf(batt, sizeof(batt), "CHG %d%%", rift_nav_batt_pct);
-    else                       snprintf(batt, sizeof(batt), "CHG");
-  } else {
-    snprintf(batt, sizeof(batt), "%d%%", rift_nav_batt_pct);
-  }
-  // Not warned about while charging. The held figure can be low and still be the
-  // wrong thing to interrupt over - the cable is in and the number is going up.
-  if (rift_nav_batt_pct <= 15 && !rift_nav_batt_ext) {
-    riftWarnText(display, display.width() - 2, 228, batt, 1, true);
-  } else {
-    display.setColor(rift_pal.mid);
-    display.drawTextRightAlign(display.width() - 2, 228, batt);
-  }
+  if (!home) renderBattery(display, 228);
 }
 
 // BATT_MIN_MILLIVOLTS and BATT_MAX_MILLIVOLTS were the two ends of the straight
@@ -1243,18 +1229,12 @@ public:
 class RiftMeshScreen : public RiftScreen {
   UITask* _task;
   NodePrefs* _node_prefs;
-  // recorded at render so a tap hits the box actually drawn, like the COMMS tabs
-  // Three actions on this screen now, so their hit boxes are an array and the
-  // selected one is tracked for the trackball. Discovery stays index 0, which is
-  // what Enter does with nothing selected - the behaviour this screen already had.
-  // SET is a button like the others so that one rule reaches it - up/down selects,
-  // ENTER presses, a tap does both - but it is drawn on the clock row rather than in
-  // the action strip. A control belongs beside the thing it changes, and the three
-  // above it are all "put something on the air", which setting a clock is not.
+  // The same action order for keyboard and touch, with hit boxes captured from
+  // the rendered geometry. Opening discovery or sending an advert is unchanged.
   enum HomeBtn { BTN_DISCOVER, BTN_ADVERT_NEAR, BTN_ADVERT_MESH, BTN_COUNT };
   int _btn_x0[BTN_COUNT] = { 0, 0, 0 };
   int _btn_x1[BTN_COUNT] = { 0, 0, 0 };
-  int _btn_y[BTN_COUNT]  = { 0, 0, 0 };   // one row again, since SET left the clock row
+  int _btn_y[BTN_COUNT]  = { 0, 0, 0 };
   int _btn_sel = BTN_DISCOVER;
 
 public:
@@ -1262,461 +1242,174 @@ public:
      : _task(task), _node_prefs(node_prefs) { }
 
   int render(DisplayDriver& display) override {
-
-    // The headline is mesh receive activity, which is the question this screen
-    // exists to answer. It used to be the USB/BLE companion link - honest about
-    // what it measured, but a standalone node with a busy mesh around it read
-    // STANDBY forever, and that is the case RIFT is built for.
-    //
-    // The link has not been dropped, only demoted to a labelled row below.
-    //
-    // Longest state is "NO SIGNAL": 9 chars at size 3 is 162px from x=2, which
-    // clears both the screen edge and the radar box (x >= 160, but y >= 80).
-    unsigned long since = millis() - the_mesh.getLastRxMillis();
-    int activity = riftMeshActivity(the_mesh.hasHeardMesh(), (uint32_t) since);
-
-    const char* state;
-    ColorVal state_col;
+    // Signal first: keep the original bitmap identity, promote actual RX data,
+    // and reserve the bottom bands for the same three actions and five routes.
+    const uint32_t since = (uint32_t) (millis() - the_mesh.getLastRxMillis());
+    const int activity = riftMeshActivity(the_mesh.hasHeardMesh(), since);
+    const char* state = "NO SIGNAL";
+    ColorVal state_col = rift_pal.fg;
     switch (activity) {
-      case RIFT_MESH_ACTIVE: state = "ACTIVE";    state_col = rift_pal.ok;     break;
-      case RIFT_MESH_IDLE:   state = "IDLE";      state_col = rift_pal.fg;     break;
-      case RIFT_MESH_QUIET:  state = "QUIET";     state_col = rift_pal.mid;    break;
-      default:               state = "NO SIGNAL"; state_col = rift_pal.accent; break;
+      case RIFT_MESH_ACTIVE: state = "ACTIVE"; state_col = rift_pal.ok; break;
+      case RIFT_MESH_IDLE: state = "IDLE"; break;
+      case RIFT_MESH_QUIET: state = "QUIET"; state_col = rift_pal.dim; break;
+      default: break;
     }
-
-    // The protocol, not the screen name - the nav bar carries that. LoRa
-    // handhelds are dominated by Meshtastic and a T-Deck looks like one, so
-    // saying which mesh stack this is answers a question people actually ask.
-    // It is also something the firmware knows for certain, being compiled in.
-    //
-    // Lowercase, against the all-caps convention of every other piece of chrome
-    // here. A URL in capitals reads worse and less like an address. Deliberate.
-    //
-    // In mid for now, following the label it replaced. MeshCore's brand blue is a
-    // separate open item: it needs the real value and a contrast check in both
-    // palettes, and a saturated blue is likely to fail on black the way the accent
-    // fails on white.
-    // Up 14px from where the title bar used to end. This screen has no heading -
-    // the nav bar says RIFT - so the masthead sits at the very top instead.
-    // Geometry from design/redesign-2026-09/rift-home-spec.md: source at y 2, the
-    // state word at y 20, three fact rows from y 58, the activity strip at y 112,
-    // three mid rows from y 136, the buttons at y 180 and their note at y 200,
-    // and nothing in the fourteen pixels above the nav bar.
     display.setTextSize(1);
     display.setColor(rift_pal.mid);
-    display.drawTextLeftAlign(2, 2, "meshcore.io");
-    if (activity == RIFT_MESH_NEVER) {
-      // the one warning state: accent text at night, fg with an accent stroke
-      // under it by day - see riftWarnText
-      riftWarnText(display, 2, 20, state, 3, false);
-    } else {
+    display.drawTextLeftAlign(4, 2, "meshcore.io");
+    renderBattery(display, 2);
+    if (activity == RIFT_MESH_NEVER) riftWarnText(display, 4, 14, state, 3, false);
+    else {
       display.setTextSize(3);
-      display.setColor(activity == RIFT_MESH_QUIET ? rift_pal.dim : state_col);
-      display.drawTextLeftAlign(2, 20, state);
+      display.setColor(state_col);
+      display.drawTextLeftAlign(4, 14, state);
     }
+    riftDrawWordmark(display, 244, 14, rift_pal.fg, 196, 316);
 
-    // The wordmark, top right, on the same baseline as the state headline.
-    //
-    // This corner was empty: the headline is 162px at its longest, the three rows
-    // under it are shorter still, and the radar box does not start until y=80 - so
-    // roughly 150x76 of the first screen anyone sees carried nothing. The mark is the
-    // one on the boot screen at the same size, not a second logo, which is the whole
-    // point of a wordmark.
-    //
-    // Size 3 rather than larger, and in fg rather than the accent, because the
-    // headline is the information on this screen and the mark is identity. The accent
-    // is already spoken for here - it carries the seam, the radar blip and the
-    // NO SIGNAL state - and a mark competing with a state that means "your radio is
-    // not hearing anything" would be the wrong thing to win.
-    //
-    // The seam leaves the right edge instead of stopping short, which is the opposite
-    // of the boot screen and for the same reason: there it stops halfway to keep the
-    // right half for the strapline, and here there is nothing to its right, so an end
-    // in mid-air would be the arbitrary choice. It begins in mid-air on the left at
-    // x=196 rather than crossing the screen, because continuing would put a diagonal
-    // through the headline and then the LAST RX row.
-    riftDrawWordmark(display, 244, 20, rift_pal.fg, 196, 316);   // 196: the brief's seam start, and what the comment above always said; the call passed 176
-
-    // Show the age and the count, not just the verdict. Every hardware problem
-    // on this project was settled by putting the real value on screen, and a
-    // threshold is exactly the kind of judgement that is worth being able to
-    // check against the number it was derived from.
-    char row[40];
+    char row[64], tmp[64];
     display.setTextSize(1);
     display.setColor(rift_pal.fg);
     if (the_mesh.hasHeardMesh()) {
       char age[RIFT_AGE_BUF_LEN];
-      riftFormatAge((uint32_t) since, age, sizeof(age));
-      sprintf(row, "LAST RX %s AGO", age);
-    } else {
-      // nothing since boot points at frequency, SF or antenna - not at a quiet
-      // network - so it is worth saying which of the two this is. Same label as
-      // the live row, so the eye finds the fact in the same place.
-      strcpy(row, "LAST RX none since boot");
+      riftFormatAge(since, age, sizeof(age));
+      snprintf(row, sizeof(row), "LAST RX %s AGO", age);
+    } else strcpy(row, "LAST RX none since boot");
+    display.drawTextLeftAlign(4, 42, row);
+    snprintf(row, sizeof(row), "RX %u PACKETS", (unsigned) the_mesh.getRxCount());
+    display.drawTextLeftAlign(4, 52, row);
+    display.setColor(rift_pal.rule);
+    display.fillRect(4, 62, 312, 1);
+
+    RiftActivity& act = riftActivity();
+    riftActivityRoll(&act, (uint32_t) millis()); // silence also advances history
+    uint32_t peak = 0;
+    for (int i = 0; i < RIFT_ACT_MINUTES; i++) {
+      uint32_t total = riftActivityTotal(riftActivityAt(&act, i));
+      if (total > peak) peak = total;
     }
-    display.drawTextLeftAlign(2, 58, row);
-
-    sprintf(row, "RX %u PACKETS", (unsigned) the_mesh.getRxCount());
-    display.drawTextLeftAlign(2, 70, row);
-
-    // The companion link, still reported, now labelled for what it measures.
-    // hasConnection() returns AbstractUITask::_connected, which only the serial
-    // interface sets.
+    const uint32_t scale = riftActivityScale(peak);
     display.setColor(rift_pal.mid);
-    const char* link = _task->hasConnection() ? "USB/BLE CONNECTED"
-                     : (the_mesh.getBLEPin() != 0 ? "BLE PAIRING" : "NO HOST");
-    display.drawTextLeftAlign(2, 82, link);
+    display.drawTextLeftAlign(4, 65, "HEARD ON AIR, 20 MIN");
+    snprintf(tmp, sizeof(tmp), "MAX %lu/min", (unsigned long) peak);
+    display.drawTextRightAlign(316, 65, tmp);
 
-    // The activity graph: twenty bars, one per minute, oldest on the left, each
-    // as tall as that minute's share of the busiest minute in the window. It
-    // replaced a radar animation that showed only that the screen was drawing,
-    // and it is the literal answer to the screen's question. Read from the air
-    // log, which already carries every receive with its time, so it needs no
-    // state of its own; on a mesh so busy the log turns over inside twenty
-    // minutes the newest bars are the true ones and the oldest under-count,
-    // which is the honest direction to be wrong in.
-    //
-    // Three classes, not eight packet types, and not the accent. The screen
-    // asks whether the mesh is alive where you stand, and for that the useful
-    // split is what kind of traffic it was: somebody spoke (text, group text,
-    // group data), somebody announced themselves (advert), or the mesh kept
-    // itself running (acks, paths, requests, control, trace). Each class takes
-    // the air log's own colour for its main type - ok green for messages, the
-    // advert blue, mid for the rest - so the graph and the log say the same
-    // thing in the same colours, and the log one level down is the key. The
-    // worst pair of the three is OKLab 0.196 apart at night and 0.208 by day,
-    // four times the air log's own worst pair, which is what an 8px bar with
-    // no word beside it needs. The accent leaves the graph, and is back to its
-    // four meanings.
-    //
-    // Stacked in a fixed order from the bottom - talk, advert, drift - so the
-    // same colour is always in the same place and a mixed bar reads without a
-    // key. The height is the minute's exact share; the split inside it is by
-    // count, and a class that is present gets a pixel as long as the height
-    // has one to give, talk first. A bar two pixels tall with three classes in
-    // it shows two of them, rather than growing a pixel the number did not
-    // measure. The baseline is twenty segments on the bar pitch rather than
-    // one line, so a minute with nothing in it has a shape: "heard nothing for
-    // twenty minutes" and "no data yet" used to draw the same thing.
-    char tmp[48];
-    display.setTextSize(1);
-    {
-      const int GX = 2, GY = 110, GH = 16;   // bars grow upward from y GY+GH
-      enum { K_TALK = RIFT_ACT_TALK, K_ADVERT = RIFT_ACT_ADVERT,
-             K_DRIFT = RIFT_ACT_DRIFT, K_COUNT = RIFT_ACT_CLASSES };
-
-      // From the counters, not from the air log. That ring holds 64 entries for both
-      // directions, so it carries twenty minutes only while traffic stays under 3.2
-      // packets a minute - and it was measured exactly full, 62 rx + 2 tx, on a mesh
-      // doing about two. Past that the oldest bars used to lose their evidence to
-      // eviction and shrink, which reads as the mesh having gone quiet in the past.
-      //
-      // Rolled here as well as on the packet path. Nothing arriving is exactly when
-      // the strip has to keep emptying, and a roll that only happened on receive
-      // would freeze the last burst on screen for as long as the silence lasted.
-      RiftActivity& act = riftActivity();
-      riftActivityRoll(&act, (uint32_t) millis());
-
-      uint16_t per_min[RIFT_ACT_MINUTES][K_COUNT];
-      uint16_t total[RIFT_ACT_MINUTES];
-      uint16_t peak = 0;
-      for (int i = 0; i < RIFT_ACT_MINUTES; i++) {
-        const uint16_t* bin = riftActivityAt(&act, i);
-        uint32_t t = 0;
-        for (int k = 0; k < K_COUNT; k++) {
-          per_min[i][k] = (bin != NULL) ? bin[k] : 0;
-          t += per_min[i][k];
-        }
-        total[i] = (uint16_t) (t > 0xFFFF ? 0xFFFF : t);
-        if (total[i] > peak) peak = total[i];
-      }
-      bool any = peak > 0;
-
-      // Named for what it measures. This screen has three sources for "did we
-      // hear anything": the headline and LAST RX from the mesh's clock, the
-      // packet count from the mesh's counter, and this graph from the air log,
-      // which counts everything the radio decoded - including what the mesh
-      // then discarded. They can disagree, and on a capture they did: NO SIGNAL
-      // and "none since boot" beside a graph scaled to 1/min. Each was true of
-      // its own source; the graph now says which. The scale sits in the label
-      // too, on the label row where it belongs, rather than inside the bar band.
-      if (any) snprintf(tmp, sizeof(tmp), "HEARD ON AIR, 20 MIN %s %u/min", RIFT_DOT, (unsigned) peak);
-      else     snprintf(tmp, sizeof(tmp), "HEARD ON AIR, 20 MIN %s --/min", RIFT_DOT);
+    const int bottom = 106, graph_h = 24;
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long) scale);
+    // Widen the axis for exceptional bursts rather than drawing through bars.
+    int axis_w = display.getTextWidth(tmp);
+    if (axis_w < 18) axis_w = 18;
+    const int gx = 4 + axis_w + 4;
+    const int pitch = (316 - gx) / RIFT_ACT_MINUTES;
+    for (int tick = 0; tick <= 2; tick++) {
+      int y = bottom - tick * graph_h / 2;
+      snprintf(tmp, sizeof(tmp), "%lu", (unsigned long) (scale * tick / 2));
       display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(2, 100, tmp);
-
+      display.drawTextRightAlign(gx - 8, y - 4, tmp);
+      display.fillRect(gx - 5, y, 3, 1);
+    }
+    for (int i = 0; i < RIFT_ACT_MINUTES; i++) {
+      const int x = gx + pitch * i;
       display.setColor(rift_pal.rule);
-      for (int i = 0; i < RIFT_ACT_MINUTES; i++) display.fillRect(GX + 12 * i, GY + GH, 8, 1);
-
-      const uint16_t kcol[K_COUNT] = { rift_pal.ok, riftNameColourAt(4), rift_pal.mid };
-      for (int i = 0; i < RIFT_ACT_MINUTES; i++) {
-        if (total[i] == 0) continue;
-        // A fixed ladder, so a bar moves only when its own minute changes. peak is
-        // now only the number in the label; it is no longer the denominator, which
-        // is what used to redraw every bar whenever the busiest minute did.
-        int h = riftActivityHeight(total[i], GH);
-
-        // Split h by count, then make sure every class present has a pixel
-        // while there are pixels to give, taking them from the largest.
-        int px[K_COUNT];
-        int given = 0;
-        for (int k = 0; k < K_COUNT; k++) {
-          px[k] = (int) (((long) per_min[i][k] * h) / total[i]);
-          given += px[k];
-        }
-        for (int k = 0; k < K_COUNT && given < h; k++) {
-          if (per_min[i][k] > 0) { px[k]++; given++; }
-        }
-        for (int k = 0; k < K_COUNT; k++) {
-          if (per_min[i][k] == 0 || px[k] > 0) continue;
-          int big = 0;
-          for (int j = 1; j < K_COUNT; j++) if (px[j] > px[big]) big = j;
-          if (px[big] > 1) { px[big]--; px[k] = 1; }
-        }
-        int y0 = GY + GH;
-        for (int k = 0; k < K_COUNT; k++) {
-          if (px[k] <= 0) continue;
-          y0 -= px[k];
-          display.setColor(kcol[k]);
-          display.fillRect(GX + 12 * i, y0, 8, px[k]);
-        }
-      }
-
-      // The key, in the colours, following the air log footer's idiom: a key is
-      // shorter than a legend, and TALK and ADV are drawn in the exact values
-      // airTypeColour() gives 0x02 and 0x04 - so a colour here and the same colour
-      // one screen down mean the same traffic, and the air log is the detail this
-      // deliberately does not have room for.
-      //
-      // OTHER is mid, which is also the colour of ordinary label text. That is not
-      // a collision to fix: the third class IS "everything the mesh does to keep
-      // itself running", and drawing it in a colour of its own would claim it is a
-      // category somebody chose rather than the remainder.
-      //
-      // On the storage row's line rather than a line of its own, because every y
-      // below the strip is fixed by rift-home-spec.md rows 10-14 and there is no
-      // gap to take. The right half of that line is empty in every state the row
-      // has: its longest form ends near x 200 and this begins at 232. Right-aligned,
-      // so it reads as a key to the thing above it rather than as more of the
-      // sentence beside it.
-      //
-      // Only when there are bars. A key to an empty graph is furniture.
-      if (any) {
-        static const char* KLAB[K_COUNT] = { "TALK", "ADV", "OTHER" };
-        int kw = 0;
-        for (int k = 0; k < K_COUNT; k++) kw += ((int) strlen(KLAB[k]) + 1) * RIFT_CHAR_W;
-        int kx = 316 - kw + RIFT_CHAR_W;   // the last label has no trailing space to pay for
-        for (int k = 0; k < K_COUNT; k++) {
-          display.setColor(kcol[k]);
-          display.drawTextLeftAlign(kx, 136, KLAB[k]);
-          kx += ((int) strlen(KLAB[k]) + 1) * RIFT_CHAR_W;
-        }
+      display.fillRect(x, bottom, pitch - 4, 1);
+      uint8_t px[RIFT_ACT_CLASSES];
+      riftActivityStack(riftActivityAt(&act, i), scale, graph_h, px);
+      int y = bottom;
+      for (int k = 0; k < RIFT_ACT_CLASSES; k++) {
+        if (!px[k]) continue;
+        y -= px[k];
+        display.setColor(riftActivityColour(k, rift_day_mode));
+        display.fillRect(x, y, pitch - 4, px[k]);
       }
     }
-
-    // Two numbers with their names, on the strip's label row. "LINK -80 / -4"
-    // was the one place on the screen that needed prior knowledge to read. "--"
-    // until something has been heard: the radio's last reading is nothing, not
-    // zero.
     display.setColor(rift_pal.mid);
-    if (the_mesh.hasHeardMesh()) {
-      sprintf(tmp, "RSSI %.0f  SNR %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
-    } else {
-      strcpy(tmp, "RSSI --  SNR --");
+    display.drawTextLeftAlign(gx, 109, "-19m");
+    display.drawTextRightAlign(316, 109, "NOW");
+    // A compact key, not fourteen labels or a new destination. Full header
+    // types remain in the existing air log; TXT deliberately also covers CLI.
+    const int key[] = {RIFT_ACT_ADVERT, RIFT_ACT_CHANNEL, RIFT_ACT_TXT, RIFT_ACT_ACK, RIFT_ACT_UNKNOWN};
+    const char* names[] = {"ADV", "CHAN", "TXT", "ACK", "UNKNOWN"};
+    int kx = 52;
+    for (int i = 0; i < 5; i++) {
+      display.setColor(riftActivityColour(key[i], rift_day_mode));
+      display.fillRect(kx, 121, 5, 5);
+      display.setColor(rift_pal.mid);
+      display.drawTextLeftAlign(kx + 8, 120, names[i]);
+      kx += 8 + (int) strlen(names[i]) * RIFT_CHAR_W + 10;
     }
-    display.drawTextRightAlign(316, 100, tmp);
+    display.setColor(rift_pal.rule);
+    display.fillRect(4, 128, 312, 1);
 
     display.setColor(rift_pal.mid);
-    // "NODES 256" answered neither question: 256 is how many contacts are stored,
-    // which says nothing about whether any of them are around right now. Stored comes
-    // from the persisted contact table, heard from the session path cache.
-    // With the denominator, and in accent when the table is full. "256 STORED" gave
-    // nothing to measure against, so a device that had quietly stopped accepting nodes
-    // looked identical to one with room - and the symptom of the difference is a NODES
-    // screen that stops changing, which reads as a radio or antenna fault.
-    // Accent while the table is actually full, which is the state you can act on by
-    // deleting a contact. Having once been full is history and does not belong in a
-    // colour that means "attend to this".
-    // As a chip rather than accent text, which day mode cannot read: the
-    // number is the warning, and the accent fill with on_accent ink is the one
-    // form that holds in both modes. The rest of the row follows in mid.
     if (the_mesh.contactsFullNow()) {
-      sprintf(tmp, "%d/%d STORED", the_mesh.getNumContacts(), the_mesh.getContactsCapacity());
-      int w = riftWarnChip(display, 2, 136, tmp);
-      sprintf(tmp, "%s %d HEARD", RIFT_DOT, the_mesh.getPathCacheUsed());
+      snprintf(tmp, sizeof(tmp), "%d/%d STORED", the_mesh.getNumContacts(), the_mesh.getContactsCapacity());
+      int w = riftWarnChip(display, 4, 131, tmp);
+      snprintf(tmp, sizeof(tmp), "%s %d HEARD", RIFT_DOT, the_mesh.getPathCacheUsed());
       display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(2 + w + 4, 136, tmp);
+      display.drawTextLeftAlign(4 + w + 4, 131, tmp);
     } else {
-      sprintf(tmp, "%d/%d STORED %s %d HEARD", the_mesh.getNumContacts(),
-              the_mesh.getContactsCapacity(), RIFT_DOT, the_mesh.getPathCacheUsed());
-      display.drawTextLeftAlign(2, 136, tmp);
+      snprintf(tmp, sizeof(tmp), "%d/%d STORED %s %d HEARD", the_mesh.getNumContacts(),
+               the_mesh.getContactsCapacity(), RIFT_DOT, the_mesh.getPathCacheUsed());
+      display.drawTextLeftAlign(4, 131, tmp);
     }
+    if (the_mesh.hasHeardMesh()) {
+      snprintf(tmp, sizeof(tmp), "RSSI %.0f SNR %.0f", radio_driver.getLastRSSI(), radio_driver.getLastSNR());
+    } else strcpy(tmp, "RSSI -- SNR --");
+    display.drawTextRightAlign(316, 131, tmp);
+    snprintf(tmp, sizeof(tmp), "%.3fMHz SF%d %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
+    display.drawTextEllipsized(4, 143, 144, tmp);
+    const RiftTropo& tr = riftTropoState();
+    if (tr.active) snprintf(tmp, sizeof(tmp), "TROPO OPEN peak %d hops", (int) tr.peak_hops);
+    else if (!tr.openings) strcpy(tmp, "TROPO none since boot");
+    else {
+      char age[RIFT_AGE_BUF_LEN];
+      riftFormatAge((uint32_t) millis() - tr.last_open_ms, age, sizeof(age));
+      snprintf(tmp, sizeof(tmp), "TROPO %s ago pk %d hops", age, (int) tr.last_peak);
+    }
+    int tw = display.getTextWidth(tmp);
+    riftDrawTriangle(display, 316 - tw - 10, 145, 4, tr.active ? rift_pal.accent : rift_pal.rule);
+    display.setColor(tr.active ? rift_pal.accent_txt : rift_pal.mid);
+    display.drawTextRightAlign(316, 143, tmp);
 
+    char up[16];
+    riftFormatDuration((uint32_t) (millis() / 1000u), up, sizeof(up));
+    uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+    if (now < 1600000000u) {
+      snprintf(row, sizeof(row), "--:-- %s clock not set %s UP %s", RIFT_DOT, RIFT_DOT, up);
+    } else {
+      int cy, cmo, cd, ch, cmi;
+      riftCivilFromEpoch(riftLocal(now), &cy, &cmo, &cd, &ch, &cmi);
+      char zone[12];
+      riftTzShort(rift_tz_quarters, zone, sizeof(zone));
+      snprintf(row, sizeof(row), "%02d:%02d %s %s %04d-%02d-%02d %s UP %s",
+               ch, cmi, zone, RIFT_DOT, cy, cmo, cd, RIFT_DOT, up);
+    }
     display.setColor(rift_pal.mid);
-    sprintf(tmp, "%.3fMHz SF%d %ddBm", _node_prefs->freq, _node_prefs->sf, _node_prefs->tx_power_dbm);
-    display.drawTextLeftAlign(2, 148, tmp);
-
-    // Tropo on its own row, with a triangle in front: filled in the accent while
-    // an opening runs, in rule otherwise, so the state can be read from across
-    // the room before the words can. It used to replace the radio line while an
-    // opening ran, and a row that changes meaning is a mode the user has to
-    // discover. After an opening the row keeps saying when the last one was and
-    // how deep it went; the detail is on SYSTEM.
-    {
-      RiftTropo& tr = riftTropoState();
-      // y 162: four rows tall in an eight-row line, so centred on it rather
-      // than sitting on the cap line. The triangle carries the state in the
-      // accent; the words take acc_tx, which is the accent at night and
-      // readable by day - the mark is the warning, the text says what it is.
-      riftDrawTriangle(display, 2, 162, 4, tr.active ? rift_pal.accent : rift_pal.rule);
-      if (tr.active) {
-        display.setColor(rift_pal.accent_txt);
-        sprintf(tmp, "TROPO OPEN %s peak %d hops", RIFT_DOT, (int) tr.peak_hops);
-      } else if (tr.openings == 0) {
-        display.setColor(rift_pal.mid);
-        strcpy(tmp, "TROPO none since boot");
-      } else {
-        char age[RIFT_AGE_BUF_LEN];
-        riftFormatAge((uint32_t) millis() - tr.last_open_ms, age, sizeof(age));
-        display.setColor(rift_pal.mid);
-        snprintf(tmp, sizeof(tmp), "TROPO last %s ago %s peak %d hops", age, RIFT_DOT, (int) tr.last_peak);
-      }
-      display.drawTextLeftAlign(12, 160, tmp);
+    display.drawTextLeftAlign(4, 155, row);
+    const char* note = "asks direct neighbours only";
+    if (_btn_sel == BTN_ADVERT_NEAR) note = "direct RF only - use MESH before a first DM";
+    if (_btn_sel == BTN_ADVERT_MESH) note = "reaches nodes past direct range - more airtime";
+    display.drawTextLeftAlign(4, 166, note);
+    for (int i = 0; i < BTN_COUNT; i++) {
+      const int x = 4 + 106 * i;
+      const bool sel = i == _btn_sel;
+      display.setColor(sel ? rift_pal.accent : rift_pal.rule);
+      if (sel) display.fillRect(x, DISCOVER_BTN_Y, 100, HOME_BTN_H);
+      else display.drawRect(x, DISCOVER_BTN_Y, 100, HOME_BTN_H);
+      display.setColor(sel ? rift_pal.on_accent : rift_pal.fg);
+      const char* top = i == BTN_DISCOVER ? (the_mesh.isDiscovering() ? "DISCOVERING" : "DISCOVER") : "ADVERT";
+      const char* scope = i == BTN_DISCOVER ? "0-HOP" : (i == BTN_ADVERT_NEAR ? "NEAR" : "MESH");
+      display.drawTextCentered(x + 50, DISCOVER_BTN_Y + 6, top);
+      display.drawTextCentered(x + 50, DISCOVER_BTN_Y + 19, scope);
+      _btn_x0[i] = x;
+      _btn_x1[i] = x + 100;
+      _btn_y[i] = DISCOVER_BTN_Y;
     }
-
-    // The one action on this screen, drawn as a button because it is one - an
-    // outlined box with the accent, rather than a line of hint text that happens to
-    // be pressable. Both ENTER and a tap on it start a round.
-    //
-    // Zero-hop is in the label on purpose. It asks direct neighbours only, and a
-    // name that implied it searched the mesh would be a promise it cannot keep.
-    //
-    // Both adverts moved here from the SYSTEM action list. They are the two
-    // things you do when a node cannot hear you, which is a question this screen
-    // already answers - it is the one showing how many nodes are stored and heard
-    // - and reaching them meant leaving it for a menu two pages deep.
-    //
-    // "0-HOP" and the near/mesh split stay in the labels. An advert to direct
-    // neighbours and an advert flooded through the mesh are different amounts of
-    // airtime and different promises, and a button that hid which one it sent
-    // would be the wrong kind of tidy.
-    {
-      const char* labels[BTN_COUNT];
-      labels[BTN_DISCOVER]    = the_mesh.isDiscovering() ? "DISCOVERING..." : "DISCOVER 0-HOP";
-      labels[BTN_ADVERT_NEAR] = "ADVERT NEAR";
-      labels[BTN_ADVERT_MESH] = "ADVERT MESH";
-
-      int w[BTN_COUNT], total = 0;
-      for (int i = 0; i < BTN_COUNT; i++) {
-        w[i] = (int) strlen(labels[i]) * RIFT_CHAR_W + 8;   // 4px each side, per 00-SYSTEM.md
-        total += w[i];
-      }
-      // From the left margin, like every other row on the screen, rather than
-      // centred: a row that starts where the text above it starts reads as part
-      // of the same column.
-      const int gap = 6;
-      int bx = 2;
-      (void) total;
-
-      // All of them now. There used to be a fourth, drawn on the clock row rather
-      // than in this loop, which is why the bound was written the long way.
-      for (int i = 0; i < BTN_COUNT; i++) {
-        bool sel = (i == _btn_sel);
-        bool busy = (i == BTN_DISCOVER && the_mesh.isDiscovering());
-        // The selected button is filled rather than only outlined: in sunlight the
-        // difference between two accent outlines disappears, and which one Enter
-        // will press has to survive that.
-        // The accent fills the selected button and no longer outlines the other
-        // two. It used to outline all three, so it framed everything and filled
-        // one, and the fill was carrying the whole of "this is the one Enter will
-        // press" while the accent said "these are buttons" three times. rule draws
-        // a button; the accent says which.
-        if (sel) {
-          display.setColor(rift_pal.accent);
-          display.fillRect(bx, DISCOVER_BTN_Y, w[i], 14);
-        } else {
-          display.setColor(rift_pal.rule);
-          display.drawRect(bx, DISCOVER_BTN_Y, w[i], 14);
-        }
-        // acc_tx for the busy label: the accent at night, readable by day
-        display.setColor(sel ? rift_pal.on_accent : (busy ? rift_pal.accent_txt : rift_pal.fg));
-        display.drawTextCentered(bx + w[i] / 2, DISCOVER_BTN_Y + 3, labels[i]);
-        _btn_x0[i] = bx;
-        _btn_x1[i] = bx + w[i];
-        _btn_y[i]  = DISCOVER_BTN_Y;
-        bx += w[i] + gap;
-      }
-
-      // One line for the selected button, carrying the warning the SYSTEM list
-      // used to attach to these actions. Moving them here would otherwise have
-      // quietly dropped the only place that said a neighbours-only advert is not
-      // enough before a first direct message.
-      const char* note = NULL;
-      switch (_btn_sel) {
-        case BTN_ADVERT_NEAR: note = "direct RF only - use MESH before a first DM"; break;
-        case BTN_ADVERT_MESH: note = "reaches nodes past direct range - more airtime"; break;
-        default:              note = "asks direct neighbours only"; break;
-      }
-      display.setColor(rift_pal.mid);
-      display.drawTextLeftAlign(2, DISCOVER_BTN_Y + 20, note);
-
-      // ---- the clock row, y 210-224
-      //
-      // In the band rift-home-spec.md kept empty below the note. All three readings
-      // were on SYSTEM, one level down, and all three are things you want at a
-      // glance rather than by navigating: what time this node thinks it is, what day
-      // it thinks it is, and how long it has been up. Uptime especially - it is the
-      // one reading that is true whatever the clock says, and it is what tells you
-      // the device has rebooted since you last looked.
-      //
-      // Labelled UTC, and that label is load-bearing. The clock is set from mesh
-      // consensus and the mesh keeps UTC, while this firmware establishes no
-      // timezone at all - so a reading shown as local time would be a guess dressed
-      // up as a measurement. Two hours off in Norwegian summer reads as a broken
-      // clock; "18:31 UTC" reads as the truth it is.
-      {
-        char up[16];
-        riftFormatDuration((uint32_t) (millis() / 1000u), up, sizeof(up));
-        uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
-        char row[64];
-        if (now < 1600000000u) {
-          // The same threshold the set-time field uses to decide whether to prefill.
-          // An unset epoch renders as a perfectly plausible 01:37, which is a reading
-          // somebody would act on.
-          snprintf(row, sizeof(row), "--:-- %s clock not set %s UP %s", RIFT_DOT, RIFT_DOT, up);
-        } else {
-          int cy, cmo, cd, ch, cmi;
-          riftCivilFromEpoch(riftLocal(now), &cy, &cmo, &cd, &ch, &cmi);
-          // The zone is named on the row, not assumed. "20:47" alone is a number
-          // somebody has to already know the meaning of; "20:47 +02:00" is a reading.
-          char zone[12];
-          riftTzShort(rift_tz_quarters, zone, sizeof(zone));
-          snprintf(row, sizeof(row), "%02d:%02d %s %s %04d-%02d-%02d %s UP %s",
-                   ch, cmi, zone, RIFT_DOT, cy, cmo, cd, RIFT_DOT, up);
-        }
-        // The row is a reading now, with no control on it. SET used to sit at the
-        // right end and open the SYSTEM field; the row it was next to is the one
-        // place the clock is shown, which is why it was put there, but SYSTEM's own
-        // "Set time" row does the same job and is where every other setting is. The
-        // right end of this row is left empty rather than filled with something
-        // else.
-        display.setColor(rift_pal.mid);
-        display.drawTextLeftAlign(2, CLOCK_ROW_Y + 3, row);
-      }
-    }
-
-    renderNavBar(display, RIFT_NAV_MESH);
-    // while a round is open the button label and the result count both move, so
-    // refresh faster; otherwise the strip changes once a minute and the ages once
-    // a second
+    renderNavBar(display, RIFT_NAV_MESH, true);
     return the_mesh.isDiscovering() ? 300 : 1000;
   }
 
-  // Up from 198: the fourteen pixels above the nav bar are empty now, and the
-  // bottom third of the screen has air again (September design round, 8.2).
-  static const int DISCOVER_BTN_Y = 180;
-  // Below the note row (200, eight pixels tall) and above the nav rule at 226.
-  static const int CLOCK_ROW_Y = 210;
+  static const int DISCOVER_BTN_Y = 176;
+  static const int HOME_BTN_H = 34;
 
   // Left and right already move between screens, so the row of buttons is walked
   // with up and down. They did nothing here before.
@@ -1732,10 +1425,8 @@ public:
   bool handleTouch(int x, int y) override {
     for (int i = 0; i < BTN_COUNT; i++) {
       if (_btn_x0[i] <= 0) continue;                     // not drawn yet
-      // Per button, because SET sits on the clock row: one band for all of them
-      // would either make it untappable or make the strip above it tappable.
-      if (y < _btn_y[i] - 2 || y > _btn_y[i] + 14) continue;
-      if (x < _btn_x0[i] || x > _btn_x1[i]) continue;
+      if (y < _btn_y[i] || y >= _btn_y[i] + HOME_BTN_H) continue;
+      if (x < _btn_x0[i] || x >= _btn_x1[i]) continue;
       _btn_sel = i;      // a tap also moves the selection, so Enter repeats it
       press(i);
       return true;
@@ -9368,7 +9059,10 @@ void UITask::loop() {
       _touch_x = tx;   // kept for the SYSTEM readout while calibrating
       _touch_y = ty;
 
-      if (ty >= _display->height() - 16) {
+      // Popups retain their existing content hit regions; only the unobscured
+      // home screen uses the enlarged navigation band.
+      const bool home_nav = curr == nav_screens[RIFT_NAV_MESH] && _overlay == NULL;
+      if (ty >= (home_nav ? HOME_NAV_Y : _display->height() - 16)) {
         // nav bar: jump straight to the tapped screen
         int col = (tx * RIFT_NAV_COUNT) / _display->width();
         if (col >= 0 && col < RIFT_NAV_COUNT) {
