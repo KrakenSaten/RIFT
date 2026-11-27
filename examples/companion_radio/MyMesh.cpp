@@ -440,7 +440,13 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
   uint8_t header = (len > 0) ? raw[0] : 0;
   int pl_idx = riftRawPathLenIndex(header);
   uint8_t path_len = (len > pl_idx) ? raw[pl_idx] : 0;
-  riftRxLog().add(snr, rssi, header, path_len, len);
+  static_assert(MAX_PATH_SIZE == 64 && MAX_PACKET_PAYLOAD == 184 && MAX_TRANS_UNIT == 255,
+                "Update activity framing checks for changed MeshCore limits");
+  static_assert(PUB_KEY_SIZE == 32 && SIGNATURE_SIZE == 64 && CIPHER_MAC_SIZE == 2 && CIPHER_BLOCK_SIZE == 16,
+                "Update activity envelope checks for changed MeshCore sizes");
+  // Observational only: invalid/unsupported envelopes count as UNKNOWN, but the
+  // original bytes still follow exactly the same MeshCore receive/decode path.
+  riftRxLog().add(snr, rssi, header, path_len, len, riftActivityRawClass(raw, len));
 
   // A group packet's first payload byte is the channel hash, sent in clear so
   // receivers can pick which keys to try. The payload starts after the path,

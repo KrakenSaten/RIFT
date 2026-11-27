@@ -543,7 +543,7 @@ static inline uint8_t riftHeaderPayloadType(uint8_t header) { return (header >> 
 
 // ------------------------------------------------ the twenty-minute activity strip
 //
-// Twenty minutes of receive counts, in three classes, kept as counters rather than
+// Twenty minutes of receive counts, by declared header type, kept as counters rather than
 // recovered from the air log.
 //
 // It used to be derived: the home screen walked RiftRxLog every frame and bucketed
@@ -554,13 +554,15 @@ static inline uint8_t riftHeaderPayloadType(uint8_t header) { return (header >> 
 // time and shrink, which looks exactly like the mesh having gone quiet in the past.
 // A history that rewrites itself is worse than a shorter one.
 //
-// 120 bytes of counters, and they cannot be evicted by anything.
+// 560 bytes of counters, independent of the air-log ring. These describe header
+// types, not authenticated contents or successfully decrypted conversations.
 #define RIFT_ACT_MINUTES  20
-#define RIFT_ACT_CLASSES  3
-#define RIFT_ACT_TALK     0
-#define RIFT_ACT_ADVERT   1
-#define RIFT_ACT_DRIFT    2
-#define RIFT_ACT_LEVELS   5
+enum RiftActivityClass {
+  RIFT_ACT_ADVERT, RIFT_ACT_CHANNEL, RIFT_ACT_TXT, RIFT_ACT_REQUEST,
+  RIFT_ACT_RESPONSE, RIFT_ACT_TRACE, RIFT_ACT_PATH, RIFT_ACT_ANON_REQ,
+  RIFT_ACT_GROUP_DATA, RIFT_ACT_MULTIPART, RIFT_ACT_CONTROL, RIFT_ACT_RAW_CUSTOM,
+  RIFT_ACT_ACK, RIFT_ACT_UNKNOWN, RIFT_ACT_CLASSES
+};
 
 struct RiftActivity {
   uint16_t bins[RIFT_ACT_MINUTES][RIFT_ACT_CLASSES];
@@ -568,13 +570,71 @@ struct RiftActivity {
   bool     started;
 };
 
-// Somebody spoke, somebody announced themselves, or the mesh kept itself running.
-// Three rather than the air log's eight, because the strip is 8 pixels tall with no
-// word beside it - the log one screen down is where the detail is.
+// Packet.h's four-bit type field. TXT includes CLI data: it is not a promise of
+// human text. Reserved codes and out-of-range values must never become messages.
 static inline int riftActivityClass(uint8_t payload_type) {
-  if (payload_type == 0x02 || payload_type == 0x05 || payload_type == 0x06) return RIFT_ACT_TALK;
-  if (payload_type == 0x04) return RIFT_ACT_ADVERT;
-  return RIFT_ACT_DRIFT;
+  static const uint8_t classes[16] = {
+    RIFT_ACT_REQUEST, RIFT_ACT_RESPONSE, RIFT_ACT_TXT, RIFT_ACT_ACK,
+    RIFT_ACT_ADVERT, RIFT_ACT_CHANNEL, RIFT_ACT_GROUP_DATA, RIFT_ACT_ANON_REQ,
+    RIFT_ACT_PATH, RIFT_ACT_TRACE, RIFT_ACT_MULTIPART, RIFT_ACT_CONTROL,
+    RIFT_ACT_UNKNOWN, RIFT_ACT_UNKNOWN, RIFT_ACT_UNKNOWN, RIFT_ACT_RAW_CUSTOM
+  };
+  if (payload_type >= 16) return RIFT_ACT_UNKNOWN;
+  return classes[payload_type];
+}
+
+// Read-only instrumentation at logRxRaw(), before MeshCore's parser. Check the
+// outer framing and public envelope lengths without reading encrypted contents.
+// MeshCore remains solely responsible for parsing, signatures, MACs and routing.
+// Constants mirror Packet/Utils; the firmware asserts them against MeshCore.h.
+static inline int riftActivityRawClass(const uint8_t* raw, int len) {
+  if (raw == NULL || len < 2 || len > 255 || (raw[0] >> 6) != 0) return RIFT_ACT_UNKNOWN;
+  const int route = raw[0] & 3;
+  const int pi = (route == 0 || route == 3) ? 5 : 1;
+  if (len <= pi) return RIFT_ACT_UNKNOWN;
+  const uint8_t path = raw[pi];
+  const int mode = path >> 6;
+  const int path_bytes = (path & 63) * (mode + 1);
+  const int offset = pi + 1 + path_bytes;
+  if (mode == 3 || path_bytes > 64 || offset > len) return RIFT_ACT_UNKNOWN;
+  const int payload = len - offset;
+  if (payload > 184) return RIFT_ACT_UNKNOWN;
+  const int k = riftActivityClass(riftHeaderPayloadType(raw[0]));
+  int envelope = 0;
+  switch (k) {
+    case RIFT_ACT_REQUEST: case RIFT_ACT_RESPONSE: case RIFT_ACT_TXT: case RIFT_ACT_PATH:
+      envelope = 4; break;  // two hashes + two-byte MAC
+    case RIFT_ACT_CHANNEL: case RIFT_ACT_GROUP_DATA:
+      envelope = 3; break;  // channel hash + MAC
+    case RIFT_ACT_ANON_REQ:
+      envelope = 35; break; // destination hash + public key + MAC
+    case RIFT_ACT_ADVERT: if (payload < 100) return RIFT_ACT_UNKNOWN; break;
+    case RIFT_ACT_ACK: if (payload < 4) return RIFT_ACT_UNKNOWN; break;
+    case RIFT_ACT_TRACE: if (payload < 9) return RIFT_ACT_UNKNOWN; break;
+    case RIFT_ACT_MULTIPART: case RIFT_ACT_CONTROL:
+      if (payload < 1) return RIFT_ACT_UNKNOWN;
+      break;
+    default: break; // RAW_CUSTOM makes no claim about its application format
+  }
+  if (envelope && (payload < envelope + 16 || (payload - envelope) % 16 != 0)) {
+    return RIFT_ACT_UNKNOWN; // absent/truncated AES block, not a valid message envelope
+  }
+  return k;
+}
+
+// Agreed graph colors, in RGB565; independent of the air-log screen's palette.
+// Day mode darkens the same hues and uses black for UNKNOWN so it stays visible.
+static inline uint16_t riftActivityColour(int k, bool day = false) {
+  static const uint16_t colors[RIFT_ACT_CLASSES] = {
+    0x3E40, 0x039C, 0xFA00, 0x9334, 0x069B, 0xFC36, 0x0592,
+    0xF986, 0xB1BC, 0x0B4C, 0xBB00, 0xD814, 0x9CD3, 0xFFFF
+  };
+  if (k < 0 || k >= RIFT_ACT_CLASSES) k = RIFT_ACT_UNKNOWN;
+  uint16_t c = colors[k];
+  if (!day) return c;
+  if (k == RIFT_ACT_UNKNOWN) return 0;
+  return (uint16_t) (((((c >> 11) & 31) * 3 / 4) << 11)
+      | ((((c >> 5) & 63) * 3 / 4) << 5) | ((c & 31) * 3 / 4));
 }
 
 // Advance to the current minute, clearing whatever it passed over.
@@ -609,11 +669,11 @@ static inline void riftActivityRoll(RiftActivity* a, uint32_t now_ms) {
   a->last_min = m;
 }
 
-static inline void riftActivityNote(RiftActivity* a, uint32_t now_ms, uint8_t payload_type) {
+static inline void riftActivityNote(RiftActivity* a, uint32_t now_ms, int packet_class) {
   if (a == NULL) return;
   riftActivityRoll(a, now_ms);
   uint16_t* bin = a->bins[a->last_min % RIFT_ACT_MINUTES];
-  int k = riftActivityClass(payload_type);
+  int k = packet_class >= 0 && packet_class < RIFT_ACT_CLASSES ? packet_class : RIFT_ACT_UNKNOWN;
   if (bin[k] < 0xFFFF) bin[k]++;   // saturate rather than wrap to nothing
 }
 
@@ -638,30 +698,54 @@ static inline const uint16_t* riftActivityAt(const RiftActivity* a, int pos) {
   return a->bins[m % RIFT_ACT_MINUTES];
 }
 
-// Bar height for a minute's packet count, on a fixed ladder.
-//
-// Fixed is the entire point. The previous version scaled every bar to the busiest
-// minute in the window, so one busy minute redrew the whole graph: at a peak of 2/min
-// a one-packet minute stood 8px, and the moment a 3-packet minute arrived that same
-// minute redrew at 6px with nothing about it having changed. Watching the screen, the
-// past moved - which is the one thing a history must not do. It moved the other way
-// too, every time a busy minute aged out of the window and the peak fell.
-//
-// Doubling steps rather than linear, because that is how traffic actually falls: a
-// mesh idles at one or two packets a minute and bursts to dozens, and a linear scale
-// wide enough for the burst leaves idle indistinguishable from silence. Five levels,
-// so nothing ever clips - 16+ is simply the top step - and the exact figure for the
-// busiest minute is printed in the label beside the strip.
-//
-//   count   1   2-3   4-7   8-15   16+
-//   px      3    6     10    13     16      (at band 16)
-static inline int riftActivityHeight(uint32_t count, int band) {
-  if (count == 0 || band <= 0) return 0;
-  int level = 1;
-  while (level < RIFT_ACT_LEVELS && count >= (uint32_t) (1u << level)) level++;
-  int h = (level * band + RIFT_ACT_LEVELS / 2) / RIFT_ACT_LEVELS;
-  if (h < 1) h = 1;
-  if (h > band) h = band;
+// Shared linear scale, in packets/minute. Powers of two above eight keep axis
+// labels simple; all minute counts contribute, including UNKNOWN. Small category
+// segments can quantize away when more categories are present than vertical pixels.
+static inline uint32_t riftActivityTotal(const uint16_t* counts) {
+  uint32_t total = 0;
+  if (counts != NULL) for (int k = 0; k < RIFT_ACT_CLASSES; k++) total += counts[k];
+  return total;
+}
+
+static inline uint32_t riftActivityScale(uint32_t peak) {
+  uint32_t scale = 8;
+  while (scale < peak && scale <= UINT32_MAX / 2) scale *= 2;
+  return scale < peak ? peak : scale;
+}
+
+// Integer largest-remainder allocation conserves the total bar height. Where
+// space permits, a present category gets one pixel by taking it from a segment
+// with spare pixels. Empty categories never acquire pixels through rounding.
+static inline int riftActivityStack(const uint16_t* counts, uint32_t scale,
+                                    int height, uint8_t* px) {
+  if (px == NULL) return 0;
+  memset(px, 0, RIFT_ACT_CLASSES);
+  const uint32_t total = riftActivityTotal(counts);
+  if (total == 0 || scale == 0 || height <= 0 || height > 255) return 0;
+  int h = total >= scale ? height : (int) ((total * height + scale - 1) / scale);
+  uint32_t remainder[RIFT_ACT_CLASSES];
+  int given = 0;
+  for (int k = 0; k < RIFT_ACT_CLASSES; k++) {
+    const uint32_t share = (uint32_t) counts[k] * h;
+    px[k] = share / total;
+    remainder[k] = share % total;
+    given += px[k];
+  }
+  while (given < h) {
+    int best = -1;
+    for (int k = 0; k < RIFT_ACT_CLASSES; k++) {
+      if (counts[k] && (best < 0 || remainder[k] > remainder[best])) best = k;
+    }
+    px[best]++;
+    remainder[best] = 0;
+    given++;
+  }
+  for (int k = 0; k < RIFT_ACT_CLASSES; k++) {
+    if (!counts[k] || px[k]) continue;
+    int largest = 0;
+    for (int j = 1; j < RIFT_ACT_CLASSES; j++) if (px[j] > px[largest]) largest = j;
+    if (px[largest] > 1) { px[largest]--; px[k] = 1; }
+  }
   return h;
 }
 static inline uint8_t riftHeaderRouteType(uint8_t header)   { return header & 0x03; }

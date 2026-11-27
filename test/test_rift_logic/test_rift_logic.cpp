@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <vector>
+#include <Packet.h>
 
 // Included by relative path on purpose: this keeps the native test environments
 // exactly as upstream has them. The header is standalone - stdint and string.h
@@ -1158,11 +1159,11 @@ TEST(ActivityStrip, OnePacketIsOneBarInTheFirstMinutesAfterBoot) {
     // The symptom itself, at the boot-time minute numbers that produced it.
     for (uint32_t m = 0; m < 24; m++) {
         RiftActivity a; memset(&a, 0, sizeof(a));
-        riftActivityNote(&a, minute(m), 0x03);
+        riftActivityNote(&a, minute(m), RIFT_ACT_ACK);
         int bars = 0;
         for (int pos = 0; pos < RIFT_ACT_MINUTES; pos++) {
             const uint16_t* bin = riftActivityAt(&a, pos);
-            if (bin[RIFT_ACT_TALK] + bin[RIFT_ACT_ADVERT] + bin[RIFT_ACT_DRIFT] > 0) bars++;
+            if (riftActivityTotal(bin) > 0) bars++;
         }
         EXPECT_EQ(1, bars) << "one packet at minute " << m;
     }
@@ -1170,19 +1171,19 @@ TEST(ActivityStrip, OnePacketIsOneBarInTheFirstMinutesAfterBoot) {
 
 TEST(ActivityStrip, CountsLandInTheMinuteInProgress) {
     RiftActivity a; memset(&a, 0, sizeof(a));
-    riftActivityNote(&a, minute(100), 0x04);   // advert
-    riftActivityNote(&a, minute(100), 0x02);   // text
-    riftActivityNote(&a, minute(100), 0x03);   // ack -> drift
+    riftActivityNote(&a, minute(100), RIFT_ACT_ADVERT);   // advert
+    riftActivityNote(&a, minute(100), RIFT_ACT_TXT);   // text
+    riftActivityNote(&a, minute(100), RIFT_ACT_ACK);   // ack
     const uint16_t* now = riftActivityAt(&a, RIFT_ACT_MINUTES - 1);
     ASSERT_NE((const uint16_t*) NULL, now);
-    EXPECT_EQ(1, now[RIFT_ACT_TALK]);
+    EXPECT_EQ(1, now[RIFT_ACT_TXT]);
     EXPECT_EQ(1, now[RIFT_ACT_ADVERT]);
-    EXPECT_EQ(1, now[RIFT_ACT_DRIFT]);
+    EXPECT_EQ(1, now[RIFT_ACT_ACK]);
 }
 
 TEST(ActivityStrip, AMinuteMovesLeftAsTimePasses) {
     RiftActivity a; memset(&a, 0, sizeof(a));
-    riftActivityNote(&a, minute(100), 0x04);
+    riftActivityNote(&a, minute(100), RIFT_ACT_ADVERT);
     riftActivityRoll(&a, minute(105));
     // five minutes on, that minute is five places left of the newest
     EXPECT_EQ(1, riftActivityAt(&a, RIFT_ACT_MINUTES - 1 - 5)[RIFT_ACT_ADVERT]);
@@ -1194,7 +1195,7 @@ TEST(ActivityStrip, AStaleBinIsClearedRatherThanReappearing) {
     // that advert is the minute in progress again - and if the roll did not clear
     // it, an hour-old burst would be drawn as if it were happening now.
     RiftActivity a; memset(&a, 0, sizeof(a));
-    riftActivityNote(&a, minute(100), 0x04);
+    riftActivityNote(&a, minute(100), RIFT_ACT_ADVERT);
     riftActivityRoll(&a, minute(100 + RIFT_ACT_MINUTES));
     for (int pos = 0; pos < RIFT_ACT_MINUTES; pos++) {
         const uint16_t* bin = riftActivityAt(&a, pos);
@@ -1207,7 +1208,7 @@ TEST(ActivityStrip, EveryGapLengthClearsExactlyWhatItPassedOver) {
     // survives must be exactly the minutes the gap did not cover.
     for (uint32_t gap = 1; gap <= RIFT_ACT_MINUTES + 3; gap++) {
         RiftActivity a; memset(&a, 0, sizeof(a));
-        for (uint32_t m = 0; m < RIFT_ACT_MINUTES; m++) riftActivityNote(&a, minute(100 + m), 0x04);
+        for (uint32_t m = 0; m < RIFT_ACT_MINUTES; m++) riftActivityNote(&a, minute(100 + m), RIFT_ACT_ADVERT);
         riftActivityRoll(&a, minute(100 + RIFT_ACT_MINUTES - 1 + gap));
         int survivors = 0;
         for (int pos = 0; pos < RIFT_ACT_MINUTES; pos++) survivors += riftActivityAt(&a, pos)[RIFT_ACT_ADVERT];
@@ -1222,60 +1223,163 @@ TEST(ActivityStrip, TheMillisWrapLosesHistoryRatherThanMisplacingIt) {
     // clear-everything branch - which is the right way to be wrong: twenty minutes
     // are lost once every seven weeks, and nothing is ever drawn in the wrong bin.
     RiftActivity a; memset(&a, 0, sizeof(a));
-    riftActivityNote(&a, 0xFFFFFF00u, 0x04);
+    riftActivityNote(&a, 0xFFFFFF00u, RIFT_ACT_ADVERT);
     riftActivityRoll(&a, 1000u);   // millis() has wrapped
     for (int pos = 0; pos < RIFT_ACT_MINUTES; pos++) {
         EXPECT_EQ(0, riftActivityAt(&a, pos)[RIFT_ACT_ADVERT]) << "pos " << pos;
     }
 }
 
-TEST(ActivityStrip, ClassesFollowTheAirLogsMainTypes) {
-    EXPECT_EQ(RIFT_ACT_TALK,   riftActivityClass(0x02));   // TXT
-    EXPECT_EQ(RIFT_ACT_TALK,   riftActivityClass(0x05));   // GRP TXT
-    EXPECT_EQ(RIFT_ACT_TALK,   riftActivityClass(0x06));   // GRP DAT
-    EXPECT_EQ(RIFT_ACT_ADVERT, riftActivityClass(0x04));
-    EXPECT_EQ(RIFT_ACT_DRIFT,  riftActivityClass(0x03));   // ACK
-    EXPECT_EQ(RIFT_ACT_DRIFT,  riftActivityClass(0x08));   // PATH
-    EXPECT_EQ(RIFT_ACT_DRIFT,  riftActivityClass(0x0B));   // CONTROL
+TEST(ActivityStrip, EachMeshCoreHeaderTypeHasItsOwnCounter) {
+    const uint8_t types[] = { PAYLOAD_TYPE_ADVERT, PAYLOAD_TYPE_GRP_TXT, PAYLOAD_TYPE_TXT_MSG,
+        PAYLOAD_TYPE_REQ, PAYLOAD_TYPE_RESPONSE, PAYLOAD_TYPE_TRACE, PAYLOAD_TYPE_PATH,
+        PAYLOAD_TYPE_ANON_REQ, PAYLOAD_TYPE_GRP_DATA, PAYLOAD_TYPE_MULTIPART,
+        PAYLOAD_TYPE_CONTROL, PAYLOAD_TYPE_RAW_CUSTOM, PAYLOAD_TYPE_ACK };
+    RiftActivity a = {};
+    for (int k = 0; k < RIFT_ACT_UNKNOWN; k++) {
+        ASSERT_EQ(k, riftActivityClass(types[k]));
+        for (int n = 0; n <= k; n++) riftActivityNote(&a, minute(100), riftActivityClass(types[k]));
+    }
+    for (uint8_t t : {0x0C, 0x0D, 0x0E, 0x10, 0xFF}) {
+        ASSERT_EQ(RIFT_ACT_UNKNOWN, riftActivityClass(t));
+        riftActivityNote(&a, minute(100), riftActivityClass(t));
+    }
+    const auto* bin = riftActivityAt(&a, 19);
+    for (int k = 0; k < RIFT_ACT_UNKNOWN; k++) EXPECT_EQ(k + 1, bin[k]);
+    EXPECT_EQ(5, bin[RIFT_ACT_UNKNOWN]);
 }
 
-TEST(ActivityHeight, IsFixedSoABarMovesOnlyWhenItsOwnMinuteDoes) {
-    // The regression this replaces, stated as a test: under the old peak-relative
-    // scaling a one-packet minute stood 8px at a peak of 2 and 6px at a peak of 3,
-    // having not changed. Here its height is a function of its own count alone.
-    EXPECT_EQ(riftActivityHeight(1, 16), riftActivityHeight(1, 16));
-    EXPECT_EQ(3,  riftActivityHeight(1, 16));
-    EXPECT_EQ(6,  riftActivityHeight(2, 16));
-    EXPECT_EQ(6,  riftActivityHeight(3, 16));
-    EXPECT_EQ(10, riftActivityHeight(4, 16));
-    EXPECT_EQ(10, riftActivityHeight(7, 16));
-    EXPECT_EQ(13, riftActivityHeight(8, 16));
-    EXPECT_EQ(13, riftActivityHeight(15, 16));
-    EXPECT_EQ(16, riftActivityHeight(16, 16));
+static std::vector<uint8_t> activityFrame(uint8_t type, int route, int payload, uint8_t path = 0) {
+    int pi = route == 0 || route == 3 ? 5 : 1;
+    int path_bytes = (path & 63) * ((path >> 6) + 1);
+    std::vector<uint8_t> raw(pi + 1 + path_bytes + payload, 0);
+    raw[0] = (type << PH_TYPE_SHIFT) | route;
+    raw[pi] = path;
+    return raw;
 }
 
-TEST(ActivityHeight, NeverClipsAndNeverVanishes) {
-    // Nothing heard draws nothing; anything heard draws at least a pixel; and no
-    // count, however large, exceeds the band - so there is no burst that overflows
-    // the strip and none that is rounded away to silence.
-    EXPECT_EQ(0, riftActivityHeight(0, 16));
-    uint32_t counts[] = { 1, 2, 17, 100, 1000, 65535 };
-    for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
-        for (int band = 1; band <= 32; band++) {
-            int h = riftActivityHeight(counts[i], band);
-            EXPECT_GE(h, 1) << counts[i] << " at band " << band;
-            EXPECT_LE(h, band) << counts[i] << " at band " << band;
+TEST(ActivityClassification, RecognizesAllTypesAndTransportAndPathSizesWithoutMutation) {
+    const int lengths[16] = {20, 20, 20, 4, 100, 19, 19, 51, 20, 9, 1, 1, 1, 1, 1, 0};
+    for (int type = 0; type < 16; type++) {
+        for (int route = 0; route < 4; route++) {
+            for (int mode = 0; mode < 3; mode++) {
+                auto raw = activityFrame(type, route, lengths[type], (mode << 6) | 3);
+                const auto original = raw;
+                EXPECT_EQ(riftActivityClass(type), riftActivityRawClass(raw.data(), raw.size()))
+                    << "type " << type << " route " << route << " mode " << mode;
+                EXPECT_EQ(original, raw); // classification cannot alter packet processing
+            }
         }
     }
 }
 
-TEST(ActivityHeight, NeverShrinksAsTheCountGrows) {
-    int prev = 0;
-    for (uint32_t c = 0; c <= 300; c++) {
-        int h = riftActivityHeight(c, 16);
-        EXPECT_GE(h, prev) << "at " << c;
-        prev = h;
+TEST(ActivityClassification, RejectsTruncatedAndUnsupportedOuterFrames) {
+    EXPECT_EQ(RIFT_ACT_UNKNOWN, riftActivityRawClass(nullptr, 20));
+    for (int route = 0; route < 4; route++) {
+        auto raw = activityFrame(PAYLOAD_TYPE_TXT_MSG, route, 20);
+        int pi = route == 0 || route == 3 ? 5 : 1;
+        for (int n = 0; n <= pi; n++) EXPECT_EQ(RIFT_ACT_UNKNOWN, riftActivityRawClass(raw.data(), n));
+        for (int version = 1; version < 4; version++) {
+            raw[0] = (version << PH_VER_SHIFT) | (PAYLOAD_TYPE_TXT_MSG << PH_TYPE_SHIFT) | route;
+            EXPECT_EQ(RIFT_ACT_UNKNOWN, riftActivityRawClass(raw.data(), raw.size()));
+        }
     }
+    for (uint8_t path : {0xC0, 0xBF}) {
+        auto raw = activityFrame(PAYLOAD_TYPE_TXT_MSG, 1, 20, path);
+        EXPECT_EQ(RIFT_ACT_UNKNOWN, riftActivityRawClass(raw.data(), raw.size()));
+    }
+    auto short_path = activityFrame(PAYLOAD_TYPE_TXT_MSG, 1, 20);
+    short_path[1] = 63;
+    EXPECT_EQ(RIFT_ACT_UNKNOWN, riftActivityRawClass(short_path.data(), short_path.size()));
+    auto oversized = activityFrame(PAYLOAD_TYPE_RAW_CUSTOM, 1, MAX_PACKET_PAYLOAD + 1);
+    EXPECT_EQ(RIFT_ACT_UNKNOWN, riftActivityRawClass(oversized.data(), oversized.size()));
+    oversized.resize(256);
+    EXPECT_EQ(RIFT_ACT_UNKNOWN, riftActivityRawClass(oversized.data(), oversized.size()));
+}
+
+TEST(ActivityClassification, ChecksPublicEnvelopeLengthsButDoesNotClaimAuthentication) {
+    const int min_lengths[] = {20, 20, 20, 4, 100, 19, 19, 51, 20, 9, 1, 1};
+    for (int type = 0; type < 12; type++) {
+        for (int n = 0; n < min_lengths[type]; n++) {
+            auto raw = activityFrame(type, 1, n);
+            EXPECT_EQ(RIFT_ACT_UNKNOWN, riftActivityRawClass(raw.data(), raw.size())) << type << " len " << n;
+        }
+    }
+    for (int type : {0, 1, 2, 5, 6, 7, 8}) {
+        auto raw = activityFrame(type, 2, min_lengths[type] + 1);
+        EXPECT_EQ(RIFT_ACT_UNKNOWN, riftActivityRawClass(raw.data(), raw.size()));
+    }
+    // Correct length, zero MAC/signature: header-declared envelopes, not verified content.
+    auto txt = activityFrame(PAYLOAD_TYPE_TXT_MSG, 1, 20);
+    EXPECT_EQ(RIFT_ACT_TXT, riftActivityRawClass(txt.data(), txt.size()));
+    auto adv = activityFrame(PAYLOAD_TYPE_ADVERT, 1, 100);
+    EXPECT_EQ(RIFT_ACT_ADVERT, riftActivityRawClass(adv.data(), adv.size()));
+}
+
+TEST(ActivityClassification, EveryRawHeaderAndBufferLengthIsSafe) {
+    for (int len = 0; len <= MAX_TRANS_UNIT; len++) {
+        for (int header = 0; header < 256; header++) {
+            std::vector<uint8_t> raw(len, 0xA5);
+            if (len) raw[0] = header;
+            const int k = riftActivityRawClass(raw.data(), len);
+            EXPECT_GE(k, 0);
+            EXPECT_LT(k, RIFT_ACT_CLASSES);
+            if (header >> PH_VER_SHIFT) EXPECT_EQ(RIFT_ACT_UNKNOWN, k);
+        }
+    }
+}
+
+TEST(ActivityStrip, CountersSaturateWithoutWrappingOrCorruptingAdjacentTypes) {
+    RiftActivity a = {};
+    for (int n = 0; n < 65540; n++) riftActivityNote(&a, minute(100), RIFT_ACT_TXT);
+    riftActivityNote(&a, minute(100), RIFT_ACT_CHANNEL);
+    riftActivityNote(&a, minute(100), -1);
+    const auto* bin = riftActivityAt(&a, 19);
+    EXPECT_EQ(65535, bin[RIFT_ACT_TXT]);
+    EXPECT_EQ(1, bin[RIFT_ACT_CHANNEL]);
+    EXPECT_EQ(1, bin[RIFT_ACT_UNKNOWN]);
+}
+
+TEST(ActivityStack, LinearCountsAndRoundingConserveTheBarAndDoNotInventCategories) {
+    for (int sample = 0; sample < 100; sample++) {
+        uint16_t counts[RIFT_ACT_CLASSES] = {};
+        for (int k = 0; k < RIFT_ACT_CLASSES; k++) counts[k] = (sample * (k + 3)) % 17;
+        uint32_t total = riftActivityTotal(counts);
+        uint32_t scale = riftActivityScale(total);
+        uint8_t px[RIFT_ACT_CLASSES];
+        int h = riftActivityStack(counts, scale, 24, px);
+        int sum = 0;
+        for (int k = 0; k < RIFT_ACT_CLASSES; k++) {
+            sum += px[k];
+            if (!counts[k]) EXPECT_EQ(0, px[k]);
+        }
+        EXPECT_EQ(h, sum);
+        EXPECT_LE(h, 24);
+        EXPECT_EQ(total ? (total * 24 + scale - 1) / scale : 0, (uint32_t)h);
+    }
+    uint16_t counts[RIFT_ACT_CLASSES] = {};
+    uint8_t px[RIFT_ACT_CLASSES];
+    counts[RIFT_ACT_UNKNOWN] = 1;
+    EXPECT_EQ(3, riftActivityStack(counts, 8, 24, px));
+    EXPECT_EQ(3, px[RIFT_ACT_UNKNOWN]);
+    counts[RIFT_ACT_ADVERT] = 4;
+    counts[RIFT_ACT_CHANNEL] = 3;
+    EXPECT_EQ(24, riftActivityStack(counts, 8, 24, px));
+    EXPECT_EQ(12, px[RIFT_ACT_ADVERT]);
+    EXPECT_EQ(9, px[RIFT_ACT_CHANNEL]);
+    EXPECT_EQ(3, px[RIFT_ACT_UNKNOWN]);
+}
+
+TEST(ActivityStack, AllPresentTypesRemainVisibleWhenThereAreEnoughPixels) {
+    uint16_t counts[RIFT_ACT_CLASSES];
+    for (auto& c : counts) c = 1;
+    uint8_t px[RIFT_ACT_CLASSES];
+    EXPECT_EQ(21, riftActivityStack(counts, 16, 24, px));
+    for (auto c : px) EXPECT_GT(c, 0);
+    for (auto& c : counts) c = UINT16_MAX;
+    EXPECT_EQ(917490u, riftActivityTotal(counts));
+    EXPECT_EQ(1048576u, riftActivityScale(riftActivityTotal(counts)));
+    EXPECT_LE(riftActivityStack(counts, 1048576, 24, px), 24);
 }
 
 TEST(ContactReserve, ChatStopsAtTheCapAndInfraDoesNot) {
