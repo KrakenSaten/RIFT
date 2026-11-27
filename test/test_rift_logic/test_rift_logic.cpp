@@ -2526,11 +2526,13 @@ TEST(Settings, EncodeAndDecodeRoundTrip) {
     for (int day = 0; day < 2; day++)
     for (int on = 0; on < 2; on++)
     for (int snd = 0; snd < 2; snd++)
+    for (int pop = 0; pop < 2; pop++)
     for (uint8_t src = 0; src <= 2; src++) {
         RiftSettings w;
         w.day_mode = day != 0;
         w.always_on = on != 0;
         w.sound_on = snd != 0;
+        w.popup_on = pop != 0;
         w.radar_src = src;
         w.migrated = false;
 
@@ -2540,7 +2542,27 @@ TEST(Settings, EncodeAndDecodeRoundTrip) {
         EXPECT_EQ(w.always_on, r.always_on);
         EXPECT_EQ(w.sound_on, r.sound_on);
         EXPECT_EQ(w.radar_src, r.radar_src);
+        EXPECT_EQ(w.popup_on, r.popup_on);
     }
+}
+
+// The message popup defaults to off, and every file written before it existed has
+// bit 5 clear - so those files read as off with no version bump and no migration.
+TEST(Settings, MessagePopupDefaultsOffForOlderFiles) {
+    const uint8_t v07_flags = 1 | 2 | (RIFT_SETTINGS_SRC_BLE << 2);
+    RiftSettings v1, v2;
+    ASSERT_TRUE(riftDecodeSettings(1, v07_flags, &v1));
+    ASSERT_TRUE(riftDecodeSettings(RIFT_SETTINGS_VERSION, 16, &v2));
+    EXPECT_FALSE(v1.popup_on);
+    EXPECT_FALSE(v2.popup_on);
+    EXPECT_FALSE(v2.migrated);
+}
+
+TEST(Settings, MessagePopupHonoursTheStoredChoice) {
+    RiftSettings on;
+    ASSERT_TRUE(riftDecodeSettings(RIFT_SETTINGS_VERSION, 32, &on));
+    EXPECT_TRUE(on.popup_on);
+    EXPECT_FALSE(on.sound_on);      // bit 5 does not leak into its neighbour
 }
 
 // ------------------------------------------- unread as the single source of truth
